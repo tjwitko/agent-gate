@@ -11,18 +11,22 @@ Claude / any MCP client
   │
   └─ MCP tool "delegate_to_local_model" ──► local-delegate-mcp (Node/stdio)
                                                   │
-                                                  └─ POST /v1/chat/completions
+                                                  └─ POST /v1/chat/completions {"model": <alias>}
                                                          │
                                                          ▼
-                                              llama-server (from local-copilot-stack)
+                                              llama-server, router mode (from local-copilot-stack)
                                                     http://localhost:8080
+                                                         │
+                                                         ├─ "delegate-fast" (Qwen2.5-Coder-7B — default)
+                                                         └─ "Qwen3.5-9B-UD-Q4_K_XL.gguf" (same model VS Code uses)
 ```
 
-This project is **only the delegation client** — it does not run or manage a
+This project is **only the delegation client** — it does not run or manage any
 model itself. It expects an OpenAI-compatible chat completions endpoint to
-already be reachable (by default `http://localhost:8080`, i.e. the
-`llama-server` instance already set up and kept running by the separate
-[`local-copilot-stack`](../local-copilot-stack) project). If that project
+already be reachable (by default `http://localhost:8080`), running in
+**router mode** with both aliases above registered — i.e. the `llama-server`
+instance already set up and kept running by the separate
+[`local-copilot-stack`](../local-copilot-stack) project. If that project
 isn't installed and running, this server's tool calls will fail with a clear
 "could not reach the local model" error rather than crashing.
 
@@ -35,11 +39,18 @@ isn't installed and running, this server's tool calls will fail with a clear
   has no memory of the calling conversation and cannot ask follow-up
   questions, so everything relevant has to be in this string.
 - `system_prompt` (optional): role/constraints/output-format guidance.
-- `max_tokens` (optional, default 2048): the local Qwen3.5 model "thinks"
-  before answering (a separate `reasoning_content` field, not returned by
-  this tool), which consumes part of the token budget before it reaches the
-  actual answer — keep this generous enough to cover reasoning + output, or
-  a low value can produce an empty result with `finish_reason: length`.
+- `max_tokens` (optional, default 2048).
+- `model` (optional, default `"fast"`): `"fast"` routes to the `delegate-fast`
+  alias (Qwen2.5-Coder-7B, no reasoning phase — reliably quick for bounded,
+  mechanical work); `"capable"` routes to the same 9B model VS Code Copilot
+  Chat uses, for the rare delegated task that genuinely needs more depth.
+  Default to `"fast"`; only ask for `"capable"` when a task has actually
+  failed on `"fast"` for reasons other than a `max_tokens` shortfall.
+  Note: the 9B model "thinks" before answering (a separate `reasoning_content`
+  field, not returned by this tool) — this can consume most or all of the
+  token budget on a `"capable"` call before it reaches the actual answer;
+  budget `max_tokens` generously if you use that tier, or a low value can
+  produce an empty result with `finish_reason: length`.
 
 The tool's own description (in `index.mjs`) is deliberately opinionated about
 *when* to use it — bounded, mechanical, easily-verified work only, not
@@ -65,27 +76,28 @@ appropriately.
 
 ## Known operational notes
 
-**Memory pressure.** On a 16GB Mac running `llama-server` + Docker (SearXNG)
-+ VS Code + other apps concurrently, this machine runs close to its memory
-ceiling already. Firing overlapping/concurrent delegation calls (e.g. killing
-one test before its connection closed and immediately starting another)
-caused severe thrashing during testing — generation speed dropped from
-~17.5 tok/s to ~0.13 tok/s until the backlog cleared. The tool doesn't queue
-or rate-limit concurrent calls today; delegate serially, not in parallel,
-especially on memory-constrained hardware.
+**Memory pressure — much better since `local-copilot-stack` moved to router
+mode, but not eliminated.** `llama-server` now loads each model tier on
+demand and sleeps it after a period of inactivity (releasing ~98% of its
+RSS), rather than keeping both permanently resident. On a 16GB Mac also
+running Docker (SearXNG) + VS Code + other apps, a brief window where both
+tiers are hot at once (~10GB combined) is still tight. The tool doesn't queue
+or rate-limit concurrent calls; delegating serially rather than firing
+several requests in parallel remains the safer default, especially if VS
+Code's interactive chat (the 9B tier) is also active at the same time.
 
 **Timeout scales with `max_tokens`.** The request timeout is
 `30s + max_tokens * 150ms`, not a fixed value — a fixed timeout was cutting
-off legitimately-still-running generations on larger requests.
+off legitimately-still-running generations on larger requests. This also
+covers the ~1s a sleeping model needs to wake up before it starts generating.
 
-**Model choice matters more than expected for this workload.** Qwen3.5-9B's
-"thinking" phase can consume an entire token budget on simple, well-specified
-coding tasks with zero tokens left for the actual answer (`finish_reason:
-length`, empty content) — observed repeatedly even at `max_tokens` up to
-6000 for one task. A non-reasoning coder model (e.g. Qwen2.5-Coder-7B)
-skipped straight to the answer on the identical task in under 100 completion
-tokens. If a delegated task keeps coming back empty, trying a non-reasoning
-model is worth it before just raising `max_tokens` further.
+**Why `"fast"` is the default.** Qwen3.5-9B's "thinking" phase can consume an
+entire token budget on simple, well-specified coding tasks with zero tokens
+left for the actual answer (`finish_reason: length`, empty content) —
+observed repeatedly even at `max_tokens` up to 6000 for one task. The
+non-reasoning `"fast"` tier (Qwen2.5-Coder-7B) skipped straight to the answer
+on the identical task in under 100 completion tokens. Use `model: "capable"`
+deliberately, not as a first troubleshooting step.
 
 ## Setup
 
@@ -103,9 +115,11 @@ No build step — `index.mjs` is run directly by an MCP client via:
 }
 ```
 
-Optional environment variable:
+Optional environment variables:
 
 - `LOCAL_LLM_URL` — base URL of the OpenAI-compatible endpoint (default `http://localhost:8080`)
+- `FAST_MODEL_ALIAS` — router-mode alias for the `"fast"` tier (default `delegate-fast`)
+- `CAPABLE_MODEL_ALIAS` — router-mode alias for the `"capable"` tier (default `Qwen3.5-9B-UD-Q4_K_XL.gguf`, matching `local-copilot-stack`'s interactive-chat alias)
 
 ## Status
 

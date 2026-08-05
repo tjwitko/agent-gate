@@ -15,7 +15,7 @@ function sanitizeEnv(allowlist) {
     }
   }
 }
-sanitizeEnv(["PATH", "HOME", "LOCAL_LLM_URL"]);
+sanitizeEnv(["PATH", "HOME", "LOCAL_LLM_URL", "FAST_MODEL_ALIAS", "CAPABLE_MODEL_ALIAS"]);
 
 // Refuse to forward anything that looks like a credential to the local model. Even though the
 // model runs locally, secrets sent to it still land in its KV cache/memory and should never be
@@ -52,6 +52,12 @@ function findSecretLikeContent(text) {
 }
 
 const LOCAL_LLM_URL = process.env.LOCAL_LLM_URL || "http://localhost:8080";
+// Router-mode model aliases (see local-copilot-stack's launchd/presets.ini.template).
+// "fast" has no reasoning phase and is what this tool should default to for the
+// bounded/mechanical work it's meant for; "capable" is the same model VS Code Copilot
+// Chat uses, for the rare delegated task that genuinely needs more depth.
+const FAST_MODEL_ALIAS = process.env.FAST_MODEL_ALIAS || "delegate-fast";
+const CAPABLE_MODEL_ALIAS = process.env.CAPABLE_MODEL_ALIAS || "Qwen3.5-9B-UD-Q4_K_XL.gguf";
 const DEFAULT_MAX_TOKENS = 2048;
 // Observed throughput on this hardware is ~17.5 tok/s in the normal case, i.e. ~57ms/token —
 // budget generously above that (150ms/token) plus fixed overhead for connection/prompt processing,
@@ -96,8 +102,18 @@ server.tool(
       .positive()
       .optional()
       .describe(`Maximum tokens the local model may generate. Defaults to ${DEFAULT_MAX_TOKENS}.`),
+    model: z
+      .enum(["fast", "capable"])
+      .optional()
+      .describe(
+        "Which local model tier to use. \"fast\" (default) is a non-reasoning model — reliably " +
+          "fast and cheap for the bounded/mechanical work this tool is meant for. \"capable\" is a " +
+          "larger reasoning model, meaningfully slower and more resource-hungry; only ask for it " +
+          "when a task genuinely needs more depth than \"fast\" can deliver — most delegated tasks " +
+          "should not need this."
+      ),
   },
-  async ({ task, system_prompt, max_tokens }) => {
+  async ({ task, system_prompt, max_tokens, model }) => {
     const secretHits = [
       ...findSecretLikeContent(task),
       ...(system_prompt ? findSecretLikeContent(system_prompt) : []),
@@ -124,13 +140,17 @@ server.tool(
     messages.push({ role: "user", content: task });
 
     const effectiveMaxTokens = max_tokens || DEFAULT_MAX_TOKENS;
+    // A model that's currently sleeping (router mode) needs a moment to wake up before it
+    // starts generating — observed ~1s in testing, well within this fixed allowance on top
+    // of the normal per-token budget.
     const requestTimeoutMs = TIMEOUT_BASE_MS + effectiveMaxTokens * TIMEOUT_PER_TOKEN_MS;
+    const modelAlias = model === "capable" ? CAPABLE_MODEL_ALIAS : FAST_MODEL_ALIAS;
 
     try {
       const response = await axios.post(
         `${LOCAL_LLM_URL}/v1/chat/completions`,
         {
-          model: "local",
+          model: modelAlias,
           messages,
           max_tokens: effectiveMaxTokens,
         },
@@ -142,7 +162,7 @@ server.tool(
       const usage = response.data?.usage;
       if (usage) {
         console.error(
-          `[usage] prompt_tokens=${usage.prompt_tokens} completion_tokens=${usage.completion_tokens} total_tokens=${usage.total_tokens}`
+          `[usage] model=${modelAlias} prompt_tokens=${usage.prompt_tokens} completion_tokens=${usage.completion_tokens} total_tokens=${usage.total_tokens}`
         );
       }
 
@@ -151,7 +171,7 @@ server.tool(
           content: [
             {
               type: "text",
-              text: `Local model returned no content. finish_reason: ${choice?.finish_reason ?? "unknown"}`,
+              text: `Local model (${modelAlias}) returned no content. finish_reason: ${choice?.finish_reason ?? "unknown"}`,
             },
           ],
           isError: true,
@@ -171,7 +191,7 @@ server.tool(
           `Is llama-server running? (managed by the local-copilot-stack project — ` +
           `check "launchctl list | grep local-copilot-stack" and "curl ${LOCAL_LLM_URL}/health")`;
       } else if (isTimeout) {
-        message = `Local model request timed out after ${Math.round(requestTimeoutMs / 1000)}s (max_tokens=${effectiveMaxTokens}).`;
+        message = `Local model (${modelAlias}) request timed out after ${Math.round(requestTimeoutMs / 1000)}s (max_tokens=${effectiveMaxTokens}).`;
       } else {
         message = `Error calling local model: ${error.message}`;
       }

@@ -37,7 +37,17 @@ isn't installed and running, this server's tool calls will fail with a clear
 - `task` (required): a **fully self-contained** description of the work,
   including any code/schema/examples/constraints it needs. The local model
   has no memory of the calling conversation and cannot ask follow-up
-  questions, so everything relevant has to be in this string.
+  questions, so everything relevant has to be in this string. Prefer
+  `context_files` (below) over pasting file contents in here — pasting costs
+  the calling model output tokens to transcribe them.
+- `context_files` (optional): a list of file paths, read on the server side
+  and handed to the local model as reference material instead of being
+  pasted into `task`. Paths are resolved against — and must stay within —
+  this server's working directory (override with `CONTEXT_ROOT`); anything
+  that escapes it, looks like a sensitive file (`.env`, `.ssh`, `*.pem`,
+  `*.key`, `credentials.json`, etc.), or whose content matches the same
+  credential scan applied to `task` is refused. Capped at 8000 bytes/file,
+  16000 bytes combined.
 - `system_prompt` (optional): role/constraints/output-format guidance.
 - `max_tokens` (optional, default 2048).
 - `model` (optional, default `"fast"`): `"fast"` routes to the `delegate-fast`
@@ -64,11 +74,18 @@ appropriately.
   allowlist of `process.env` variables (`PATH`, `HOME`, `LOCAL_LLM_URL`) and
   deletes everything else, so it never inherits arbitrary secrets from
   whatever process spawned it (an editor, a CLI, a shell).
-- **Credential scanning**: both `task` and `system_prompt` are scanned for
-  anything that looks like a credential (SSH/PGP private key headers, AWS
-  access keys, generic `key=value`/JSON secret-looking assignments) before
-  anything is forwarded to the local model — the call is refused if something
-  matches, rather than silently sending it.
+- **Credential scanning**: `task`, `system_prompt`, and any `context_files`
+  content are scanned for anything that looks like a credential (SSH/PGP
+  private key headers, AWS access keys, generic `key=value`/JSON
+  secret-looking assignments) before anything is forwarded to the local
+  model — the call is refused if something matches, rather than silently
+  sending it.
+- **File-read containment**: `context_files` paths must resolve within this
+  server's working directory (`CONTEXT_ROOT`) — no `../` escapes, no
+  absolute paths elsewhere on disk. Filenames matching a sensitive-file
+  denylist (`.env`, `.ssh`, `*.pem`, `*.key`, `credentials.json`, etc.) are
+  refused before the file is even opened, as a backstop for cases the
+  content scan might miss.
 - **Advisory output only**: the local model only ever returns text; this tool
   never executes anything on its behalf. Its output must be reviewed by the
   calling agent before being used — see the tool's own description in
@@ -120,10 +137,14 @@ Optional environment variables:
 - `LOCAL_LLM_URL` — base URL of the OpenAI-compatible endpoint (default `http://localhost:8080`)
 - `FAST_MODEL_ALIAS` — router-mode alias for the `"fast"` tier (default `delegate-fast`)
 - `CAPABLE_MODEL_ALIAS` — router-mode alias for the `"capable"` tier (default `Qwen3.5-9B-UD-Q4_K_XL.gguf`, matching `local-copilot-stack`'s interactive-chat alias)
+- `CONTEXT_ROOT` — directory `context_files` paths are resolved against and confined to (default: this process's working directory at startup)
 
 ## Status
 
-Built and verified standalone (`tools/list` and `tools/call` round-trip
-tested directly against the running `llama-server`, plus the unreachable-
-endpoint error path). **Not yet wired into any MCP client** — that'll happen
-when the test project this is meant for gets set up.
+Built and verified standalone (`tools/list` and `tools/call` round-trips
+tested directly against the running `llama-server`, including the
+unreachable-endpoint error path, `context_files` reads, and its
+path-traversal / sensitive-filename refusals). Registered as a
+project-scoped Claude Code MCP server via `/Users/tomwitkowski/LLM/.mcp.json`
+— not yet exercised through a live Claude Code chat turn, only through a
+direct JSON-RPC test harness.

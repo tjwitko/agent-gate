@@ -4,6 +4,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import axios from "axios";
+import { readFileSync } from "fs";
+import path from "path";
 
 // Remove all keys from process.env except those in the allowlist. A stdio MCP server
 // spawned by an editor/CLI inherits its entire parent environment by default (API keys,
@@ -15,7 +17,7 @@ function sanitizeEnv(allowlist) {
     }
   }
 }
-sanitizeEnv(["PATH", "HOME", "LOCAL_LLM_URL", "FAST_MODEL_ALIAS", "CAPABLE_MODEL_ALIAS"]);
+sanitizeEnv(["PATH", "HOME", "LOCAL_LLM_URL", "FAST_MODEL_ALIAS", "CAPABLE_MODEL_ALIAS", "CONTEXT_ROOT"]);
 
 // Refuse to forward anything that looks like a credential to the local model. Even though the
 // model runs locally, secrets sent to it still land in its KV cache/memory and should never be
@@ -49,6 +51,81 @@ function findSecretLikeContent(text) {
   }
 
   return [...new Set(matches)];
+}
+
+// context_files support: lets a caller point the local model at real files instead of pasting
+// their contents into `task` (which costs the calling model output tokens to transcribe). Reads
+// happen here in the server, never in the calling model's own output.
+//
+// CONTEXT_ROOT is the sole allowed read boundary — defaults to this process's cwd (wherever the
+// MCP client launched it from) so a compromised/careless `task` can't reach outside the project
+// being worked on. Override with the CONTEXT_ROOT env var if that default is wrong for a setup.
+const CONTEXT_ROOT = path.resolve(process.env.CONTEXT_ROOT || process.cwd());
+const MAX_CONTEXT_FILE_BYTES = 8_000;
+const MAX_CONTEXT_TOTAL_BYTES = 16_000;
+// Filenames that are refused outright regardless of content — a belt-and-suspenders check
+// alongside findSecretLikeContent(), which only scans content and could miss a binary key file
+// or a file whose secret value doesn't match the content patterns.
+const SENSITIVE_FILENAME_RE =
+  /(^|[/\\])(\.env(\..*)?|\.ssh|\.aws|\.npmrc|\.git-credentials|id_rsa\w*|.*\.pem|.*\.key|credentials\.json)$/i;
+
+// Resolve relOrAbsPath against contextRoot and refuse anything that escapes it (via ../, a
+// sibling-directory prefix collision, or an absolute path elsewhere on disk). The `+ path.sep`
+// check matters: without it, a root of "/foo/bar" would incorrectly accept "/foo/barevil".
+function resolveContextPath(relOrAbsPath, contextRoot) {
+  const resolved = path.resolve(contextRoot, relOrAbsPath);
+  if (resolved !== contextRoot && !resolved.startsWith(contextRoot + path.sep)) {
+    throw new Error(`refuses to read outside ${contextRoot}: ${relOrAbsPath}`);
+  }
+  return resolved;
+}
+
+function formatContextBlock(files) {
+  if (files.length === 0) return "";
+  const parts = ["Reference files:", ""];
+  for (const file of files) {
+    parts.push(`--- ${file.path} ---`, file.content, "");
+  }
+  return parts.join("\n");
+}
+
+// Reads each requested path under CONTEXT_ROOT, applying the same guardrails as task/system_prompt:
+// refuse sensitive filenames outright, scan content for secret-like text, and cap size so a large
+// file can't silently blow past the model's context window or dominate the timeout budget.
+function readContextFiles(relPaths) {
+  const files = [];
+  let totalBytes = 0;
+  for (const relPath of relPaths) {
+    const resolved = resolveContextPath(relPath, CONTEXT_ROOT);
+    if (SENSITIVE_FILENAME_RE.test(resolved)) {
+      throw new Error(`refusing to read a sensitive-looking file: ${relPath}`);
+    }
+    let content;
+    try {
+      content = readFileSync(resolved, "utf8");
+    } catch (error) {
+      throw new Error(`could not read ${relPath}: ${error.message}`);
+    }
+    if (Buffer.byteLength(content, "utf8") > MAX_CONTEXT_FILE_BYTES) {
+      throw new Error(
+        `${relPath} is larger than the ${MAX_CONTEXT_FILE_BYTES}-byte per-file context limit`
+      );
+    }
+    const secretHits = findSecretLikeContent(content);
+    if (secretHits.length > 0) {
+      throw new Error(
+        `refusing to read ${relPath}: looks like it contains a credential (${secretHits.join(", ")})`
+      );
+    }
+    totalBytes += Buffer.byteLength(content, "utf8");
+    if (totalBytes > MAX_CONTEXT_TOTAL_BYTES) {
+      throw new Error(
+        `context_files exceeds the ${MAX_CONTEXT_TOTAL_BYTES}-byte combined limit — pass fewer/smaller files`
+      );
+    }
+    files.push({ path: relPath, content });
+  }
+  return files;
 }
 
 const LOCAL_LLM_URL = process.env.LOCAL_LLM_URL || "http://localhost:8080";
@@ -85,9 +162,21 @@ server.tool(
     task: z
       .string()
       .describe(
-        "A fully self-contained description of the work to do, including all relevant context " +
-          "(code, schema, examples, constraints). The local model cannot see this conversation " +
-          "and cannot ask follow-up questions."
+        "A fully self-contained description of the work to do. The local model cannot see this " +
+          "conversation and cannot ask follow-up questions. Prefer `context_files` over pasting " +
+          "file contents into this string — pasting costs you output tokens to transcribe; " +
+          "`context_files` reads them on the server side for free."
+      ),
+    context_files: z
+      .array(z.string())
+      .optional()
+      .describe(
+        "Optional list of file paths (relative to this server's working directory, or absolute " +
+          "within it) whose contents should be given to the local model as reference material, " +
+          "instead of pasting them into `task`. Refused if a path escapes the server's working " +
+          "directory, looks like a sensitive file (.env, .ssh, *.pem, *.key, credentials, etc.), " +
+          "or its content looks like it contains a credential. Capped at 8000 bytes per file, " +
+          "16000 bytes combined."
       ),
     system_prompt: z
       .string()
@@ -113,7 +202,7 @@ server.tool(
           "should not need this."
       ),
   },
-  async ({ task, system_prompt, max_tokens, model }) => {
+  async ({ task, system_prompt, max_tokens, model, context_files }) => {
     const secretHits = [
       ...findSecretLikeContent(task),
       ...(system_prompt ? findSecretLikeContent(system_prompt) : []),
@@ -133,11 +222,23 @@ server.tool(
       };
     }
 
+    let contextBlock = "";
+    if (context_files && context_files.length > 0) {
+      try {
+        contextBlock = formatContextBlock(readContextFiles(context_files));
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: `Refusing to delegate: ${error.message}` }],
+          isError: true,
+        };
+      }
+    }
+
     const messages = [];
     if (system_prompt) {
       messages.push({ role: "system", content: system_prompt });
     }
-    messages.push({ role: "user", content: task });
+    messages.push({ role: "user", content: contextBlock ? `${contextBlock}\n${task}` : task });
 
     const effectiveMaxTokens = max_tokens || DEFAULT_MAX_TOKENS;
     // A model that's currently sleeping (router mode) needs a moment to wake up before it

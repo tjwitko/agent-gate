@@ -45,9 +45,18 @@ No build step. Run directly by an MCP client via:
 
 - **`task` must be fully self-contained.** The local model has no memory of
   the calling conversation and can't ask follow-up questions.
-- **Never put real secrets in `task`/`system_prompt`.** Both are scanned for
-  credential-shaped content and the call is refused if something matches —
-  use placeholders and substitute real values into the result afterward.
+- **Use `context_files` instead of pasting file contents into `task`.**
+  Pasting costs the *calling* model output tokens to transcribe; empirically
+  this made one real delegation (CLAUDE.md drafting) cost ~160% more Claude
+  output tokens than just doing it directly, because the task string had to
+  re-transcribe most of a README. `context_files` reads paths server-side
+  instead — confined to `CONTEXT_ROOT` (default: cwd), refused if a path
+  escapes it, matches a sensitive-filename denylist, or its content trips
+  the same credential scan as `task`/`system_prompt`.
+- **Never put real secrets in `task`/`system_prompt`/`context_files`.** All
+  three are scanned for credential-shaped content and the call is refused if
+  something matches — use placeholders and substitute real values into the
+  result afterward.
 - **`model: "capable"` (9B) can silently burn its whole budget on "thinking"**
   with zero actual answer content (`finish_reason: length`, empty `content`)
   if `max_tokens` is too low — budget generously for that tier, or just

@@ -1,0 +1,16 @@
+{
+  "name": "local-delegate-mcp",
+  "version": "1.0.0",
+  "description": "MCP server that lets an LLM delegate self-contained, low-skill subtasks to a locally-hosted model",
+  "type": "module",
+  "main": "index.mjs",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "license": "ISC",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "axios": "^1.19.0",
+    "zod": "^4.4.3"
+  }
+}

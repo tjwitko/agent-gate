@@ -66,7 +66,22 @@ The tool's own description (in `index.mjs`) is deliberately opinionated about
 *when* to use it — bounded, mechanical, easily-verified work only, not
 anything requiring judgment or high-stakes correctness — since that
 description is what actually shapes whether a calling model reaches for it
-appropriately.
+appropriately. It also warns against two failure modes found empirically
+(not hypothetically — both were measured on real delegations, see git
+history): pasting large context into `task` instead of using
+`context_files`, and delegating a single small/isolated artifact where the
+spec costs more to write than the artifact itself. It recommends batching
+several small related asks into one `task` instead of one call per item —
+that one can't be enforced by the server (it has no visibility across
+separate calls), so it's stated guidance for whichever model is calling
+this tool, not a code-level check.
+
+**Ratio warning.** If a response comes back shorter than the `task` +
+`system_prompt` that produced it (only checked once the spec is long enough,
+300+ chars, for the overhead to actually matter), the tool appends a bracketed
+note to its own returned text flagging that this delegation likely wasn't
+worth it — real-time, visible feedback rather than something only findable
+later in the usage log.
 
 ## Security & Guardrails
 

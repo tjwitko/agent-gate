@@ -142,6 +142,26 @@ const DEFAULT_MAX_TOKENS = 2048;
 const TIMEOUT_BASE_MS = 30_000;
 const TIMEOUT_PER_TOKEN_MS = 150;
 
+// Below this, the fixed overhead of a warning isn't worth flagging even if the ratio is bad —
+// a two-line task producing a one-line answer isn't a real problem, only a large one is.
+const MIN_SPEC_CHARS_FOR_RATIO_WARNING = 300;
+
+// Guards against a second failure mode found empirically (see local-delegate-mcp's git history):
+// delegating something so small that writing a precise spec for it costs more than just writing
+// the thing directly. specChars/responseChars are a proxy for that — not exact token costs, but
+// cheap to compute and good enough to flag the pattern to whichever model is calling this tool.
+function buildRatioWarning(specChars, responseChars, minSpecChars) {
+  if (specChars < minSpecChars) return null;
+  if (responseChars < specChars) {
+    return (
+      `This response (${responseChars} chars) was shorter than the task/system_prompt spec ` +
+      `that produced it (${specChars} chars) — for asks this small, consider doing it directly ` +
+      `next time instead of delegating.`
+    );
+  }
+  return null;
+}
+
 const server = new McpServer({
   name: "local-delegate",
   version: "1.0.0",
@@ -157,7 +177,11 @@ server.tool(
     "judgment, multi-step reasoning, security- or correctness-sensitive work, or anything you " +
     "can't easily verify — the local model is meaningfully less reliable than you are and has no " +
     "memory of this conversation, so `task` must contain everything it needs to know. Always " +
-    "review the returned output before relying on it; it can be wrong.",
+    "review the returned output before relying on it; it can be wrong. Don't delegate a single " +
+    "small/isolated artifact (roughly under 20 lines) — writing a precise-enough spec for " +
+    "something that small usually costs more than just writing it yourself. If you have several " +
+    "small related mechanical asks, batch them into one `task` rather than one call per item — " +
+    "each call pays a fixed overhead regardless of how small the ask is.",
   {
     task: z
       .string()
@@ -279,8 +303,13 @@ server.tool(
         };
       }
 
+      // specChars deliberately excludes context_files content: that's read server-side for free
+      // and isn't part of what the calling model paid output tokens to write.
+      const specChars = task.length + (system_prompt ? system_prompt.length : 0);
+      const ratioWarning = buildRatioWarning(specChars, content.length, MIN_SPEC_CHARS_FOR_RATIO_WARNING);
+
       return {
-        content: [{ type: "text", text: content }],
+        content: [{ type: "text", text: ratioWarning ? `${content}\n\n[${ratioWarning}]` : content }],
       };
     } catch (error) {
       const isConnRefused = error.code === "ECONNREFUSED";

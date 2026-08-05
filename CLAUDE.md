@@ -57,6 +57,19 @@ No build step. Run directly by an MCP client via:
   three are scanned for credential-shaped content and the call is refused if
   something matches — use placeholders and substitute real values into the
   result afterward.
+- **Don't delegate a single small/isolated artifact (roughly under 20 lines).**
+  Empirically, writing a precise-enough spec for something that small costs
+  more Claude output tokens than just writing it directly — measured at
+  ~257% overhead for two ~8-line utility functions delegated separately.
+  **Batch several small related asks into one `task` instead of one call per
+  item** — this is stated in the tool's own description, but the server
+  can't enforce it (no visibility across separate calls), so it's on
+  whichever model is calling this tool to actually do it.
+- **The tool self-reports when a delegation likely wasn't worth it.** If the
+  response comes back shorter than the `task`/`system_prompt` that produced
+  it (checked only once the spec is 300+ chars, so trivial cases don't
+  trigger noise), a bracketed warning is appended to the returned text —
+  read it, it's real-time signal, not just something in the usage log.
 - **`model: "capable"` (9B) can silently burn its whole budget on "thinking"**
   with zero actual answer content (`finish_reason: length`, empty `content`)
   if `max_tokens` is too low — budget generously for that tier, or just

@@ -47,17 +47,45 @@ anything requiring judgment or high-stakes correctness — since that
 description is what actually shapes whether a calling model reaches for it
 appropriately.
 
-## Known operational caveat: memory pressure
+## Security & Guardrails
 
-On a 16GB Mac running `llama-server` + Docker (SearXNG) + VS Code + other
-apps concurrently, this machine runs close to its memory ceiling already.
-During testing, firing overlapping/concurrent delegation calls (e.g. killing
+- **Environment sanitization**: at startup, the server keeps only an explicit
+  allowlist of `process.env` variables (`PATH`, `HOME`, `LOCAL_LLM_URL`) and
+  deletes everything else, so it never inherits arbitrary secrets from
+  whatever process spawned it (an editor, a CLI, a shell).
+- **Credential scanning**: both `task` and `system_prompt` are scanned for
+  anything that looks like a credential (SSH/PGP private key headers, AWS
+  access keys, generic `key=value`/JSON secret-looking assignments) before
+  anything is forwarded to the local model — the call is refused if something
+  matches, rather than silently sending it.
+- **Advisory output only**: the local model only ever returns text; this tool
+  never executes anything on its behalf. Its output must be reviewed by the
+  calling agent before being used — see the tool's own description in
+  `index.mjs` for what it's safe to delegate in the first place.
+
+## Known operational notes
+
+**Memory pressure.** On a 16GB Mac running `llama-server` + Docker (SearXNG)
++ VS Code + other apps concurrently, this machine runs close to its memory
+ceiling already. Firing overlapping/concurrent delegation calls (e.g. killing
 one test before its connection closed and immediately starting another)
-caused severe thrashing — generation speed dropped from ~17.5 tok/s to
-~0.13 tok/s (visible in `llama-server`'s own timing logs) until the backlog
-cleared. The tool itself doesn't queue or rate-limit concurrent calls today.
-If you're delegating multiple subtasks, do it serially rather than firing
-several in parallel, especially on memory-constrained hardware.
+caused severe thrashing during testing — generation speed dropped from
+~17.5 tok/s to ~0.13 tok/s until the backlog cleared. The tool doesn't queue
+or rate-limit concurrent calls today; delegate serially, not in parallel,
+especially on memory-constrained hardware.
+
+**Timeout scales with `max_tokens`.** The request timeout is
+`30s + max_tokens * 150ms`, not a fixed value — a fixed timeout was cutting
+off legitimately-still-running generations on larger requests.
+
+**Model choice matters more than expected for this workload.** Qwen3.5-9B's
+"thinking" phase can consume an entire token budget on simple, well-specified
+coding tasks with zero tokens left for the actual answer (`finish_reason:
+length`, empty content) — observed repeatedly even at `max_tokens` up to
+6000 for one task. A non-reasoning coder model (e.g. Qwen2.5-Coder-7B)
+skipped straight to the answer on the identical task in under 100 completion
+tokens. If a delegated task keeps coming back empty, trying a non-reasoning
+model is worth it before just raising `max_tokens` further.
 
 ## Setup
 

@@ -17,6 +17,10 @@
 //   --max-tokens-ceiling <n>  stop escalating past this (default 20000)
 //   --max-attempts <n>        give up after this many tries (default 3)
 //   --label <name>            runs/ subdirectory name (default: the model alias)
+//   --task <path>             alternate task JSON (default: task.json) — e.g. a variant with a
+//                             model-specific flag like Qwen3's "/no_think" in system_prompt.
+//                             Keep model-specific prompt tweaks in separate task files rather
+//                             than branching on model name in here.
 
 import { spawn, spawnSync } from "child_process";
 import { readFileSync, writeFileSync, mkdirSync, cpSync, existsSync } from "fs";
@@ -43,22 +47,24 @@ const REQUIRED_MARKERS = [
 
 function parseArgs() {
   const args = process.argv.slice(2);
-  const opts = { model: null, startMaxTokens: 3000, maxTokensCeiling: 20000, maxAttempts: 3, label: null };
+  const opts = { model: null, startMaxTokens: 3000, maxTokensCeiling: 20000, maxAttempts: 3, label: null, taskPath: null };
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--model") opts.model = args[++i];
     else if (args[i] === "--start-max-tokens") opts.startMaxTokens = Number(args[++i]);
     else if (args[i] === "--max-tokens-ceiling") opts.maxTokensCeiling = Number(args[++i]);
     else if (args[i] === "--max-attempts") opts.maxAttempts = Number(args[++i]);
     else if (args[i] === "--label") opts.label = args[++i];
+    else if (args[i] === "--task") opts.taskPath = args[++i];
   }
   if (!opts.model) {
     console.error(
       "usage: node run-benchmark.mjs --model <router-preset-alias> " +
-        "[--start-max-tokens 3000] [--max-tokens-ceiling 20000] [--max-attempts 3] [--label name]"
+        "[--start-max-tokens 3000] [--max-tokens-ceiling 20000] [--max-attempts 3] [--label name] [--task path]"
     );
     process.exit(1);
   }
   opts.label = opts.label || opts.model;
+  opts.taskPath = opts.taskPath || TASK_PATH;
   return opts;
 }
 
@@ -163,7 +169,7 @@ function splitFiles(text, targetDir) {
 
 async function main() {
   const opts = parseArgs();
-  const task = JSON.parse(readFileSync(TASK_PATH, "utf8"));
+  const task = JSON.parse(readFileSync(opts.taskPath, "utf8"));
   const runDir = path.join(RUNS_DIR, opts.label);
 
   console.log(`==> benchmarking "${opts.model}" (run dir: ${runDir})`);

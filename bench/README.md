@@ -41,6 +41,10 @@ Options:
 - `--max-tokens-ceiling <n>` — stop escalating past this (default 20000)
 - `--max-attempts <n>` — give up after this many tries (default 3)
 - `--label <name>` — subdirectory under `runs/` (default: the model alias)
+- `--task <path>` — alternate task JSON (default: `task.json`). Use this for model-specific
+  prompt tweaks rather than editing the shared task — `task-no-think.json` is an example,
+  prepending Qwen3's documented `/no_think` flag for a model whose reasoning is optional
+  rather than built-in.
 
 Output lands in `bench/runs/<label>/` (gitignored — each run does its own `npm install`) along
 with `bench-report.json` and `test-output.txt`.
@@ -57,3 +61,10 @@ If a model can't complete even near the token ceiling, check whether `ctx-size` 
 is the real bottleneck before blaming the model — see the empirical note in that file's Gemma
 entry. This script can't fix that for you: it would require editing and restarting a shared
 service, which stays a manual, reviewed step.
+
+If a model fails instantly on every attempt (`usage: null`, ~1s each), that's very likely
+`llama-server`'s "Compute error" crash state, not the model or this script — check
+`curl localhost:8080/health` and try a trivial direct request to the alias before concluding
+anything. This has now been observed on two unrelated models in the same session (Gemma 4 12B,
+then Qwen3-8B immediately after), so it looks like a router-mode/build-level stability issue
+rather than something specific to one model — a `launchctl unload`/`load -w` restart clears it.

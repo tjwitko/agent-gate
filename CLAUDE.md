@@ -89,16 +89,34 @@ No build step. Run directly by an MCP client via:
   `FAST_MODEL_ALIAS`, `CAPABLE_MODEL_ALIAS`. Everything else in
   `process.env` is deleted at startup, so this server never inherits
   secrets from whatever spawned it.
-- **Bigger/newer isn't better for this tool's workload.** Both models tested
-  beyond the default 7B (Qwen3.5-9B, Gemma 4 12B) lost to it — a reasoning
-  phase burning the token budget before producing real output, not size, was
-  the deciding factor both times. Benchmark any new candidate
-  (`bench/run-benchmark.mjs`) rather than assuming bigger wins; see
+- **Bigger/newer isn't better for this tool's workload; reasoning is what
+  matters.** Qwen3.5-9B and Gemma 4 12B both lost to the 7B — a reasoning
+  phase burning the token budget before producing real output, not size,
+  decided both. Qwen3-8B run with its `/no_think` flag (see
+  `bench/task-no-think.json`) tied the 7B almost exactly (3,707 vs 3,618
+  tokens, 110s vs 118s, 1 attempt each) — the first candidate beyond the
+  original 7B that didn't lose, and it won by having reasoning off, not by
+  being small. Benchmark any new candidate (`bench/run-benchmark.mjs`)
+  rather than assuming size predicts the outcome either way; see
   `local-copilot-stack`'s README for the full checklist.
+- **Expect the same validation-gate bug regardless of which model you use.**
+  Five independent generations across four different models (7B twice,
+  Qwen3.5-9B, Gemma, Qwen3-8B) all made the identical mistake: an optional
+  field's validation copied the required-field gate (`!partial || field !==
+  undefined`) instead of `field !== undefined`, incorrectly rejecting a
+  create request that omits the field. This isn't a model-quality signal —
+  it's a standing review checkpoint for this specific task pattern. Check
+  optional-field validation first when a generated resource's create
+  endpoint fails unexpectedly.
 - **A model backend can crash into a persistent "Compute error" state under
-  llama-server** (observed with Gemma 4 12B after a near-max-context
-  generation) — every subsequent request fails in ~1s regardless of content,
-  which looks like a fast tool-error but isn't one. A full `llama-server`
-  restart (`launchctl unload`/`load -w` the plist) cleared it. If a model
-  that was working starts failing instantly, suspect this before suspecting
-  the request.
+  llama-server, and it isn't specific to any one model.** First observed
+  with Gemma 4 12B after a near-max-context generation; later, in the same
+  session, an entirely different model (Qwen3-8B) hit the identical failure
+  immediately after Gemma's crash, then worked perfectly once isolated after
+  a restart — pointing at a router-mode/build-level stability issue (likely
+  tied to model swapping or sustained load), not Gemma's architecture
+  specifically. Every subsequent request on the affected slot fails in ~1s
+  regardless of content, which looks like a fast tool-error but isn't. A
+  full `llama-server` restart (`launchctl unload`/`load -w` the plist)
+  clears it. If a model that was working starts failing instantly, suspect
+  this before suspecting the request or the model itself.

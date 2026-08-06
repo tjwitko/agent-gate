@@ -21,12 +21,17 @@ Two router aliases:
 ## Key files
 
 - `index.mjs` — the entire server: env sanitization, credential scanning, the one tool, the HTTP call
+- `bench/` — reusable benchmark for deciding whether a candidate local model is worth adopting
+  into `local-copilot-stack`'s `presets.ini`. `bench/run-benchmark.mjs --model <alias>` runs a
+  standardized codegen task through the real delegation tool, escalating `max_tokens`
+  automatically on truncation, then reports attempts/tokens/wall-clock/test-pass. See
+  `bench/README.md`. `bench/runs/` is gitignored scratch output.
 
-There is no test directory in this repo. Ad-hoc testing during development
-has used a throwaway harness script (spawn `index.mjs` as a child process,
-drive raw MCP JSON-RPC over its stdin/stdout: `initialize` →
-`notifications/initialized` → `tools/call`) kept outside the repo, not
-committed here.
+There is no other test directory in this repo. Ad-hoc testing during
+development has used a throwaway harness script (spawn `index.mjs` as a
+child process, drive raw MCP JSON-RPC over its stdin/stdout: `initialize` →
+`notifications/initialized` → `tools/call`) — the same logic is now built
+into `bench/run-benchmark.mjs` rather than living only in a scratchpad.
 
 ## Common commands
 
@@ -84,3 +89,16 @@ No build step. Run directly by an MCP client via:
   `FAST_MODEL_ALIAS`, `CAPABLE_MODEL_ALIAS`. Everything else in
   `process.env` is deleted at startup, so this server never inherits
   secrets from whatever spawned it.
+- **Bigger/newer isn't better for this tool's workload.** Both models tested
+  beyond the default 7B (Qwen3.5-9B, Gemma 4 12B) lost to it — a reasoning
+  phase burning the token budget before producing real output, not size, was
+  the deciding factor both times. Benchmark any new candidate
+  (`bench/run-benchmark.mjs`) rather than assuming bigger wins; see
+  `local-copilot-stack`'s README for the full checklist.
+- **A model backend can crash into a persistent "Compute error" state under
+  llama-server** (observed with Gemma 4 12B after a near-max-context
+  generation) — every subsequent request fails in ~1s regardless of content,
+  which looks like a fast tool-error but isn't one. A full `llama-server`
+  restart (`launchctl unload`/`load -w` the plist) cleared it. If a model
+  that was working starts failing instantly, suspect this before suspecting
+  the request.

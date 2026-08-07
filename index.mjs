@@ -264,6 +264,118 @@ const TIMEOUT_PER_TOKEN_MS = 150;
 // a two-line task producing a one-line answer isn't a real problem, only a large one is.
 const MIN_SPEC_CHARS_FOR_RATIO_WARNING = 300;
 
+// --- Hard gate -------------------------------------------------------------------------------
+// Advisory guidance in this tool's description empirically did not work: the context_files cost
+// lesson was written down after one round and then violated in the very next one. So the
+// thresholds below are enforced rather than suggested. Numbers come from six measured rounds —
+// the single delegation that showed a real saving produced ~230 lines across 4 files; every
+// round that lost produced well under 150. The higher bar for freshly-authored context files is
+// because authoring one costs the caller the same output tokens as pasting the content would
+// have, so it needs a correspondingly larger artifact to amortize.
+//
+// This is checked BEFORE the model is called: a refusal shouldn't also burn local compute.
+const MIN_EXPECTED_OUTPUT_LINES = Number(process.env.MIN_EXPECTED_OUTPUT_LINES) || 150;
+const MIN_EXPECTED_OUTPUT_LINES_FRESH_CONTEXT =
+  Number(process.env.MIN_EXPECTED_OUTPUT_LINES_FRESH_CONTEXT) || 300;
+
+// --- Cross-call ledger -----------------------------------------------------------------------
+// An earlier version of this tool's docs claimed batching couldn't be enforced because the
+// server had "no visibility across separate calls". That was simply wrong — nothing stops a
+// stdio server from persisting state. This ledger is that state: it makes repeated small calls,
+// inflated estimates, and a losing overall trend visible instead of invisible.
+//
+// Deliberately global rather than per-CONTEXT_ROOT: the behaviour being tracked belongs to the
+// calling model, not to any one project.
+const LEDGER_DIR = path.join(
+  process.env.HOME || "/tmp",
+  "Library",
+  "Application Support",
+  "local-delegate-mcp"
+);
+const LEDGER_PATH = path.join(LEDGER_DIR, "ledger.json");
+const LEDGER_MAX_ENTRIES = 200;
+const BATCHING_WINDOW_MS = 10 * 60 * 1000;
+const BATCHING_MIN_RECENT_SMALL = 2;
+
+function readLedger() {
+  try {
+    const parsed = JSON.parse(readFileSync(LEDGER_PATH, "utf8"));
+    return Array.isArray(parsed?.calls) ? parsed : { calls: [] };
+  } catch {
+    return { calls: [] };
+  }
+}
+
+// Returns the updated ledger, or null if anything went wrong. Ledger I/O must never be able to
+// break a delegation — a bookkeeping failure is not a reason to lose a completed result.
+function appendLedger(entry) {
+  try {
+    const ledger = readLedger();
+    ledger.calls.push(entry);
+    if (ledger.calls.length > LEDGER_MAX_ENTRIES) {
+      ledger.calls = ledger.calls.slice(-LEDGER_MAX_ENTRIES);
+    }
+    mkdirSync(LEDGER_DIR, { recursive: true });
+    writeFileSync(LEDGER_PATH, JSON.stringify(ledger, null, 2));
+    return ledger;
+  } catch {
+    return null;
+  }
+}
+
+// Only speaks up when there's something actionable — a note on every call trains the reader to
+// skip it, so silence here is meant to be informative.
+function buildLedgerNotes(ledger, current) {
+  if (!ledger) return [];
+  const notes = [];
+  const prior = ledger.calls.slice(0, -1);
+
+  // The gate is only as good as the estimate feeding it. If a declared size clears the bar but
+  // the real output comes in far under, the gate was bypassed — accidentally or otherwise.
+  if (
+    current.outcome === "completed" &&
+    current.declaredLines >= current.threshold &&
+    current.actualLines < current.declaredLines * 0.5
+  ) {
+    notes.push(
+      `Estimate was off by more than half: declared expected_output_lines=${current.declaredLines} ` +
+        `(clearing the ${current.threshold}-line gate), actual output was ${current.actualLines} ` +
+        `line${current.actualLines === 1 ? "" : "s"}. ` +
+        `The gate can't protect against optimistic estimates — it only works if the number is honest.`
+    );
+  }
+
+  const windowStart = current.at - BATCHING_WINDOW_MS;
+  const recentSmall = prior.filter(
+    (c) => c.at >= windowStart && typeof c.actualLines === "number" && c.actualLines < c.threshold
+  );
+  if (
+    typeof current.actualLines === "number" &&
+    current.actualLines < current.threshold &&
+    recentSmall.length >= BATCHING_MIN_RECENT_SMALL
+  ) {
+    notes.push(
+      `That makes ${recentSmall.length + 1} delegations in the last ` +
+        `${Math.round(BATCHING_WINDOW_MS / 60000)} minutes whose output came in under the ` +
+        `${current.threshold}-line bar. These very likely should have been one batched call.`
+    );
+  }
+
+  const recentCompleted = ledger.calls.slice(-10).filter((c) => c.outcome === "completed");
+  if (recentCompleted.length >= 5) {
+    const underwater = recentCompleted.filter((c) => c.responseChars < c.specChars).length;
+    if (underwater / recentCompleted.length >= 0.3) {
+      notes.push(
+        `Ledger: ${underwater} of the last ${recentCompleted.length} delegations produced less ` +
+          `output than the spec that requested them. Delegation is losing more often than winning ` +
+          `right now — consider doing this class of work directly.`
+      );
+    }
+  }
+
+  return notes;
+}
+
 // Guards against a second failure mode found empirically (see local-delegate-mcp's git history):
 // delegating something so small that writing a precise spec for it costs more than just writing
 // the thing directly. specChars/responseChars are a proxy for that — not exact token costs, but
@@ -303,7 +415,10 @@ server.tool(
     "destined for files, pass `output_files` so this tool writes them directly; transcribing " +
     "the returned text into your own Write/Edit call means paying output tokens twice for the " +
     "same content and is the most common reason a delegation ends up more expensive than just " +
-    "doing the work yourself.",
+    "doing the work yourself. `expected_output_lines` is required and is enforced: small " +
+    "delegations are refused outright, because measured evidence says they cost more than they " +
+    "save. Estimate that number BEFORE writing the spec — if it's under the bar, skip this tool " +
+    "rather than spending tokens on a spec that will be refused.",
   {
     task: z
       .string()
@@ -358,6 +473,40 @@ server.tool(
           "when generating new files. Only set this when you have already looked at what's " +
           "there and intend for an unreviewed local-model response to replace it."
       ),
+    expected_output_lines: z
+      .number()
+      .int()
+      .positive()
+      .describe(
+        `REQUIRED. Your honest estimate of how many lines the response will contain. Calls ` +
+          `below ${MIN_EXPECTED_OUTPUT_LINES} lines are refused (${MIN_EXPECTED_OUTPUT_LINES_FRESH_CONTEXT} ` +
+          `if context_files had to be authored for this call), because measured evidence says ` +
+          `delegating an artifact that small costs more in spec-writing than doing the work ` +
+          `directly. Estimate before writing the spec — if the number is under the bar, skip the ` +
+          `tool and write it yourself rather than spending tokens on a spec that gets refused. ` +
+          `Inflating the number to get past the gate is self-defeating and is detected: the ` +
+          `actual output size is compared against this and flagged when it's off by half.`
+      ),
+    context_files_are_preexisting: z
+      .boolean()
+      .optional()
+      .describe(
+        "REQUIRED whenever context_files is used. True only if every listed file already " +
+          "existed for reasons independent of this delegation. False if you authored any of " +
+          "them to support this call — that costs the same output tokens as pasting the content " +
+          "into `task`, so a higher output threshold applies to make it worth doing."
+      ),
+    acknowledge_small_task: z
+      .string()
+      .optional()
+      .describe(
+        "Escape hatch for the expected_output_lines gate: a written reason why this " +
+          "below-threshold delegation is worth doing anyway (e.g. the local model has context " +
+          "you lack, or you're deliberately testing behaviour). Requires articulating the " +
+          "justification rather than flipping a flag, and every use is recorded in the ledger — " +
+          "if you find yourself reaching for this routinely, the gate is telling you something " +
+          "real about how you're using the tool."
+      ),
     system_prompt: z
       .string()
       .optional()
@@ -382,7 +531,77 @@ server.tool(
           "should not need this."
       ),
   },
-  async ({ task, system_prompt, max_tokens, model, context_files, output_files, allow_overwrite }) => {
+  async ({
+    task,
+    system_prompt,
+    max_tokens,
+    model,
+    context_files,
+    output_files,
+    allow_overwrite,
+    expected_output_lines,
+    context_files_are_preexisting,
+    acknowledge_small_task,
+  }) => {
+    const specChars = task.length + (system_prompt ? system_prompt.length : 0);
+    const usesContext = Array.isArray(context_files) && context_files.length > 0;
+
+    // Gate first — before reading context files, before calling the model. A refusal that also
+    // burned local compute would be pure waste.
+    if (usesContext && typeof context_files_are_preexisting !== "boolean") {
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              `Refusing to delegate: context_files was provided without ` +
+              `context_files_are_preexisting. Declare whether those files already existed ` +
+              `independently of this delegation (true) or were authored to support it (false) — ` +
+              `the second case costs you the same output tokens as pasting the content into ` +
+              `\`task\`, so it has to clear a higher bar to be worth doing.`,
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    const freshContext = usesContext && context_files_are_preexisting === false;
+    const threshold = freshContext
+      ? MIN_EXPECTED_OUTPUT_LINES_FRESH_CONTEXT
+      : MIN_EXPECTED_OUTPUT_LINES;
+
+    if (expected_output_lines < threshold && !acknowledge_small_task) {
+      appendLedger({
+        at: Date.now(),
+        outcome: "refused-gate",
+        specChars,
+        declaredLines: expected_output_lines,
+        threshold,
+        freshContext,
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              `Refusing to delegate: expected_output_lines=${expected_output_lines} is below the ` +
+              `${threshold}-line threshold` +
+              (freshContext
+                ? ` that applies when context_files were authored for this call (a fresh context ` +
+                  `file costs you the same output tokens as pasting its content, so the artifact ` +
+                  `has to be correspondingly bigger to pay for it).`
+                : `.`) +
+              `\n\nAcross six measured rounds, every delegation producing an artifact this small ` +
+              `cost more in spec-writing than doing the work directly — between +118% and +257% ` +
+              `more. Write it yourself.\n\nIf several small related asks are queued up, batching ` +
+              `them into one \`task\` may clear the bar legitimately. If this specific task is a ` +
+              `genuine exception, pass acknowledge_small_task with the reason.`,
+          },
+        ],
+        isError: true,
+      };
+    }
+
     const secretHits = [
       ...findSecretLikeContent(task),
       ...(system_prompt ? findSecretLikeContent(system_prompt) : []),
@@ -459,11 +678,29 @@ server.tool(
         };
       }
 
-      // specChars deliberately excludes context_files content: that's read server-side for free
-      // and isn't part of what the calling model paid output tokens to write.
-      const specChars = task.length + (system_prompt ? system_prompt.length : 0);
+      // specChars (computed at the top of the handler) deliberately excludes context_files
+      // content: that's read server-side for free and isn't part of what the calling model paid
+      // output tokens to write.
       const ratioWarning = buildRatioWarning(specChars, content.length, MIN_SPEC_CHARS_FOR_RATIO_WARNING);
-      const suffix = ratioWarning ? `\n\n[${ratioWarning}]` : "";
+
+      const ledgerEntry = {
+        at: Date.now(),
+        outcome: "completed",
+        model: modelAlias,
+        specChars,
+        responseChars: content.length,
+        declaredLines: expected_output_lines,
+        actualLines: content.split("\n").length,
+        threshold,
+        freshContext,
+        acknowledged: acknowledge_small_task || null,
+        wroteFiles: Boolean(output_files && output_files.length > 0),
+      };
+      const ledgerNotes = buildLedgerNotes(appendLedger(ledgerEntry), ledgerEntry);
+
+      const suffix =
+        (ratioWarning ? `\n\n[${ratioWarning}]` : "") +
+        (ledgerNotes.length > 0 ? `\n\n[${ledgerNotes.join("]\n[")}]` : "");
 
       if (output_files && output_files.length > 0) {
         let written;

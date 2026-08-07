@@ -65,6 +65,24 @@ No build step. Run directly by an MCP client via:
   Confined to `CONTEXT_ROOT` (default: cwd), refused if a path escapes it,
   matches a sensitive-filename denylist, or its content trips the same
   credential scan as `task`/`system_prompt`.
+- **`expected_output_lines` is required and enforced.** Under 150 lines (300
+  if `context_files` were authored for the call) the tool refuses before the
+  model is contacted. Estimate the number *before* writing the spec — the
+  spec's tokens are already spent by the time a refusal comes back, so the
+  refusal saves nothing on the call it blocks, only on the next one. If the
+  estimate is under the bar, don't write the spec at all: write the code.
+  - `context_files_are_preexisting` is required alongside `context_files`.
+  - `acknowledge_small_task` bypasses the gate but takes a written reason and
+    is logged. Reaching for it repeatedly means the gate is right and the
+    usage pattern is wrong.
+  - Don't inflate the estimate to get through. The ledger compares declared
+    against actual and flags anything off by more than half.
+- **A cross-call ledger lives at `~/Library/Application Support/local-delegate-mcp/ledger.json`.**
+  It flags estimate miscalibration, three-plus small calls inside ten
+  minutes, and a ≥30% losing rate over the last ten delegations. It only
+  emits a note when something fires, so silence is meaningful. (It also
+  disproves an earlier claim in these docs that the server had no cross-call
+  visibility — it does, via this file.)
 - **Pass `output_files` whenever the result is destined for files.** Taking
   the returned text and writing it out yourself pays output tokens a *second*
   time for content the model already produced — that second payment is

@@ -61,6 +61,15 @@ isn't installed and running, this server's tool calls will fail with a clear
   counts — instead of the content.
 - `allow_overwrite` (optional, default false): permit `output_files` to
   replace files that already exist. Leave unset when generating new files.
+- `expected_output_lines` (**required**): honest estimate of the response
+  size. Enforced, not advisory — see "The gate" below.
+- `context_files_are_preexisting` (**required whenever `context_files` is
+  used**): true only if every listed file already existed independently of
+  this delegation. False raises the gate's threshold, because authoring a
+  context file costs the same as pasting its content.
+- `acknowledge_small_task` (optional): a written reason for bypassing the
+  gate. A string, not a boolean — the justification has to be articulated,
+  and every use is recorded.
 - `system_prompt` (optional): role/constraints/output-format guidance.
 - `max_tokens` (optional, default 2048).
 - `model` (optional, default `"fast"`): `"fast"` routes to the `delegate-fast`
@@ -85,10 +94,8 @@ history): pasting large context into `task` instead of using
 `context_files`, and delegating a single small/isolated artifact where the
 spec costs more to write than the artifact itself. It recommends batching
 several small related asks into one `task` instead of one call per item —
-currently stated guidance rather than a code-level check. (That guidance
-originally claimed the server *couldn't* enforce batching for lack of
-cross-call visibility; that was wrong — the server is free to persist state
-between calls and could detect a run of small ones. It just doesn't yet.)
+now backed by the ledger described below, which detects runs of small calls
+across separate invocations.
 
 **Ratio warning.** If a response comes back shorter than the `task` +
 `system_prompt` that produced it (only checked once the spec is long enough,
@@ -96,6 +103,52 @@ between calls and could detect a run of small ones. It just doesn't yet.)
 note to its own returned text flagging that this delegation likely wasn't
 worth it — real-time, visible feedback rather than something only findable
 later in the usage log.
+
+## The gate
+
+`expected_output_lines` is required, and calls below **150 lines** (or **300**
+when `context_files` were authored for the call) are refused before the local
+model is ever contacted. Both numbers come from the measured record: the one
+round that saved tokens produced ~230 lines across four files, and every round
+that lost produced well under 150.
+
+This is deliberately enforcement rather than advice, because advice was tried
+and observably failed — the `context_files` cost lesson was written into this
+repo's docs after one round and then violated in the very next one. A note the
+caller can skip isn't a guardrail.
+
+The escape hatch (`acknowledge_small_task`) takes a written reason rather than
+a boolean, and is logged. It exists because a hard wall with no exit would
+just push a legitimate edge case into not using the tool at all, but it's
+designed to cost more than a flag would.
+
+**The gate cannot make the spec cheap.** By the time this tool is invoked, the
+caller has already spent the output tokens writing `task` — a refusal doesn't
+refund them. The number is meant to be estimated *before* the spec is written;
+the refusal is a lesson for the next call, not a save on this one.
+
+## The ledger
+
+Every call — refused or completed — is appended to
+`~/Library/Application Support/local-delegate-mcp/ledger.json` (last 200
+entries, global rather than per-project, since it tracks the caller's habits
+rather than a codebase). Ledger I/O is wrapped so a bookkeeping failure can
+never lose a completed delegation.
+
+It exists to surface three things that a single call can't see, and it only
+speaks up when one of them fires — silence means nothing is wrong:
+
+- **Estimate calibration.** If a declared size clears the gate but the actual
+  output comes in under half of it, that's flagged. This is what stops the
+  gate from being trivially bypassed by optimistic numbers.
+- **Batching.** Three or more small results inside ten minutes get called out
+  as work that should have been one call.
+- **Overall trend.** When ≥30% of the last ten delegations produced less
+  output than the spec that requested them, it says so plainly.
+
+An earlier version of this README claimed batching *couldn't* be enforced
+server-side for lack of cross-call visibility. That was wrong — nothing stops
+a stdio server from persisting state, and this is that state.
 
 ## Why `output_files` matters
 

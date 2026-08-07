@@ -65,6 +65,22 @@ No build step. Run directly by an MCP client via:
   Confined to `CONTEXT_ROOT` (default: cwd), refused if a path escapes it,
   matches a sensitive-filename denylist, or its content trips the same
   credential scan as `task`/`system_prompt`.
+- **Pass `output_files` whenever the result is destined for files.** Taking
+  the returned text and writing it out yourself pays output tokens a *second*
+  time for content the model already produced — that second payment is
+  exactly the do-it-yourself baseline, so it structurally caps savings near
+  zero. This was the dominant factor across six measured rounds: the only one
+  that won (−65%) happened to avoid the retype via an external splitting
+  script, and a later round that hand-integrated its result landed at +173%
+  with the retype alone accounting for the entire baseline. The server writes
+  the files; you get back a manifest and read them to review.
+  - For multiple files, tell the model in `task` to precede each with a line
+    reading exactly `===FILE: <path>===`.
+  - The model's emitted paths are checked against your declared list, so it
+    can't choose where bytes land. Existing files need `allow_overwrite`.
+  - Markdown code fences are stripped automatically — the models emit them
+    despite instructions often enough that unstripped fences would routinely
+    corrupt written files.
 - **Don't restate in prose what `context_files` already shows structurally,
   and don't re-derive in English the logic of code you've already written.**
   Both are redundant spec cost. Reserve prose for what an example can't
@@ -121,17 +137,21 @@ No build step. Run directly by an MCP client via:
   optional-field validation first when a generated resource's create
   endpoint fails unexpectedly.
 - **A model backend can crash into a persistent "Compute error" state under
-  llama-server, and it isn't specific to any one model.** First observed
-  with Gemma 4 12B after a near-max-context generation; later, in the same
-  session, an entirely different model (Qwen3-8B) hit the identical failure
-  immediately after Gemma's crash, then worked perfectly once isolated after
-  a restart — pointing at a router-mode/build-level stability issue (likely
-  tied to model swapping or sustained load), not Gemma's architecture
-  specifically. Every subsequent request on the affected slot fails in ~1s
-  regardless of content, which looks like a fast tool-error but isn't. A
-  full `llama-server` restart (`launchctl unload`/`load -w` the plist)
-  clears it. If a model that was working starts failing instantly, suspect
-  this before suspecting the request or the model itself.
+  llama-server; the trigger looks like switching model tiers.** Three
+  occurrences now: (1) Gemma 4 12B after a near-max-context generation, (2)
+  Qwen3-8B immediately after Gemma's crash during the 4-model benchmark, (3)
+  Qwen3-8B again after a run of `delegate-fast` calls switched to
+  `model: "capable"`. Every case involved a tier swap shortly beforehand,
+  and in every case the "broken" model worked perfectly once isolated after
+  a restart — so this is a router-mode/build-level issue, not any model's
+  architecture. It's per-slot, not whole-server: `delegate-fast` kept
+  answering normally while the Qwen3-8B slot returned HTTP 500 on every
+  request. **Practical consequence: avoid switching tiers mid-session when
+  you can.** Symptoms are a `Compute error` 500 (or a ~1s tool-error that
+  looks like a fast failure but isn't); a full `llama-server` restart
+  (`launchctl unload`/`load -w` the plist) clears it. If a model that was
+  working starts failing instantly, suspect this before the request or the
+  model.
 - **The two `context_files`/prose-cost fixes above are documentation-only,
   not code-enforced — and that's probably as far as this line of fixes
   goes.** The server can't tell whether a context file was already lying

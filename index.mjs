@@ -4,7 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import axios from "axios";
-import { readFileSync } from "fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
 import path from "path";
 
 // Remove all keys from process.env except those in the allowlist. A stdio MCP server
@@ -69,15 +69,21 @@ const MAX_CONTEXT_TOTAL_BYTES = 16_000;
 const SENSITIVE_FILENAME_RE =
   /(^|[/\\])(\.env(\..*)?|\.ssh|\.aws|\.npmrc|\.git-credentials|id_rsa\w*|.*\.pem|.*\.key|credentials\.json)$/i;
 
-// Resolve relOrAbsPath against contextRoot and refuse anything that escapes it (via ../, a
+// Resolve relOrAbsPath against root and refuse anything that escapes it (via ../, a
 // sibling-directory prefix collision, or an absolute path elsewhere on disk). The `+ path.sep`
 // check matters: without it, a root of "/foo/bar" would incorrectly accept "/foo/barevil".
-function resolveContextPath(relOrAbsPath, contextRoot) {
-  const resolved = path.resolve(contextRoot, relOrAbsPath);
-  if (resolved !== contextRoot && !resolved.startsWith(contextRoot + path.sep)) {
-    throw new Error(`refuses to read outside ${contextRoot}: ${relOrAbsPath}`);
+// `action` only shapes the error message ("read"/"write") — the containment rule is identical
+// for both, and writes must never get a weaker boundary than reads.
+function resolveWithinRoot(relOrAbsPath, root, action) {
+  const resolved = path.resolve(root, relOrAbsPath);
+  if (resolved !== root && !resolved.startsWith(root + path.sep)) {
+    throw new Error(`refuses to ${action} outside ${root}: ${relOrAbsPath}`);
   }
   return resolved;
+}
+
+function resolveContextPath(relOrAbsPath, contextRoot) {
+  return resolveWithinRoot(relOrAbsPath, contextRoot, "read");
 }
 
 function formatContextBlock(files) {
@@ -126,6 +132,118 @@ function readContextFiles(relPaths) {
     files.push({ path: relPath, content });
   }
   return files;
+}
+
+// output_files support: the whole point is that the calling model never has to transcribe the
+// generated artifact. Without this, a delegated file comes back as text and then gets written
+// out via the caller's own Write/Edit call — paying output tokens a SECOND time for content the
+// local model already produced, which is exactly the do-it-yourself baseline and structurally
+// caps savings near zero. Measured: the one delegation round that showed real savings (-65%)
+// avoided the retype by splitting the response with an external awk script; a later round that
+// hand-integrated the result paid ~541 tokens to retype it and landed at +173%.
+const MAX_OUTPUT_FILE_BYTES = 200_000;
+
+// The local model emits a fenced code block despite explicit "no markdown fences" instructions
+// with some regularity (observed across three different models in testing). Harmless when the
+// response is being read by a human/model; corrupts the file outright when written to disk.
+function stripCodeFence(content) {
+  const lines = content.split("\n");
+  let start = 0;
+  while (start < lines.length && lines[start].trim() === "") start++;
+  let end = lines.length - 1;
+  while (end >= 0 && lines[end].trim() === "") end--;
+  if (start < end && /^```/.test(lines[start].trim()) && lines[end].trim() === "```") {
+    return lines.slice(start + 1, end).join("\n");
+  }
+  return content;
+}
+
+// Splits a multi-file response on "===FILE: <path>===" marker lines. Anything before the first
+// marker is discarded, which conveniently drops preamble chatter. Returns [] when there are no
+// markers at all (single-file case, handled by the caller).
+function splitResponseIntoFiles(text) {
+  const files = [];
+  let currentPath = null;
+  let buffer = [];
+  const flush = () => {
+    if (currentPath !== null) files.push({ path: currentPath, content: buffer.join("\n") });
+  };
+  for (const line of text.split("\n")) {
+    const marker = line.match(/^===FILE:\s*(.+?)\s*===$/);
+    if (marker) {
+      flush();
+      currentPath = marker[1];
+      buffer = [];
+    } else if (currentPath !== null) {
+      buffer.push(line);
+    }
+  }
+  flush();
+  return files;
+}
+
+// Writes the model's response to disk. Two-phase on purpose: every path is validated before ANY
+// file is written, so a violation in the 3rd of 4 files doesn't leave the first two on disk.
+//
+// The caller declares the allowed paths up front and the model's own emitted paths are checked
+// against that allowlist — the local model's output is not trusted to choose write destinations.
+function writeOutputFiles(responseText, declaredPaths, allowOverwrite) {
+  const parsed = splitResponseIntoFiles(responseText);
+  let planned;
+  if (parsed.length === 0) {
+    if (declaredPaths.length !== 1) {
+      throw new Error(
+        `response contained no "===FILE: <path>===" markers, but ${declaredPaths.length} output ` +
+          `files were declared. Either declare exactly one output file, or instruct the model in ` +
+          `\`task\` to emit each file preceded by a line reading exactly "===FILE: <path>===".`
+      );
+    }
+    planned = [{ path: declaredPaths[0], content: stripCodeFence(responseText) }];
+  } else {
+    planned = parsed.map((f) => ({ path: f.path, content: stripCodeFence(f.content) }));
+  }
+
+  // Phase 1: validate everything. Compare on resolved paths so "./a.js" and "a.js" match.
+  const declaredResolved = new Map(
+    declaredPaths.map((p) => [resolveWithinRoot(p, CONTEXT_ROOT, "write"), p])
+  );
+  const validated = [];
+  for (const file of planned) {
+    const resolved = resolveWithinRoot(file.path, CONTEXT_ROOT, "write");
+    if (!declaredResolved.has(resolved)) {
+      throw new Error(
+        `the model's response tried to write "${file.path}", which is not in the declared ` +
+          `output_files list (${declaredPaths.join(", ")}). Refusing all writes from this response.`
+      );
+    }
+    if (SENSITIVE_FILENAME_RE.test(resolved)) {
+      throw new Error(`refusing to write a sensitive-looking file: ${file.path}`);
+    }
+    if (Buffer.byteLength(file.content, "utf8") > MAX_OUTPUT_FILE_BYTES) {
+      throw new Error(`${file.path} exceeds the ${MAX_OUTPUT_FILE_BYTES}-byte per-file output limit`);
+    }
+    if (existsSync(resolved) && !allowOverwrite) {
+      throw new Error(
+        `${file.path} already exists and allow_overwrite was not set. Refusing all writes from ` +
+          `this response — review the existing file before letting an unreviewed local-model ` +
+          `response replace it.`
+      );
+    }
+    validated.push({ relPath: file.path, resolved, content: file.content });
+  }
+
+  // Phase 2: write.
+  const written = [];
+  for (const file of validated) {
+    mkdirSync(path.dirname(file.resolved), { recursive: true });
+    writeFileSync(file.resolved, file.content);
+    written.push({
+      path: file.relPath,
+      bytes: Buffer.byteLength(file.content, "utf8"),
+      lines: file.content.split("\n").length,
+    });
+  }
+  return written;
 }
 
 const LOCAL_LLM_URL = process.env.LOCAL_LLM_URL || "http://localhost:8080";
@@ -181,7 +299,11 @@ server.tool(
     "small/isolated artifact (roughly under 20 lines) — writing a precise-enough spec for " +
     "something that small usually costs more than just writing it yourself. If you have several " +
     "small related mechanical asks, batch them into one `task` rather than one call per item — " +
-    "each call pays a fixed overhead regardless of how small the ask is.",
+    "each call pays a fixed overhead regardless of how small the ask is. When the result is " +
+    "destined for files, pass `output_files` so this tool writes them directly; transcribing " +
+    "the returned text into your own Write/Edit call means paying output tokens twice for the " +
+    "same content and is the most common reason a delegation ends up more expensive than just " +
+    "doing the work yourself.",
   {
     task: z
       .string()
@@ -213,6 +335,29 @@ server.tool(
           "output) rather than composing the example by hand — you pay for the script, not the " +
           "content it produces."
       ),
+    output_files: z
+      .array(z.string())
+      .optional()
+      .describe(
+        "Optional list of file paths the response should be written to, relative to this " +
+          "server's working directory. STRONGLY PREFERRED over taking the returned text and " +
+          "writing it out yourself: transcribing the artifact into your own Write/Edit call " +
+          "costs you output tokens a second time for content the local model already produced, " +
+          "which is the single biggest reason a delegation ends up costing more than doing the " +
+          "work directly. When set, the tool returns only a manifest (paths, sizes) instead of " +
+          "the content — read the files back to review them. For more than one file, instruct " +
+          "the model in `task` to precede each file with a line reading exactly " +
+          "\"===FILE: <path>===\"; paths it emits must match this list or all writes are " +
+          "refused. Existing files are never overwritten unless allow_overwrite is set."
+      ),
+    allow_overwrite: z
+      .boolean()
+      .optional()
+      .describe(
+        "Permit output_files to replace files that already exist (default false). Leave unset " +
+          "when generating new files. Only set this when you have already looked at what's " +
+          "there and intend for an unreviewed local-model response to replace it."
+      ),
     system_prompt: z
       .string()
       .optional()
@@ -237,7 +382,7 @@ server.tool(
           "should not need this."
       ),
   },
-  async ({ task, system_prompt, max_tokens, model, context_files }) => {
+  async ({ task, system_prompt, max_tokens, model, context_files, output_files, allow_overwrite }) => {
     const secretHits = [
       ...findSecretLikeContent(task),
       ...(system_prompt ? findSecretLikeContent(system_prompt) : []),
@@ -318,9 +463,45 @@ server.tool(
       // and isn't part of what the calling model paid output tokens to write.
       const specChars = task.length + (system_prompt ? system_prompt.length : 0);
       const ratioWarning = buildRatioWarning(specChars, content.length, MIN_SPEC_CHARS_FOR_RATIO_WARNING);
+      const suffix = ratioWarning ? `\n\n[${ratioWarning}]` : "";
+
+      if (output_files && output_files.length > 0) {
+        let written;
+        try {
+          written = writeOutputFiles(content, output_files, allow_overwrite === true);
+        } catch (error) {
+          return {
+            content: [
+              {
+                type: "text",
+                text:
+                  `Nothing written: ${error.message}\n\n` +
+                  `The model's response is unsaved. Re-run with a corrected output_files list, ` +
+                  `or omit output_files to get the raw text back.`,
+              },
+            ],
+            isError: true,
+          };
+        }
+        const manifest = written
+          .map((f) => `  ${f.path} (${f.bytes} bytes, ${f.lines} lines)`)
+          .join("\n");
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                `Wrote ${written.length} file${written.length === 1 ? "" : "s"}:\n${manifest}\n\n` +
+                `Content was written directly and is NOT included above — read the files to ` +
+                `review them. Local-model output still needs reviewing before you rely on it.` +
+                suffix,
+            },
+          ],
+        };
+      }
 
       return {
-        content: [{ type: "text", text: ratioWarning ? `${content}\n\n[${ratioWarning}]` : content }],
+        content: [{ type: "text", text: `${content}${suffix}` }],
       };
     } catch (error) {
       const isConnRefused = error.code === "ECONNREFUSED";

@@ -48,6 +48,19 @@ isn't installed and running, this server's tool calls will fail with a clear
   `*.key`, `credentials.json`, etc.), or whose content matches the same
   credential scan applied to `task` is refused. Capped at 8000 bytes/file,
   16000 bytes combined.
+- `output_files` (optional): a list of paths the response should be written
+  to, server-side. **This is the highest-leverage parameter in the tool** —
+  see "Why `output_files` matters" below. For multiple files, instruct the
+  model in `task` to precede each with a line reading exactly
+  `===FILE: <path>===`; any path it emits that isn't in this list causes all
+  writes to be refused. Same containment and sensitive-filename rules as
+  `context_files`, plus: existing files are never overwritten unless
+  `allow_overwrite` is set, and validation happens for every file before any
+  file is written (so a violation partway through can't leave half the batch
+  on disk). When set, the tool returns a manifest — paths, byte and line
+  counts — instead of the content.
+- `allow_overwrite` (optional, default false): permit `output_files` to
+  replace files that already exist. Leave unset when generating new files.
 - `system_prompt` (optional): role/constraints/output-format guidance.
 - `max_tokens` (optional, default 2048).
 - `model` (optional, default `"fast"`): `"fast"` routes to the `delegate-fast`
@@ -72,9 +85,10 @@ history): pasting large context into `task` instead of using
 `context_files`, and delegating a single small/isolated artifact where the
 spec costs more to write than the artifact itself. It recommends batching
 several small related asks into one `task` instead of one call per item —
-that one can't be enforced by the server (it has no visibility across
-separate calls), so it's stated guidance for whichever model is calling
-this tool, not a code-level check.
+currently stated guidance rather than a code-level check. (That guidance
+originally claimed the server *couldn't* enforce batching for lack of
+cross-call visibility; that was wrong — the server is free to persist state
+between calls and could detect a run of small ones. It just doesn't yet.)
 
 **Ratio warning.** If a response comes back shorter than the `task` +
 `system_prompt` that produced it (only checked once the spec is long enough,
@@ -82,6 +96,28 @@ this tool, not a code-level check.
 note to its own returned text flagging that this delegation likely wasn't
 worth it — real-time, visible feedback rather than something only findable
 later in the usage log.
+
+## Why `output_files` matters
+
+Across six measured delegation rounds during development, only one showed a
+real token saving (−65%); the rest ran between +118% and +257% *more*
+expensive than the orchestrator just doing the work itself. Reviewing why,
+the dominant factor wasn't spec quality or model choice — it was that the
+calling model **paid for the artifact twice**: once writing the spec, then
+again transcribing the returned text into its own `Write`/`Edit` call. That
+second payment is precisely the do-it-yourself baseline, which structurally
+caps savings near zero no matter how good the rest of the delegation is.
+
+The one round that won avoided the retype by accident — an external script
+split the response into files, so the orchestrator never transcribed the
+~8,700 characters it generated. `output_files` makes that the built-in path
+instead of a lucky accident: the server writes the files, the caller's cost
+drops to spec + review-and-fix only, and the artifact is never paid for
+twice.
+
+This does mean the content doesn't pass through the caller's output. **It
+still has to be reviewed** — read the files back (cheap, they're input
+tokens) before relying on them. "Written to disk" is not "verified correct."
 
 ## Security & Guardrails
 
@@ -101,10 +137,21 @@ later in the usage log.
   denylist (`.env`, `.ssh`, `*.pem`, `*.key`, `credentials.json`, etc.) are
   refused before the file is even opened, as a backstop for cases the
   content scan might miss.
+- **File-write containment** (`output_files`): identical boundary to reads —
+  paths must resolve within `CONTEXT_ROOT`, and the sensitive-filename
+  denylist applies to writes too. Three further constraints, because writing
+  is the destructive direction: the caller declares the allowed paths up
+  front and **the local model's own emitted paths are checked against that
+  allowlist** (the model never chooses where bytes land); existing files are
+  refused unless `allow_overwrite` is explicitly set; and all paths are
+  validated before any file is written, so a violation in the middle of a
+  batch can't leave a partial write behind.
 - **Advisory output only**: the local model only ever returns text; this tool
-  never executes anything on its behalf. Its output must be reviewed by the
-  calling agent before being used — see the tool's own description in
-  `index.mjs` for what it's safe to delegate in the first place.
+  never executes anything on its behalf. `output_files` writes that text to
+  disk, which is not the same as running it — but it does mean unreviewed
+  model output can land in your working tree, so read the files back before
+  relying on them. See the tool's own description in `index.mjs` for what
+  it's safe to delegate in the first place.
 
 ## Known operational notes
 

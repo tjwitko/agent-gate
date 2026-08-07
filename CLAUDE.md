@@ -50,14 +50,26 @@ No build step. Run directly by an MCP client via:
 
 - **`task` must be fully self-contained.** The local model has no memory of
   the calling conversation and can't ask follow-up questions.
-- **Use `context_files` instead of pasting file contents into `task`.**
-  Pasting costs the *calling* model output tokens to transcribe; empirically
-  this made one real delegation (CLAUDE.md drafting) cost ~160% more Claude
-  output tokens than just doing it directly, because the task string had to
-  re-transcribe most of a README. `context_files` reads paths server-side
-  instead — confined to `CONTEXT_ROOT` (default: cwd), refused if a path
-  escapes it, matches a sensitive-filename denylist, or its content trips
-  the same credential scan as `task`/`system_prompt`.
+- **Use `context_files` instead of pasting file contents into `task` — but
+  only when the file already exists for other reasons.** Pasting costs
+  output tokens to transcribe; empirically this made one real delegation
+  (CLAUDE.md drafting) cost ~160% more Claude output tokens than just doing
+  it directly. `context_files` is only actually free under that same
+  precondition though: authoring a *new* file specifically to use this
+  parameter costs the same as pasting would have — measured directly on a
+  dep-audit-mcp delegation where a schema-reference file had to be created
+  from scratch, contributing roughly half of a ~173% overhead. If you need
+  to demonstrate a real external schema that isn't a file yet, derive one
+  with a short script from data you can already fetch, rather than
+  hand-composing the example — you pay for the script, not its output.
+  Confined to `CONTEXT_ROOT` (default: cwd), refused if a path escapes it,
+  matches a sensitive-filename denylist, or its content trips the same
+  credential scan as `task`/`system_prompt`.
+- **Don't restate in prose what `context_files` already shows structurally,
+  and don't re-derive in English the logic of code you've already written.**
+  Both are redundant spec cost. Reserve prose for what an example can't
+  convey (thresholds, ordering rules, edge cases), and reference an existing
+  helper by name instead of describing what it does.
 - **Never put real secrets in `task`/`system_prompt`/`context_files`.** All
   three are scanned for credential-shaped content and the call is refused if
   something matches — use placeholders and substitute real values into the
@@ -120,3 +132,12 @@ No build step. Run directly by an MCP client via:
   full `llama-server` restart (`launchctl unload`/`load -w` the plist)
   clears it. If a model that was working starts failing instantly, suspect
   this before suspecting the request or the model itself.
+- **The two `context_files`/prose-cost fixes above are documentation-only,
+  not code-enforced — and that's probably as far as this line of fixes
+  goes.** The server can't tell whether a context file was already lying
+  around or authored five minutes ago for this one call, or whether `task`
+  prose duplicates an example — that distinction only exists in the calling
+  model's own workflow history. Same situation as the batching guidance:
+  fixable-in-code problems (context-paste cost, tiny-artifact cost) already
+  have code fixes (`context_files`, the ratio warning); what's left is
+  judgment calls only the caller can make.

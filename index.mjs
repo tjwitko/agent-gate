@@ -188,8 +188,13 @@ server.tool(
       .describe(
         "A fully self-contained description of the work to do. The local model cannot see this " +
           "conversation and cannot ask follow-up questions. Prefer `context_files` over pasting " +
-          "file contents into this string — pasting costs you output tokens to transcribe; " +
-          "`context_files` reads them on the server side for free."
+          "file contents into this string — pasting costs you output tokens to transcribe. But " +
+          "don't restate in prose what a context_files entry already shows structurally (field " +
+          "names, shape, nesting) — that's redundant with the example and costs you twice. Only " +
+          "add prose for what an example can't convey: exact thresholds, ordering/precedence " +
+          "rules, edge-case handling. And if you've already written code that does part of what " +
+          "you're asking for (a helper function, a type), reference it by name and ask the model " +
+          "to use it — don't re-derive its exact logic in English when you could just point at it."
       ),
     context_files: z
       .array(z.string())
@@ -200,7 +205,13 @@ server.tool(
           "instead of pasting them into `task`. Refused if a path escapes the server's working " +
           "directory, looks like a sensitive file (.env, .ssh, *.pem, *.key, credentials, etc.), " +
           "or its content looks like it contains a credential. Capped at 8000 bytes per file, " +
-          "16000 bytes combined."
+          "16000 bytes combined. Only actually free if the file already exists for other " +
+          "reasons — authoring a new file specifically to use this parameter costs the same " +
+          "output tokens as pasting the same content into `task` would have. If you need to " +
+          "demonstrate a real external schema/format that doesn't exist as a file yet, derive " +
+          "one with a short script from data you can already fetch (an API response, a command's " +
+          "output) rather than composing the example by hand — you pay for the script, not the " +
+          "content it produces."
       ),
     system_prompt: z
       .string()

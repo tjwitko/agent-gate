@@ -154,6 +154,34 @@ No build step. Run directly by an MCP client via:
   it's a standing review checkpoint for this specific task pattern. Check
   optional-field validation first when a generated resource's create
   endpoint fails unexpectedly.
+- **Verify versioned external interfaces yourself before delegating against
+  them — don't give the local model internet access to do it.** A throwaway
+  test (an immutable audit-log service with Kubernetes/Terraform deployment
+  artifacts) surfaced 8 real bugs across two delegated calls, but only one —
+  wrong field names for a pinned `terraform-aws-modules/eks/aws` version
+  (`node_groups` instead of `eks_managed_node_groups`, `instance_type`
+  instead of `instance_types`, `desired_capacity` instead of `desired_size`,
+  plus the module referencing its own output as its own input) — was a
+  stale/versioned-knowledge problem. The other seven (Express route
+  shadowing, a `node:test`/`assert` import that doesn't exist, Docker
+  `USER`/`COPY` ordering, an unpaired code fence, an Express default-status
+  assumption, an immutable store's tests assuming reset semantics it can't
+  have) were reasoning errors internet access wouldn't touch. For the one
+  category it would help, giving the *local* model live fetch access is the
+  wrong fix: it has no instruction-hierarchy training (same reason
+  `context_files` content is scanned for secrets and Read containment
+  exists), so fetched content becomes a second, less reviewable injection
+  surface; it also has no reliable sense of when its own knowledge is stale,
+  so it wouldn't know when to bother looking something up; and this
+  project's own history is small-local-model tool-calling being unreliable
+  (why Qwen2.5-Coder was swapped out as the interactive-chat model
+  originally). What actually fixed the Terraform bug was the *orchestrator*
+  fetching the module's real source (`WebFetch`/`curl` against the actual
+  GitHub repo, not memory) and passing the verified interface through
+  `context_files` — the same reviewed, sandboxed mechanism already used for
+  everything else. Do that deliberately whenever a task references a
+  specific version of a library, framework, or infrastructure module,
+  instead of trusting either your memory or the local model's.
 - **A model backend can crash into a persistent "Compute error" state under
   llama-server; the trigger looks like switching model tiers.** Three
   occurrences now: (1) Gemma 4 12B after a near-max-context generation, (2)

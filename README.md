@@ -47,7 +47,11 @@ isn't installed and running, this server's tool calls will fail with a clear
   that escapes it, looks like a sensitive file (`.env`, `.ssh`, `*.pem`,
   `*.key`, `credentials.json`, etc.), or whose content matches the same
   credential scan applied to `task` is refused. Capped at 8000 bytes/file,
-  16000 bytes combined.
+  16000 bytes combined. If a task references a specific version of an
+  external library, framework, or infrastructure module, verify its real
+  current interface yourself (the local model can't tell when its own
+  knowledge is stale) and pass the verified reference here — don't give the
+  local model its own internet access to check; see `CLAUDE.md` for why.
 - `output_files` (optional): a list of paths the response should be written
   to, server-side. **This is the highest-leverage parameter in the tool** —
   see "Why `output_files` matters" below. For multiple files, instruct the

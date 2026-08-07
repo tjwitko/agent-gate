@@ -418,7 +418,12 @@ server.tool(
     "doing the work yourself. `expected_output_lines` is required and is enforced: small " +
     "delegations are refused outright, because measured evidence says they cost more than they " +
     "save. Estimate that number BEFORE writing the spec — if it's under the bar, skip this tool " +
-    "rather than spending tokens on a spec that will be refused.",
+    "rather than spending tokens on a spec that will be refused. If the task references a " +
+    "specific version of an external library, framework, or infrastructure module (an API " +
+    "shape, a Terraform registry module's inputs, a package's exports), verify its actual " +
+    "current interface yourself first — the local model has no way to know its own knowledge " +
+    "is stale, and will state a wrong interface with the same confidence as a correct one. Pass " +
+    "the verified reference via `context_files` rather than trusting either your memory or its.",
   {
     task: z
       .string()

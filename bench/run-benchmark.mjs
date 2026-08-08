@@ -1,15 +1,30 @@
 #!/usr/bin/env node
 // Reusable benchmark for evaluating a candidate local model on local-delegate-mcp's actual
-// delegation path, before adopting it into presets.ini. Runs the same standardized codegen
-// task used to evaluate every model tested so far (Qwen2.5-Coder-7B, Qwen3.5-9B, Gemma 4 12B)
+// delegation path, before adopting it into presets.ini. Runs a standardized codegen task
 // against the model alias given on the command line, via the real delegate_to_local_model tool
 // (CAPABLE_MODEL_ALIAS is overridden for the run, same mechanism used manually during
 // development — see local-copilot-stack's model-selection notes for why this exists).
 //
 // Automates the mechanical parts: call, detect truncation, retry with an escalated budget,
-// integrate the result into a fresh copy of the reference project, run its test suite, and
-// report comparable numbers (attempts, tokens, wall-clock, pass/fail). It does NOT automate
-// code-quality review — inspect bench/runs/<label>/ yourself before trusting a "pass".
+// integrate the result into a fresh copy of a reference project, verify it, and report
+// comparable numbers (attempts, tokens, wall-clock, pass/fail). It does NOT automate code-quality
+// review — inspect bench/runs/<label>/ yourself before trusting a "pass".
+//
+// Two task shapes are supported, selected by the task JSON's "taskType":
+//   "node-rest" (default, e.g. task.json) — a REST-resource codegen task, verified by running
+//     the reference project's test suite (`node --test`).
+//   "iac" (e.g. task-iac.json) — a Terraform/Docker infrastructure task, verified by
+//     `terraform validate` and `docker build`. Neither of those catches live-cloud-semantics bugs
+//     (e.g. a storage-class choice that breaks reads on real S3) — only structural/schema
+//     validity — see local-delegate-mcp/CLAUDE.md for why a real S3-backed smoke test wasn't
+//     folded into this generic harness.
+// Each task JSON also carries its own "requiredMarkers" (the ===FILE:...=== markers a complete
+// response must contain) and "referenceDir" (which bench/ subdirectory to copy as the starting
+// project) — nothing about the task shape is hardcoded here anymore.
+//
+// Regardless of task type, every run also checks for imports/requires of packages never declared
+// in the generated project's package.json — a real bug found in a delegated run (a model used
+// `ajv` without adding it as a dependency) that isn't specific to either task shape.
 //
 // Usage:
 //   node run-benchmark.mjs --model <router-preset-alias> [options]
@@ -18,18 +33,17 @@
 //   --max-attempts <n>        give up after this many tries (default 3)
 //   --label <name>            runs/ subdirectory name (default: the model alias)
 //   --task <path>             alternate task JSON (default: task.json) — e.g. a variant with a
-//                             model-specific flag like Qwen3's "/no_think" in system_prompt.
-//                             Keep model-specific prompt tweaks in separate task files rather
-//                             than branching on model name in here.
+//                             model-specific flag like Qwen3's "/no_think" in system_prompt, or
+//                             a different task shape entirely like task-iac.json.
 
 import { spawn, spawnSync } from "child_process";
-import { readFileSync, writeFileSync, mkdirSync, cpSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, mkdirSync, cpSync, existsSync, readdirSync } from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { builtinModules } from "module";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SERVER_PATH = path.join(__dirname, "..", "index.mjs");
-const REFERENCE_DIR = path.join(__dirname, "reference");
 const TASK_PATH = path.join(__dirname, "task.json");
 const RUNS_DIR = path.join(__dirname, "runs");
 
@@ -38,7 +52,8 @@ const TIMEOUT_BASE_MS = 30_000;
 const TIMEOUT_PER_TOKEN_MS = 150;
 const HARNESS_TIMEOUT_BUFFER_MS = 60_000;
 
-const REQUIRED_MARKERS = [
+// Fallback only — every task JSON in this repo now declares its own requiredMarkers explicitly.
+const DEFAULT_REQUIRED_MARKERS = [
   "===FILE: src/resources/projects.js===",
   "===FILE: test/projects.test.js===",
   "===FILE: src/resources/tasks.js===",
@@ -139,8 +154,8 @@ function callDelegate({ cwd, args, timeoutMs, modelAlias }) {
   });
 }
 
-function looksComplete(result) {
-  return result.ok && REQUIRED_MARKERS.every((m) => result.text.includes(m));
+function looksComplete(result, requiredMarkers) {
+  return result.ok && requiredMarkers.every((m) => result.text.includes(m));
 }
 
 function splitFiles(text, targetDir) {
@@ -167,15 +182,113 @@ function splitFiles(text, targetDir) {
   flush();
 }
 
+// --- Generic dependency-completeness check (applies to any task shape) ---
+// Written after a real delegated run shipped code that `require`d a package (ajv) never added to
+// package.json — a bug class `node --test`/`npm install` don't reliably surface as *why* something
+// broke, and `terraform validate`/`docker build` don't touch at all. Flags every bare import
+// specifier with no matching entry in dependencies/devDependencies; doesn't fail the run by
+// itself, just surfaces it in the report the same way testsPassedCleanly does.
+const IMPORT_RE = /import\s+(?:[\s\S]*?\sfrom\s+)?["']([^"']+)["']/g;
+const DYNAMIC_IMPORT_RE = /import\(\s*["']([^"']+)["']\s*\)/g;
+const REQUIRE_RE = /require\(\s*["']([^"']+)["']\s*\)/g;
+
+function walkJsFiles(dir, acc = []) {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name === "node_modules" || entry.name === ".git" || entry.name === ".terraform") continue;
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) walkJsFiles(full, acc);
+    else if (/\.(m|c)?js$/.test(entry.name)) acc.push(full);
+  }
+  return acc;
+}
+
+function extractImportSpecifiers(source) {
+  const specifiers = new Set();
+  for (const re of [IMPORT_RE, DYNAMIC_IMPORT_RE, REQUIRE_RE]) {
+    re.lastIndex = 0;
+    let m;
+    while ((m = re.exec(source))) specifiers.add(m[1]);
+  }
+  return specifiers;
+}
+
+function toPackageName(specifier) {
+  if (specifier.startsWith(".") || specifier.startsWith("/") || specifier.startsWith("node:")) return null;
+  if (builtinModules.includes(specifier)) return null;
+  const parts = specifier.split("/");
+  return specifier.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0];
+}
+
+function checkDependencyCompleteness(runDir) {
+  const pkgPath = path.join(runDir, "package.json");
+  if (!existsSync(pkgPath)) return { checked: false, missing: [] };
+  const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
+  const declared = new Set([
+    ...Object.keys(pkg.dependencies || {}),
+    ...Object.keys(pkg.devDependencies || {}),
+  ]);
+  const missing = new Set();
+  for (const file of walkJsFiles(runDir)) {
+    for (const spec of extractImportSpecifiers(readFileSync(file, "utf8"))) {
+      const pkgName = toPackageName(spec);
+      if (pkgName && !declared.has(pkgName)) missing.add(pkgName);
+    }
+  }
+  return { checked: true, missing: [...missing] };
+}
+
+// --- IaC verification: terraform validate + docker build ---
+// Both are static/structural checks with no cloud credentials required — deliberately not a live
+// smoke test. They would have caught schema errors (wrong Object Lock attributes, a duplicate
+// provider block, undeclared variables) and a broken Dockerfile (a build script that shelled out
+// to `docker build` from inside its own image build), but NOT a bug like a storage class that
+// silently breaks reads on real S3 — that only surfaced against a real S3-compatible endpoint.
+// Missing `terraform`/`docker` binaries are reported as skipped (null), not a failure.
+function verifyTerraformAndDocker(runDir, verify) {
+  const result = { terraformValid: null, terraformOutput: "", dockerBuildOk: null, dockerOutput: "" };
+
+  const tfDir = path.join(runDir, verify.terraformDir || "terraform");
+  if (existsSync(tfDir)) {
+    const init = spawnSync("terraform", ["init", "-backend=false", "-input=false"], { cwd: tfDir, encoding: "utf8" });
+    if (init.error) {
+      result.terraformOutput = `terraform not available: ${init.error.message}`;
+    } else {
+      const validate = spawnSync("terraform", ["validate"], { cwd: tfDir, encoding: "utf8" });
+      result.terraformOutput = `--- init ---\n${init.stdout}${init.stderr}\n--- validate ---\n${validate.stdout}${validate.stderr}`;
+      result.terraformValid = init.status === 0 && validate.status === 0;
+    }
+  }
+
+  const dockerfilePath = path.join(runDir, verify.dockerfile || "Dockerfile");
+  if (existsSync(dockerfilePath)) {
+    const tag = `local-delegate-bench-${path.basename(runDir)}`.toLowerCase().replace(/[^a-z0-9_.-]/g, "-");
+    const build = spawnSync("docker", ["build", "-t", tag, "-f", dockerfilePath, runDir], { encoding: "utf8" });
+    if (build.error) {
+      result.dockerOutput = `docker not available: ${build.error.message}`;
+    } else {
+      result.dockerOutput = build.stdout + build.stderr;
+      result.dockerBuildOk = build.status === 0;
+      if (result.dockerBuildOk) spawnSync("docker", ["rmi", "-f", tag]);
+    }
+  }
+
+  return result;
+}
+
 async function main() {
   const opts = parseArgs();
   const task = JSON.parse(readFileSync(opts.taskPath, "utf8"));
+  const requiredMarkers = task.requiredMarkers || DEFAULT_REQUIRED_MARKERS;
+  const verifyType = task.verify?.type || "node-test";
+  const referenceDir = path.join(__dirname, task.referenceDir || "reference");
   const runDir = path.join(RUNS_DIR, opts.label);
 
-  console.log(`==> benchmarking "${opts.model}" (run dir: ${runDir})`);
-  cpSync(REFERENCE_DIR, runDir, { recursive: true });
-  console.log("==> npm install...");
-  spawnSync("npm", ["install", "--no-fund", "--no-audit"], { cwd: runDir, stdio: "inherit" });
+  console.log(`==> benchmarking "${opts.model}" (taskType=${task.taskType || "node-rest"}, run dir: ${runDir})`);
+  cpSync(referenceDir, runDir, { recursive: true });
+  if (existsSync(path.join(runDir, "package.json"))) {
+    console.log("==> npm install...");
+    spawnSync("npm", ["install", "--no-fund", "--no-audit"], { cwd: runDir, stdio: "inherit" });
+  }
 
   let maxTokens = opts.startMaxTokens;
   const attempts = [];
@@ -193,7 +306,7 @@ async function main() {
     attempts.push({ attempt, maxTokens, elapsedMs: result.elapsedMs, usage: result.usage, ok: result.ok, reason: result.reason });
     console.log(`    -> ${result.ok ? "responded" : `failed (${result.reason})`}, ${Math.round(result.elapsedMs / 1000)}s, usage=${JSON.stringify(result.usage)}`);
 
-    if (looksComplete(result)) {
+    if (looksComplete(result, requiredMarkers)) {
       finalResult = result;
       break;
     }
@@ -209,6 +322,7 @@ async function main() {
 
   const report = {
     model: opts.model,
+    taskType: task.taskType || "node-rest",
     attempts: attempts.length,
     attemptDetail: attempts,
     totalLocalTokens,
@@ -224,24 +338,44 @@ async function main() {
   }
 
   splitFiles(finalResult.text, runDir);
-  console.log("==> running test suite...");
-  const testRun = spawnSync("node", ["--test"], { cwd: runDir, encoding: "utf8" });
-  const testOutput = testRun.stdout + testRun.stderr;
-  const passMatch = testOutput.match(/# pass (\d+)/) || testOutput.match(/ℹ pass (\d+)/);
-  const failMatch = testOutput.match(/# fail (\d+)/) || testOutput.match(/ℹ fail (\d+)/);
-  report.testsPass = passMatch ? Number(passMatch[1]) : null;
-  report.testsFail = failMatch ? Number(failMatch[1]) : null;
-  report.testsPassedCleanly = testRun.status === 0;
+
+  const depCheck = checkDependencyCompleteness(runDir);
+  report.missingDependencies = depCheck.missing;
+  if (depCheck.missing.length > 0) {
+    console.log(`==> WARNING: imported but not declared in package.json: ${depCheck.missing.join(", ")}`);
+  }
+
+  let passedCleanly;
+  if (verifyType === "terraform-docker") {
+    console.log("==> running terraform validate + docker build...");
+    const iacResult = verifyTerraformAndDocker(runDir, task.verify || {});
+    report.terraformValid = iacResult.terraformValid;
+    report.dockerBuildOk = iacResult.dockerBuildOk;
+    writeFileSync(path.join(runDir, "terraform-validate-output.txt"), iacResult.terraformOutput);
+    writeFileSync(path.join(runDir, "docker-build-output.txt"), iacResult.dockerOutput);
+    passedCleanly = iacResult.terraformValid !== false && iacResult.dockerBuildOk !== false;
+    if (iacResult.terraformValid === null) console.log("==> NOTE: terraform not available, skipped");
+    if (iacResult.dockerBuildOk === null) console.log("==> NOTE: docker not available, skipped");
+  } else {
+    console.log("==> running test suite...");
+    const testRun = spawnSync("node", ["--test"], { cwd: runDir, encoding: "utf8" });
+    const testOutput = testRun.stdout + testRun.stderr;
+    const passMatch = testOutput.match(/# pass (\d+)/) || testOutput.match(/ℹ pass (\d+)/);
+    const failMatch = testOutput.match(/# fail (\d+)/) || testOutput.match(/ℹ fail (\d+)/);
+    report.testsPass = passMatch ? Number(passMatch[1]) : null;
+    report.testsFail = failMatch ? Number(failMatch[1]) : null;
+    report.testsPassedCleanly = testRun.status === 0;
+    writeFileSync(path.join(runDir, "test-output.txt"), testOutput);
+    passedCleanly = report.testsPassedCleanly;
+  }
 
   console.log("\n==> RESULT");
   console.log(JSON.stringify(report, null, 2));
   writeFileSync(path.join(runDir, "bench-report.json"), JSON.stringify(report, null, 2));
-  writeFileSync(path.join(runDir, "test-output.txt"), testOutput);
 
-  if (!report.testsPassedCleanly) {
+  if (!passedCleanly) {
     console.log(
-      `\n==> tests did NOT pass out of the box (${report.testsPass ?? "?"} pass / ${report.testsFail ?? "?"} fail). ` +
-        `Review ${runDir} by hand — this is expected to need human review, not a script bug.`
+      `\n==> verification did NOT pass cleanly. Review ${runDir} by hand — this is expected to need human review, not a script bug.`
     );
   }
 }

@@ -24,8 +24,26 @@ Two router aliases:
 - `bench/` — reusable benchmark for deciding whether a candidate local model is worth adopting
   into `local-copilot-stack`'s `presets.ini`. `bench/run-benchmark.mjs --model <alias>` runs a
   standardized codegen task through the real delegation tool, escalating `max_tokens`
-  automatically on truncation, then reports attempts/tokens/wall-clock/test-pass. See
-  `bench/README.md`. `bench/runs/` is gitignored scratch output.
+  automatically on truncation, then reports attempts/tokens/wall-clock/pass-fail. Two task shapes,
+  each fully self-describing via its own JSON (`taskType`, `referenceDir`, `requiredMarkers`,
+  `verify`) — the harness has no hardcoded task shape:
+  - `task.json` / `task-no-think.json` (`taskType: "node-rest"`) — verified by the reference
+    project's test suite.
+  - `task-iac.json` (`taskType: "iac"`) — a Terraform/Docker task, verified by `terraform
+    validate` + `docker build` (needs both on `PATH`; missing either is reported as skipped, not
+    failed). Added after a real delegated round shipped Terraform with a duplicate provider
+    block, an invalid resource attribute, and undeclared variables, plus a Dockerfile that
+    shelled out to `docker build` from inside its own image build. Confirmed working on first
+    real run: caught a 7B-generated `aws_sqs_queue.this.queue_url` (real attribute is `.url`)
+    that would otherwise have shipped silently. **Does not catch live-cloud-semantics
+    bugs** — the same round's worst two bugs (a storage class that silently breaks reads on real
+    S3, a per-object API field that only a real S3-compatible endpoint rejects) only surfaced
+    against an actual MinIO container and were deliberately not folded into this generic harness;
+    check that class by hand, per task.
+  Regardless of task shape, every run also flags any `import`/`require` of a package never
+  declared in the generated project's `package.json` (`missingDependencies` in the report) — a
+  real bug from the same round (a model used `ajv` without declaring it) that isn't specific to
+  either task shape. See `bench/README.md`. `bench/runs/` is gitignored scratch output.
 
 There is no other test directory in this repo. Ad-hoc testing during
 development has used a throwaway harness script (spawn `index.mjs` as a

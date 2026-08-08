@@ -1,0 +1,31 @@
+{
+  "taskType": "iac",
+  "system_prompt": "You write Terraform and Dockerfiles that exactly match an existing project's conventions. Output ONLY the requested file contents in the exact structure asked for — no markdown fences, no explanation before, between, or after the files.",
+  "task": "The reference files show this project's existing pattern: a root Terraform module (terraform/main.tf, terraform/variables.tf) that declares the AWS provider exactly once and calls a child module, and a child module (terraform/modules/storage) that declares its own typed variables and has no provider block of its own. Follow that exact pattern to add two new child modules and wire both into root.\n\nNew module 1: terraform/modules/table — a DynamoDB table. Requirements: billing_mode PAY_PER_REQUEST, hash_key \"id\" of type String, point_in_time_recovery enabled, server_side_encryption enabled, and a variable table_name (type string, no default) that the table's name comes from. Export an output named table_name.\n\nNew module 2: terraform/modules/queue — an SQS queue pair for failed-write alerting. A primary queue (variable queue_name, type string, no default) with a redrive_policy pointing at a dead-letter queue named \"${var.queue_name}-dlq\" with maxReceiveCount 5, and the dead-letter queue itself. Export outputs queue_url and dlq_url.\n\nWire both into root: add module \"audit_table\" and module \"alert_queue\" blocks in terraform/main.tf, each calling its module with the relevant variable passed explicitly, plus matching outputs for each. Add matching new variables (table_name, queue_name — both type string, with defaults) to terraform/variables.tf. Do not add a second provider block anywhere — only the root module declares one, matching the existing modules/storage convention exactly.\n\nAlso: this project (package.json, src/index.js, both shown for reference) has no Dockerfile yet. Add one. It's a plain JS app with no separate compile/build step — install dependencies from package.json and start src/index.js.\n\nOutput exactly seven files, each preceded by a line containing only one of these exact markers (including the === on both sides), in this order:\n===FILE: terraform/modules/table/main.tf===\n===FILE: terraform/modules/table/variables.tf===\n===FILE: terraform/modules/queue/main.tf===\n===FILE: terraform/modules/queue/variables.tf===\n===FILE: terraform/main.tf===\n===FILE: terraform/variables.tf===\n===FILE: Dockerfile===",
+  "context_files": [
+    "terraform/main.tf",
+    "terraform/variables.tf",
+    "terraform/modules/storage/main.tf",
+    "terraform/modules/storage/variables.tf",
+    "terraform/modules/storage/outputs.tf",
+    "package.json",
+    "src/index.js"
+  ],
+  "context_files_are_preexisting": true,
+  "expected_output_lines": 160,
+  "referenceDir": "reference-iac",
+  "requiredMarkers": [
+    "===FILE: terraform/modules/table/main.tf===",
+    "===FILE: terraform/modules/table/variables.tf===",
+    "===FILE: terraform/modules/queue/main.tf===",
+    "===FILE: terraform/modules/queue/variables.tf===",
+    "===FILE: terraform/main.tf===",
+    "===FILE: terraform/variables.tf===",
+    "===FILE: Dockerfile==="
+  ],
+  "verify": {
+    "type": "terraform-docker",
+    "terraformDir": "terraform",
+    "dockerfile": "Dockerfile"
+  }
+}

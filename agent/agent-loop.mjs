@@ -256,6 +256,38 @@ function localTools(projectDir) {
         return results.length ? results.join("\n\n") : "No source files found to check yet.";
       },
     },
+    // Committing is how work actually lands, and it is the point at which a repository's
+    // pre-commit hook gets to refuse. Without this tool the model writes files that no gate ever
+    // sees. Contained to the project directory; it stages and commits nothing outside it.
+    git_commit: {
+      schema: {
+        type: "function",
+        function: {
+          name: "git_commit",
+          description:
+            "Stage all changes in the project and commit them. The repository may run validation " +
+            "hooks that reject the commit — if that happens, fix what they report and commit again.",
+          parameters: {
+            type: "object",
+            properties: { message: { type: "string", description: "Commit message" } },
+            required: ["message"],
+          },
+        },
+      },
+      run: ({ message }) => {
+        const inRepo = spawnSync("git", ["rev-parse", "--git-dir"], { cwd: projectDir, encoding: "utf8" });
+        if (inRepo.status !== 0) return "Not a git repository, nothing to commit.";
+        spawnSync("git", ["add", "-A"], { cwd: projectDir, encoding: "utf8" });
+        const commit = spawnSync("git", ["commit", "-m", message || "update"], {
+          cwd: projectDir,
+          encoding: "utf8",
+        });
+        const output = `${commit.stdout || ""}${commit.stderr || ""}`.slice(0, 2500);
+        return commit.status === 0
+          ? `Commit succeeded.\n${output}`
+          : `COMMIT REJECTED — the repository's checks refused this change. Fix the problems below and commit again.\n${output}`;
+      },
+    },
     list_files: {
       schema: {
         type: "function",
@@ -478,7 +510,8 @@ async function main() {
         "each file. After writing source files, call build_check and fix every error it reports — code that " +
         "does not compile is not done. When you have written Terraform, validate it with the terraform_plan " +
         "tool and fix anything it reports. When you have written a dependency manifest, check it with " +
-        "check_dependencies. Say DONE only once the project is complete and build_check passes.",
+        "check_dependencies. When the project is complete, commit it with git_commit — the repository runs " +
+        "checks that can reject the commit, and you are not done until it is accepted. Then say DONE.",
     },
     { role: "user", content: readFileSync(opts.task, "utf8") },
   ];
@@ -486,6 +519,7 @@ async function main() {
   const usage = { prompt: 0, completion: 0, total: 0, calls: 0 };
   const toolCallLog = [];
   let validationRounds = 0;
+  let truncatedStreak = 0;
   let finalValidation = null;
 
   for (let turn = 1; turn <= opts.maxTurns; turn++) {
@@ -513,6 +547,26 @@ async function main() {
     console.log(
       `[turn ${turn}] finish=${choice?.finish_reason} tools=${calls.length} ctx=${response.usage?.prompt_tokens || "?"} ${preview ? `| ${preview}` : ""}`
     );
+
+    // A turn that hits the token limit with no tool call leaves a truncated assistant message. If
+    // the next turn does the same, the history ends with two assistant messages in a row and
+    // llama-server rejects the request outright ("Cannot have 2 or more assistant messages at the
+    // end of the list"), killing the run. Break the streak with a user turn instead.
+    if (calls.length === 0 && choice?.finish_reason === "length") {
+      truncatedStreak++;
+      if (truncatedStreak >= 2) {
+        console.log("[loop] stopping: model produced truncated output with no tool calls twice in a row.");
+        break;
+      }
+      messages.push({
+        role: "user",
+        content:
+          "Your last message was cut off before you called a tool. Do not restate your plan in " +
+          "prose — make the next tool call directly.",
+      });
+      continue;
+    }
+    truncatedStreak = 0;
 
     if (calls.length === 0) {
       if (/\bDONE\b/i.test(msg.content || "") || choice?.finish_reason === "stop") {

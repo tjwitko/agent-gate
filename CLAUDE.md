@@ -21,6 +21,14 @@ Two router aliases:
 ## Key files
 
 - `index.mjs` — the entire server: env sanitization, credential scanning, the one tool, the HTTP call
+- `agent/` — an MCP-enabled tool-calling loop that lets a *local* model drive the sibling MCP
+  servers and validate its own work. Exists because `delegate_to_local_model` is a single
+  completion call with no tool loop, so a model driven through it can never reach an MCP server.
+  Its central design decision: **the model saying DONE is a request, not the exit condition** —
+  the harness runs the validators itself and only ends the run when they pass. That came from
+  measuring four runs of one task where the model called `terraform_plan` 3, 1, 4 and 0 times and
+  never called `check_dependencies` or `web_search` at all. A tool the model may or may not invoke
+  is not a guardrail. See `agent/README.md`.
 - `bench/` — reusable benchmark for deciding whether a candidate local model is worth adopting
   into `local-copilot-stack`'s `presets.ini`. `bench/run-benchmark.mjs --model <alias>` runs a
   standardized codegen task through the real delegation tool, escalating `max_tokens`

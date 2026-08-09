@@ -351,8 +351,28 @@ async function validateProject(projectDir, toolRegistry) {
   }
 
   const depAudit = toolRegistry.get("check_dependencies");
-  const manifests = ["package.json", "requirements.txt", "go.mod", "Cargo.toml", "pom.xml"];
-  if (depAudit && manifests.some((m) => existsSync(path.join(projectDir, m)))) {
+  // Searched recursively, not just at the root: the model decides the layout, and it has put
+  // requirements.txt under app/ before. A root-only check would silently skip the dependency scan
+  // for exactly that structure — the tool would appear to be "not needed" rather than missed.
+  // osv-scanner itself recurses, so finding a manifest anywhere is enough to justify one scan
+  // rooted at the project.
+  const manifests = ["package.json", "requirements.txt", "pyproject.toml", "Pipfile", "go.mod", "Cargo.toml", "pom.xml", "build.gradle"];
+  const hasManifest = (dir) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      if ([".terraform", "node_modules", ".git", ".venv", "__pycache__"].includes(e.name)) continue;
+      if (e.isDirectory()) {
+        if (hasManifest(path.join(dir, e.name))) return true;
+      } else if (manifests.includes(e.name)) return true;
+    }
+    return false;
+  };
+  let manifestFound = false;
+  try {
+    manifestFound = hasManifest(projectDir);
+  } catch {
+    /* unreadable tree; nothing to scan */
+  }
+  if (depAudit && manifestFound) {
     const result = await depAudit.server.call("check_dependencies", { directory: ".", severity_threshold: "high" });
     ran.push("check_dependencies");
     try {
@@ -562,13 +582,14 @@ async function main() {
     }
   }
 
-  for (const s of servers) s.kill();
-
   // Always re-validate against the files as they finally stand, rather than reusing the last
   // gate result. The loop can exit on max-turns after the model has already fixed what the gate
   // complained about, and reporting the stale verdict would claim a failure that no longer exists
   // — the same class of dishonest signal this gate exists to remove.
   finalValidation = await validateProject(opts.project, toolRegistry);
+  // Servers are torn down only after the final validation — killing them first left the
+  // re-validation writing to dead stdin and crashing the run with EPIPE.
+  for (const s of servers) s.kill();
   const report = {
     model: opts.model,
     project: opts.project,

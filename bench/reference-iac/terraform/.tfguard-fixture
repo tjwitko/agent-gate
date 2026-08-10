@@ -1,0 +1,2 @@
+Insecure on purpose: the reference project the IaC benchmark grades generated code against.
+It was independently authored before terraform-guard existed and is kept as-is deliberately.

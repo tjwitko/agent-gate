@@ -129,6 +129,35 @@ function containedPath(projectDir, rel) {
   return resolved;
 }
 
+// Points a project's repository at local-copilot-stack's pre-commit hook when nothing else has
+// claimed core.hooksPath. The hook is the only enforcement boundary that survives outside this
+// loop — but it only runs where someone remembered to configure it, and nobody configures a repo
+// created five minutes ago by an agent. A control that depends on being remembered is the weakest
+// link in the chain rather than a layer of it, so the loop sets it up itself.
+//
+// Never overwrites an existing value: that would silently disable husky, lefthook, or the
+// pre-commit framework in a repo that already had its own hooks.
+function protectRepo(projectDir) {
+  const inRepo = spawnSync("git", ["rev-parse", "--is-inside-work-tree"], { cwd: projectDir, encoding: "utf8" });
+  if (inRepo.status !== 0) return null;
+
+  const hooksDir = path.join(path.resolve(__dirname, "..", ".."), "local-copilot-stack", "githooks");
+  if (!existsSync(path.join(hooksDir, "pre-commit"))) return null;
+
+  const existing = spawnSync("git", ["config", "--get", "core.hooksPath"], { cwd: projectDir, encoding: "utf8" });
+  const current = (existing.stdout || "").trim();
+  if (current && current !== hooksDir) {
+    console.warn(`[loop] core.hooksPath already set to ${current} — leaving it alone`);
+    return current;
+  }
+  if (current === hooksDir) return current;
+
+  const set = spawnSync("git", ["config", "core.hooksPath", hooksDir], { cwd: projectDir, encoding: "utf8" });
+  if (set.status !== 0) return null;
+  console.log(`[loop] commit validation enabled for this repo (core.hooksPath -> ${hooksDir})`);
+  return hooksDir;
+}
+
 // Loads secret-guard's scanner as a library rather than calling its MCP tool. The reason is
 // timing, not convenience: this has to run *inside* write_file's handler, which is synchronous,
 // and the point of the check is that the bytes never reach disk. Returns null — and writes stay
@@ -319,6 +348,9 @@ function localTools(projectDir, secretScanner) {
       run: ({ message }) => {
         const inRepo = spawnSync("git", ["rev-parse", "--git-dir"], { cwd: projectDir, encoding: "utf8" });
         if (inRepo.status !== 0) return "Not a git repository, nothing to commit.";
+        // Re-checked here, not only at startup: this is the moment the hook has to be in place,
+        // and the repository may not have existed when the run began.
+        protectRepo(projectDir);
         spawnSync("git", ["add", "-A"], { cwd: projectDir, encoding: "utf8" });
         const commit = spawnSync("git", ["commit", "-m", message || "update"], {
           cwd: projectDir,
@@ -543,6 +575,7 @@ async function main() {
   const toolRegistry = new Map();
   const toolSchemas = [];
 
+  protectRepo(opts.project);
   const secretScanner = await loadSecretScanner();
   const local = localTools(opts.project, secretScanner);
   for (const [name, def] of Object.entries(local)) {

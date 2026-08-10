@@ -29,6 +29,13 @@ Two router aliases:
   measuring four runs of one task where the model called `terraform_plan` 3, 1, 4 and 0 times and
   never called `check_dependencies` or `web_search` at all. A tool the model may or may not invoke
   is not a guardrail. See `agent/README.md`.
+  Its `write_file` handler also refuses content containing hardcoded credentials, using
+  `../secret-guard-mcp`'s scanner as a **library** rather than through MCP — the check has to run
+  inside the synchronous write handler, and the whole point is that the bytes never reach disk.
+  A secret caught there never enters git history, so there is nothing to rotate. Verified against
+  a real run: asked to write a file containing a GitHub PAT, the model got
+  `REFUSED: settings.py was NOT written` and no file appeared. The gate additionally runs
+  `scan_path` over the whole tree, which covers files the model did not write.
 - `bench/` — reusable benchmark for deciding whether a candidate local model is worth adopting
   into `local-copilot-stack`'s `presets.ini`. `bench/run-benchmark.mjs --model <alias>` runs a
   standardized codegen task through the real delegation tool, escalating `max_tokens`

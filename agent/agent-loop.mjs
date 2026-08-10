@@ -12,7 +12,7 @@
 import { spawn, spawnSync } from "child_process";
 import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync } from "fs";
 import path from "path";
-import { fileURLToPath } from "url";
+import { fileURLToPath, pathToFileURL } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -129,7 +129,30 @@ function containedPath(projectDir, rel) {
   return resolved;
 }
 
-function localTools(projectDir) {
+// Loads secret-guard's scanner as a library rather than calling its MCP tool. The reason is
+// timing, not convenience: this has to run *inside* write_file's handler, which is synchronous,
+// and the point of the check is that the bytes never reach disk. Returns null — and writes stay
+// unguarded, with a warning — if the sibling repo or the gitleaks binary is absent, because a
+// missing optional scanner should not take a run down.
+async function loadSecretScanner() {
+  const entry =
+    process.env.SECRETGUARD_LIB ||
+    path.join(path.resolve(__dirname, "..", ".."), "secret-guard-mcp", "lib", "gitleaks.mjs");
+  if (!existsSync(entry)) return null;
+  try {
+    const mod = await import(pathToFileURL(entry).href);
+    if (!mod.checkGitleaksInstalled()) {
+      console.warn("[loop] secret-guard found but gitleaks is not installed — writes unguarded");
+      return null;
+    }
+    return mod;
+  } catch (error) {
+    console.warn(`[loop] secret-guard could not be loaded (${error.message}) — writes unguarded`);
+    return null;
+  }
+}
+
+function localTools(projectDir, secretScanner) {
   return {
     write_file: {
       schema: {
@@ -150,6 +173,25 @@ function localTools(projectDir) {
       },
       run: ({ path: rel, content }) => {
         const dest = containedPath(projectDir, rel);
+
+        // Refuse before the bytes land. Scanning after the write would still find the secret,
+        // but by then it is on disk and one `git add -A` from being in history, where deleting
+        // the line no longer fixes anything. This is the earliest point the loop controls.
+        if (secretScanner) {
+          const scan = secretScanner.scanContent(content ?? "", { pathLabel: rel });
+          if (scan.ok && scan.findings.length) {
+            const items = scan.findings
+              .map((f) => `  - line ${f.startLine}: ${f.rule} (${f.description})`)
+              .join("\n");
+            return (
+              `REFUSED: ${rel} was NOT written — it contains hardcoded credentials:\n${items}\n\n` +
+              `${secretScanner.REMEDIATION}\n\n` +
+              `Rewrite the file reading these values from environment variables and call ` +
+              `write_file again.`
+            );
+          }
+        }
+
         mkdirSync(path.dirname(dest), { recursive: true });
         writeFileSync(dest, content ?? "");
         return `Wrote ${rel} (${(content ?? "").split("\n").length} lines).`;
@@ -417,6 +459,25 @@ async function validateProject(projectDir, toolRegistry) {
     }
   }
 
+  // Belt and braces behind the write_file interception. That check covers everything the model
+  // writes; this covers everything else in the tree — files the project directory was seeded with
+  // before the run, and anything a tool wrote as a side effect.
+  const secretScan = toolRegistry.get("scan_path");
+  if (secretScan) {
+    const result = await secretScan.server.call("scan_path", { target: "." });
+    ran.push("scan_path");
+    try {
+      const parsed = JSON.parse(result);
+      if (!parsed.clean) {
+        failures.push(
+          `scan_path: ${parsed.summary.total} hardcoded credential(s):\n${result.slice(0, 1200)}`
+        );
+      }
+    } catch {
+      /* non-JSON output means the scan itself failed; not the model's problem to fix */
+    }
+  }
+
   return { ran, failures };
 }
 
@@ -440,6 +501,14 @@ async function main() {
     {
       name: "dep-audit",
       entry: process.env.DEPAUDIT_SERVER || path.join(siblings, "dep-audit-mcp", "index.mjs"),
+      env: { SCAN_ROOT: opts.project },
+    },
+    {
+      // Registered so the model can sweep the whole tree on demand. Note this is the *weaker*
+      // half of the secret protection: the half that actually holds is the write_file
+      // interception above, which does not depend on the model choosing to call anything.
+      name: "secret-guard",
+      entry: process.env.SECRETGUARD_SERVER || path.join(siblings, "secret-guard-mcp", "index.mjs"),
       env: { SCAN_ROOT: opts.project },
     },
     {
@@ -474,7 +543,8 @@ async function main() {
   const toolRegistry = new Map();
   const toolSchemas = [];
 
-  const local = localTools(opts.project);
+  const secretScanner = await loadSecretScanner();
+  const local = localTools(opts.project, secretScanner);
   for (const [name, def] of Object.entries(local)) {
     toolRegistry.set(name, { kind: "local", run: def.run });
     toolSchemas.push(def.schema);

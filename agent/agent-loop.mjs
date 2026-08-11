@@ -432,6 +432,10 @@ const LLAMA_URL = process.env.LOCAL_LLM_URL || "http://localhost:8080";
 // Tool results feed straight back into a 32k context window, so an unbounded terraform plan
 // dump or file read would eat the budget the model needs for actual work.
 const MAX_TOOL_RESULT_CHARS = 2500;
+// Identical consecutive writes to the same path. Two could be a hiccup; by the third the model is
+// looping, and by the fifth it has proven it will not stop on its own.
+const NO_PROGRESS_NUDGE = 3;
+const NO_PROGRESS_STOP = 5;
 
 // ---------------------------------------------------------------------------
 // Advisory pass. The deterministic validators answer "is this well-formed?"; nothing in the
@@ -673,6 +677,20 @@ async function chat(model, messages, tools, maxTokens) {
 // called check_dependencies or web_search at all. A tool the model may or may not invoke is not a
 // guardrail. Note the gate is on validators *passing*, not on tools having been *called* — a model
 // can call a validator, receive errors, and finish anyway, which is exactly what happened in one run.
+// Loaded from local-copilot-stack so the loop and the git hook cannot disagree about what makes
+// a dependency scan authoritative. Absent sibling repo => treat as not authoritative, which is
+// the advisory (non-blocking) direction.
+async function lockfilePresent(projectDir) {
+  const entry = path.join(path.resolve(__dirname, "..", ".."), "local-copilot-stack", "validate", "lockfiles.mjs");
+  if (!existsSync(entry)) return false;
+  try {
+    const { findsLockfile } = await import(pathToFileURL(entry).href);
+    return findsLockfile(projectDir);
+  } catch {
+    return false;
+  }
+}
+
 async function validateProject(projectDir, toolRegistry) {
   const failures = [];
   const ran = [];
@@ -743,7 +761,18 @@ async function validateProject(projectDir, toolRegistry) {
     try {
       const parsed = JSON.parse(result);
       if ((parsed.findings || []).length > 0) {
-        failures.push(`check_dependencies: ${parsed.findings.length} finding(s) at or above high severity:\n${result.slice(0, 1200)}`);
+        // Same rule the git hook applies: without a lockfile, osv-scanner resolves transitive
+        // dependencies to minimum-satisfying versions that no real install produces, so the
+        // findings are advisory. This gate previously had no such check and failed a run over
+        // exactly those phantoms — the same project was advisory at commit time and fatal
+        // mid-run, which means one of the two was wrong.
+        const authoritative = await lockfilePresent(projectDir);
+        const line = `check_dependencies: ${parsed.findings.length} finding(s) at or above high severity`;
+        if (authoritative) {
+          failures.push(`${line}:\n${result.slice(0, 1200)}`);
+        } else {
+          console.log(`[gate] ${line} — advisory only (no lockfile)`);
+        }
       }
     } catch {
       /* non-JSON output means the scan itself failed; not the model's problem to fix */
@@ -888,6 +917,9 @@ async function main() {
   let advisoryFindings = null;   // null = not run yet
   let advisoryDelivered = false;
   let advisoryInconclusive = false;
+  let lastWrite = { path: null, content: null, repeats: 0 };
+  let noProgressNudged = false;
+  let noProgressStopped = null;
 
   for (let turn = 1; turn <= opts.maxTurns; turn++) {
     let response;
@@ -914,6 +946,31 @@ async function main() {
     console.log(
       `[turn ${turn}] finish=${choice?.finish_reason} tools=${calls.length} ctx=${response.usage?.prompt_tokens || "?"} ${preview ? `| ${preview}` : ""}`
     );
+
+    // A tool call cut off by the token limit has truncated JSON arguments — a write_file whose
+    // `content` string never closes. Keeping it in the history is fatal on the NEXT request:
+    // llama-server re-parses the conversation and returns 500 "Failed to parse tool call
+    // arguments as JSON", which killed a real run at turn 23 while the model was emitting a
+    // 94-line Terraform file. Drop the partial message rather than record it, and tell the model
+    // why, since the fix it needs is to write less per call.
+    if (calls.length > 0 && choice?.finish_reason === "length") {
+      messages.pop();
+      truncatedStreak++;
+      console.log(`[loop] turn ${turn} tool call was cut off mid-argument — discarding it`);
+      if (truncatedStreak >= 3) {
+        console.log("[loop] stopping: three truncated tool calls in a row.");
+        break;
+      }
+      messages.push({
+        role: "user",
+        content:
+          "Your last tool call was cut off before it finished, so it was discarded and nothing " +
+          "was written. The file you were writing is too large for one call. Split it into " +
+          "smaller files, or write it in sections with several write_file calls, and keep each " +
+          "single call well under the token limit.",
+      });
+      continue;
+    }
 
     // A turn that hits the token limit with no tool call leaves a truncated assistant message. If
     // the next turn does the same, the history ends with two assistant messages in a row and
@@ -1043,10 +1100,48 @@ async function main() {
         }
       }
 
+      // No-progress detection. The gate asks whether the validators pass; nothing asked whether
+      // the model was still moving. A real run wrote app/database.py 39 times across turns 41-70,
+      // mostly byte-identical, and burned its entire turn budget without changing anything —
+      // rewriting a file with the same bytes is definitionally not progress.
+      //
+      // Nudge first, then stop. A model that has genuinely lost the thread will not be rescued by
+      // a fourth attempt, but one that is merely repeating itself sometimes recovers when told.
+      if (name === "write_file" && args.path) {
+        if (args.path === lastWrite.path && (args.content ?? "") === lastWrite.content) {
+          lastWrite.repeats++;
+        } else {
+          lastWrite = { path: args.path, content: args.content ?? "", repeats: 1 };
+        }
+        if (lastWrite.repeats === NO_PROGRESS_NUDGE) {
+          console.log(`[loop] ${args.path} written ${lastWrite.repeats}x with identical content — nudging`);
+          noProgressNudged = true;
+        } else if (lastWrite.repeats >= NO_PROGRESS_STOP) {
+          console.log(
+            `[loop] stopping: ${args.path} written ${lastWrite.repeats} times with identical ` +
+              `content — the run is not making progress.`
+          );
+          noProgressStopped = args.path;
+          break;
+        }
+      }
+
       const short = String(result).slice(0, MAX_TOOL_RESULT_CHARS);
       toolCallLog.push({ turn, name, args: name === "write_file" ? { path: args.path } : args, resultPreview: short.slice(0, 200) });
       console.log(`    -> ${name}(${name === "write_file" ? args.path : JSON.stringify(args).slice(0, 80)}) : ${short.split("\n")[0].slice(0, 120)}`);
       messages.push({ role: "tool", tool_call_id: call.id, content: short });
+    }
+
+    if (noProgressStopped) break;
+    if (noProgressNudged) {
+      noProgressNudged = false;
+      messages.push({
+        role: "user",
+        content:
+          `You have now written ${lastWrite.path} several times with exactly the same content, ` +
+          `so nothing has changed. Whatever you are trying to fix, this is not fixing it. Read ` +
+          `the file, do something different, or say DONE and explain what is unresolved.`,
+      });
     }
   }
 
@@ -1068,6 +1163,8 @@ async function main() {
     // Deliberately outside `validation`: advisory findings are a sampled opinion and must never
     // be mistaken for, or folded into, the deterministic verdict.
     advisory: { model: opts.advisor, usage: advisorUsage, inconclusive: advisoryInconclusive, findings: advisoryFindings || [] },
+    // Recorded so "validation failed" is distinguishable from "the run never got anywhere".
+    stoppedForNoProgress: noProgressStopped,
     toolCallLog,
   };
   // Kept inside the project directory rather than beside it, so a run leaves nothing behind in

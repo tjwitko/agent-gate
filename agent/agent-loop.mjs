@@ -197,6 +197,11 @@ async function loadSecretScanner() {
   }
 }
 
+// Files whose contents turn a security check off: gitleaks' allowlist and config, and the
+// marker that excuses a Terraform directory from the security scan. Kept as basenames because
+// they are meaningful at any depth in a project.
+const GUARD_CONFIG_FILES = [".gitleaksignore", ".gitleaks.toml", ".tfguard-fixture"];
+
 function localTools(projectDir, secretScanner) {
   return {
     write_file: {
@@ -218,6 +223,21 @@ function localTools(projectDir, secretScanner) {
       },
       run: ({ path: rel, content }) => {
         const dest = containedPath(projectDir, rel);
+
+        // A guard the model can edit is not a guard. Blocked from committing a credential in a
+        // Kubernetes Secret, a real run wrote the finding's fingerprint into .gitleaksignore and
+        // the commit went through -- the gate was switched off by the thing it was gating.
+        // Deciding a finding is a false positive is a human judgement, so the model does not get
+        // to make it. Same reasoning as advisory findings never being allowed to clear a
+        // refusal: a layer that can say "allow" undermines the layer that says "deny".
+        if (GUARD_CONFIG_FILES.includes(path.basename(rel))) {
+          return (
+            `REFUSED: ${rel} was NOT written. That file suppresses a security check, and ` +
+            `silencing a finding is not fixing it. If the finding is real, fix the code. If you ` +
+            `believe it is a false positive, say so in your final message and leave it to a ` +
+            `human — you cannot allowlist it yourself.`
+          );
+        }
 
         // Refuse before the bytes land. Scanning after the write would still find the secret,
         // but by then it is on disk and one `git add -A` from being in history, where deleting

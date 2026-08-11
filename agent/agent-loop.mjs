@@ -10,6 +10,7 @@
 //   node agent-loop.mjs --model <alias> --project <dir> --task <file> [--max-turns 40]
 
 import { spawn, spawnSync } from "child_process";
+import http from "http";
 import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync } from "fs";
 import path from "path";
 import { fileURLToPath, pathToFileURL } from "url";
@@ -397,14 +398,73 @@ const LLAMA_URL = process.env.LOCAL_LLM_URL || "http://localhost:8080";
 // dump or file read would eat the budget the model needs for actual work.
 const MAX_TOOL_RESULT_CHARS = 2500;
 
-async function chat(model, messages, tools, maxTokens) {
-  const res = await fetch(`${LLAMA_URL}/v1/chat/completions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model, messages, tools, max_tokens: maxTokens }),
+// Deliberately node:http rather than fetch. llama-server sends no response headers until the
+// whole generation has finished, and Node's fetch enforces a 300s headers timeout
+// (undici UND_ERR_HEADERS_TIMEOUT) that CANNOT be raised with AbortSignal.timeout — verified
+// directly: a 405s AbortSignal still died at 300s. A long generation over a large prompt on a
+// 12B model exceeds that on this hardware, and it surfaces as a bare "fetch failed",
+// indistinguishable from the server being down. Callers that treat a failed call as an empty
+// result therefore report success on work that never ran.
+//
+// Same timeout scaling index.mjs already uses. setTimeout here is socket inactivity, which for a
+// server that streams nothing is effectively total elapsed time — the semantics we want.
+function requestTimeoutMs(maxTokens) {
+  return 30_000 + (maxTokens || 0) * 150;
+}
+
+// keepAlive:false is not incidental. With Node's default agent, llama-server closes the socket
+// after answering and the next request reuses the dead one — the second turn of a run dies with
+// "socket hang up" while the server is perfectly healthy. Reconnecting per request costs nothing
+// next to a multi-second generation.
+const LLAMA_AGENT = new http.Agent({ keepAlive: false });
+
+function postJson(url, body, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const payload = JSON.stringify(body);
+    const req = http.request(
+      {
+        hostname: u.hostname,
+        port: u.port || 80,
+        path: u.pathname,
+        method: "POST",
+        agent: LLAMA_AGENT,
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(payload),
+          Connection: "close",
+        },
+      },
+      (res) => {
+        let data = "";
+        res.setEncoding("utf8");
+        res.on("data", (c) => (data += c));
+        res.on("end", () => {
+          if (res.statusCode !== 200) {
+            return reject(new Error(`llama-server ${res.statusCode}: ${data.slice(0, 500)}`));
+          }
+          try {
+            resolve(JSON.parse(data));
+          } catch {
+            reject(new Error(`llama-server sent unparseable JSON: ${data.slice(0, 300)}`));
+          }
+        });
+      }
+    );
+    req.setTimeout(timeoutMs, () =>
+      req.destroy(new Error(`llama-server did not respond within ${Math.round(timeoutMs / 1000)}s`))
+    );
+    req.on("error", reject);
+    req.end(payload);
   });
-  if (!res.ok) throw new Error(`llama-server ${res.status}: ${(await res.text()).slice(0, 500)}`);
-  return res.json();
+}
+
+async function chat(model, messages, tools, maxTokens) {
+  return postJson(
+    `${LLAMA_URL}/v1/chat/completions`,
+    { model, messages, tools, max_tokens: maxTokens },
+    requestTimeoutMs(maxTokens)
+  );
 }
 
 // Runs every validator that applies to what is actually on disk, without waiting to be asked.

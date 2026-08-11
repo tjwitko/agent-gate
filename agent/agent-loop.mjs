@@ -19,7 +19,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 function parseArgs() {
   const a = process.argv.slice(2);
-  const o = { model: null, project: null, task: null, maxTurns: 40, maxTokens: 4000, webSearch: false, maxValidationRounds: 3 };
+  const o = { model: null, project: null, task: null, maxTurns: 40, maxTokens: 4000, webSearch: false, maxValidationRounds: 3, advisor: null };
   for (let i = 0; i < a.length; i++) {
     if (a[i] === "--model") o.model = a[++i];
     else if (a[i] === "--project") o.project = path.resolve(a[++i]);
@@ -28,14 +28,23 @@ function parseArgs() {
     else if (a[i] === "--max-tokens") o.maxTokens = Number(a[++i]);
     else if (a[i] === "--web-search") o.webSearch = true;
     else if (a[i] === "--max-validation-rounds") o.maxValidationRounds = Number(a[++i]);
+    // Defaults to the builder model itself (resolved after parsing). Self-review is the weakest
+    // form — a model grading work it just declared finished — but it is what avoids swapping
+    // model tiers mid-run, which this project has crashed llama-server with three times. Read a
+    // positive result here as a floor, not a ceiling: an independent reviewer can only do better.
+    else if (a[i] === "--advisor") o.advisor = a[++i];
+    else if (a[i] === "--no-advisor") o.advisor = "none";
   }
   if (!o.model || !o.project || !o.task) {
     console.error(
       "usage: agent-loop.mjs --model <alias> --project <dir> --task <file> " +
-        "[--max-turns 40] [--max-tokens 4000] [--web-search] [--max-validation-rounds 3]"
+        "[--max-turns 40] [--max-tokens 4000] [--web-search] [--max-validation-rounds 3] " +
+        "[--advisor <alias>|--no-advisor]"
     );
     process.exit(1);
   }
+  if (o.advisor === null) o.advisor = o.model;
+  else if (o.advisor === "none") o.advisor = null;
   return o;
 }
 
@@ -398,6 +407,134 @@ const LLAMA_URL = process.env.LOCAL_LLM_URL || "http://localhost:8080";
 // dump or file read would eat the budget the model needs for actual work.
 const MAX_TOOL_RESULT_CHARS = 2500;
 
+// ---------------------------------------------------------------------------
+// Advisory pass. The deterministic validators answer "is this well-formed?"; nothing in the
+// stack answers "does this do what was asked?" — and that is where the real defects have been.
+// A run whose Terraform validated, whose security scan passed, whose dependency scan passed and
+// whose pre-commit hook passed still shipped an audit log whose immutability was decorative and
+// a Kubernetes manifest that could only ever CrashLoopBackOff. No rule catches either.
+//
+// Strictly advisory: it never sets validationPassed to false and never blocks the run. It is a
+// sampled opinion, and letting a sampled opinion gate anything converts a hard boundary into a
+// soft one. It is delivered through the gate's message because that is the one channel in this
+// system with guaranteed attention — the model must read it to know whether it may stop.
+// ---------------------------------------------------------------------------
+
+const ADVISOR_MAX_FILE_CHARS = 6000;
+const ADVISOR_MAX_TOTAL_CHARS = 40000;
+
+// Measured, not guessed. This model emits chain-of-thought into a separate `reasoning_content`
+// channel and only then writes `content`; on a real project it spent 16k characters reasoning
+// before its first finding. At 600 and at 2500 the whole allowance went to reasoning and
+// `content` came back EMPTY with finish_reason "length" — which reads as "the reviewer found
+// nothing", the most dangerous way for a check to fail. At 5000 it answered in 8.7k tokens.
+const ADVISOR_MAX_TOKENS = 5000;
+
+function collectProjectFiles(projectDir) {
+  const skipDirs = new Set([".git", "node_modules", ".terraform", "__pycache__", ".venv", "venv"]);
+  const parts = [];
+  let total = 0;
+  const walk = (dir) => {
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      if (skipDirs.has(e.name) || e.name.startsWith(".")) continue;
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        walk(full);
+        continue;
+      }
+      if (total >= ADVISOR_MAX_TOTAL_CHARS) return;
+      let body;
+      try {
+        if (statSync(full).size > 1024 * 1024) continue;
+        body = readFileSync(full, "utf8");
+      } catch {
+        continue; // binary or unreadable
+      }
+      const rel = path.relative(projectDir, full);
+      const clipped = body.slice(0, ADVISOR_MAX_FILE_CHARS);
+      parts.push(`===== ${rel} =====\n${clipped}${body.length > clipped.length ? "\n... (truncated)" : ""}`);
+      total += clipped.length;
+    }
+  };
+  walk(projectDir);
+  return parts.join("\n\n");
+}
+
+const ADVISOR_SYSTEM =
+  "You are a security-minded staff engineer reviewing a deliverable against the requirement it " +
+  "was built from. You are not checking syntax — automated tools already did that and passed. " +
+  "You are answering one question: does this actually do what was asked?\n\n" +
+  "Report only defects you can point at in the files shown. For each, name the file and say what " +
+  "goes wrong in concrete terms — what an attacker or an operator would actually experience. " +
+  "Prioritise: (1) a stated requirement that is not really met, however much it looks met; " +
+  "(2) something that cannot work at runtime; (3) a security property that is claimed but not " +
+  "enforced.\n\n" +
+  "Do not suggest style changes, extra tests, more logging, or nice-to-haves. Do not repeat " +
+  "something the automated checks would already catch. If the deliverable genuinely meets the " +
+  "requirement, reply with exactly: NONE\n\n" +
+  "Format: at most 5 items, one per line, each starting '- <file>: '.";
+
+// Returns { findings: string[], usage } — never throws. An advisor that is down, slow, or
+// talking nonsense must not affect a run that was otherwise fine.
+//
+// Budget generously. Measured on Gemma against a four-line file: max_tokens 600 returned EMPTY
+// content with finish_reason "length" — it spent the whole allowance before writing anything —
+// while 1200 answered correctly in 826 tokens. A too-small advisory budget does not produce a
+// short review, it produces silence that looks exactly like "nothing wrong here".
+async function runAdvisor(projectDir, taskText, advisorModel, maxTokens) {
+  const files = collectProjectFiles(projectDir);
+  if (!files.trim()) return { findings: [], usage: null };
+
+  const messages = [
+    { role: "system", content: ADVISOR_SYSTEM },
+    {
+      role: "user",
+      content:
+        `THE REQUIREMENT THE DEVELOPER WAS GIVEN:\n${taskText}\n\n` +
+        `THE FILES THEY PRODUCED:\n\n${files}\n\n` +
+        `List the ways this fails to meet the requirement, or reply NONE.`,
+    },
+  ];
+
+  let response;
+  try {
+    response = await chat(advisorModel, messages, undefined, maxTokens);
+  } catch (error) {
+    console.warn(`[advisor] unavailable (${error.message}) — continuing without advisory findings`);
+    return { findings: [], usage: null };
+  }
+
+  const choice = response.choices?.[0] || {};
+  const text = (choice.message?.content || "").trim();
+  const usage = response.usage || null;
+
+  // Silence is not a clean bill of health. An empty answer that ran out of budget must be
+  // reported as a failed review, never folded in with "found nothing".
+  if (!text) {
+    if (choice.finish_reason === "length") {
+      console.warn(
+        `[advisor] produced no answer — it used its entire ${maxTokens}-token budget on internal ` +
+          `reasoning. Treat this run as UNREVIEWED, not as clean.`
+      );
+    }
+    return { findings: [], usage, inconclusive: true };
+  }
+  if (/^NONE\b/i.test(text)) return { findings: [], usage };
+
+  const findings = text
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith("-"))
+    .slice(0, 5);
+  return { findings, usage };
+}
+
 // Deliberately node:http rather than fetch. llama-server sends no response headers until the
 // whole generation has finished, and Node's fetch enforces a 300s headers timeout
 // (undici UND_ERR_HEADERS_TIMEOUT) that CANNOT be raised with AbortSignal.timeout — verified
@@ -684,6 +821,11 @@ async function main() {
   let validationRounds = 0;
   let truncatedStreak = 0;
   let finalValidation = null;
+  const taskText = readFileSync(opts.task, "utf8");
+  const advisorUsage = { prompt: 0, completion: 0, total: 0, calls: 0 };
+  let advisoryFindings = null;   // null = not run yet
+  let advisoryDelivered = false;
+  let advisoryInconclusive = false;
 
   for (let turn = 1; turn <= opts.maxTurns; turn++) {
     let response;
@@ -743,7 +885,47 @@ async function main() {
         );
         finalValidation = { ran, failures };
 
+        // Run once, on the first time the model tries to stop — that is the moment the whole
+        // deliverable exists and the model is still in a position to act on what comes back.
+        if (opts.advisor && advisoryFindings === null) {
+          const advice = await runAdvisor(opts.project, taskText, opts.advisor, ADVISOR_MAX_TOKENS);
+          advisoryFindings = advice.findings;
+          if (advice.usage) {
+            advisorUsage.prompt += advice.usage.prompt_tokens || 0;
+            advisorUsage.completion += advice.usage.completion_tokens || 0;
+            advisorUsage.total += advice.usage.total_tokens || 0;
+            advisorUsage.calls++;
+          }
+          advisoryInconclusive = Boolean(advice.inconclusive);
+          console.log(
+            `[advisor] ${opts.advisor}: ` +
+              (advisoryInconclusive ? "INCONCLUSIVE (no answer)" : `${advisoryFindings.length} requirement finding(s)`) +
+              (advice.usage ? ` (${advice.usage.total_tokens} tokens)` : "")
+          );
+          for (const f of advisoryFindings) console.log(`    ${f}`);
+        }
+
+        const advisoryText = (advisoryFindings || []).length
+          ? `\n\nA reviewer also raised the following about whether this meets the requirement. ` +
+            `These are NOT automated check failures and may be wrong — judge each one, fix what is ` +
+            `genuinely wrong, and ignore what is not:\n${advisoryFindings.join("\n")}`
+          : "";
+
         if (failures.length === 0) {
+          // Advisories never make validation fail. But letting the run end the instant the
+          // deterministic checks pass would mean nobody ever reads them — so spend exactly one
+          // extra turn offering them, then stop regardless of what the model does with it.
+          if (advisoryText && !advisoryDelivered) {
+            advisoryDelivered = true;
+            console.log("[loop] validation passed; delivering advisory findings for one turn.");
+            messages.push({
+              role: "user",
+              content:
+                `All automated checks pass, so you may stop after this turn.${advisoryText}\n\n` +
+                `If any of these are real, fix them now and commit. If none are, say DONE.`,
+            });
+            continue;
+          }
           console.log("[loop] model finished and validation passed.");
           break;
         }
@@ -757,6 +939,7 @@ async function main() {
         messages.push({
           role: "user",
           content:
+            (advisoryDelivered ? "" : ((advisoryDelivered = true), advisoryText)) +
             `Validation failed. You are not finished. Fix these and do not remove working code ` +
             `to make them pass:\n\n${failures.join("\n\n")}`,
         });
@@ -814,6 +997,9 @@ async function main() {
     toolCalls: toolCallLog.length,
     validation: { rounds: validationRounds, ran: finalValidation.ran, failures: finalValidation.failures },
     validationPassed: finalValidation.failures.length === 0,
+    // Deliberately outside `validation`: advisory findings are a sampled opinion and must never
+    // be mistaken for, or folded into, the deterministic verdict.
+    advisory: { model: opts.advisor, usage: advisorUsage, inconclusive: advisoryInconclusive, findings: advisoryFindings || [] },
     toolCallLog,
   };
   // Kept inside the project directory rather than beside it, so a run leaves nothing behind in
@@ -832,6 +1018,10 @@ async function main() {
   console.log(`by tool           : ${JSON.stringify(byTool)}`);
   console.log(`validators run    : ${finalValidation.ran.join(", ") || "none"}`);
   console.log(`validation        : ${report.validationPassed ? "PASSED" : `FAILED (${finalValidation.failures.length})`}`);
+  if (opts.advisor) {
+    console.log(`advisory          : ${advisoryInconclusive ? "INCONCLUSIVE" : `${(advisoryFindings || []).length} finding(s)`}, ${advisorUsage.total} local tokens`);
+    for (const f of advisoryFindings || []) console.log(`  ${f}`);
+  }
   if (!report.validationPassed) {
     for (const f of finalValidation.failures) console.log(`  - ${f.split("\n")[0]}`);
   }

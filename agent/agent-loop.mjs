@@ -19,7 +19,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 function parseArgs() {
   const a = process.argv.slice(2);
-  const o = { model: null, project: null, task: null, maxTurns: 40, maxTokens: 4000, webSearch: false, maxValidationRounds: 3, advisor: null };
+  const o = { model: null, project: null, task: null, maxTurns: 40, maxTokens: 4000, webSearch: false, maxValidationRounds: 3, advisor: null, advisorFile: null };
   for (let i = 0; i < a.length; i++) {
     if (a[i] === "--model") o.model = a[++i];
     else if (a[i] === "--project") o.project = path.resolve(a[++i]);
@@ -33,6 +33,11 @@ function parseArgs() {
     // model tiers mid-run, which this project has crashed llama-server with three times. Read a
     // positive result here as a floor, not a ceiling: an independent reviewer can only do better.
     else if (a[i] === "--advisor") o.advisor = a[++i];
+    // Hands the review to a human (or a stronger assistant driving this loop from outside):
+    // the gate writes the deliverable to <path>.request.md and blocks until <path>.advisory.md
+    // appears. Exists to measure what a better reviewer is worth, against the same task and the
+    // same builder, without pretending a 12B self-review is the ceiling.
+    else if (a[i] === "--advisor-file") o.advisorFile = path.resolve(a[++i]);
     else if (a[i] === "--no-advisor") o.advisor = "none";
   }
   if (!o.model || !o.project || !o.task) {
@@ -43,7 +48,8 @@ function parseArgs() {
     );
     process.exit(1);
   }
-  if (o.advisor === null) o.advisor = o.model;
+  if (o.advisorFile) o.advisor = null;
+  else if (o.advisor === null) o.advisor = o.model;
   else if (o.advisor === "none") o.advisor = null;
   return o;
 }
@@ -487,6 +493,42 @@ const ADVISOR_SYSTEM =
 // content with finish_reason "length" — it spent the whole allowance before writing anything —
 // while 1200 answered correctly in 826 tokens. A too-small advisory budget does not produce a
 // short review, it produces silence that looks exactly like "nothing wrong here".
+// Blocks until an external reviewer answers. Deliberately blocking rather than polling-with-
+// default: an external review that silently times out and returns "no findings" is the same
+// dangerous failure as the empty-answer case below — it reads as a clean bill of health.
+async function runExternalAdvisor(projectDir, taskText, basePath) {
+  const files = collectProjectFiles(projectDir);
+  const requestPath = `${basePath}.request.md`;
+  const answerPath = `${basePath}.advisory.md`;
+
+  writeFileSync(
+    requestPath,
+    `# Advisory request\n\n## The requirement the developer was given\n\n${taskText}\n\n` +
+      `## The files they produced\n\n${files}\n\n---\n` +
+      `Write findings to ${answerPath}: one per line starting "- ", or the single word NONE.\n`
+  );
+  console.log(`[advisor] waiting for an external review`);
+  console.log(`[advisor]   request: ${requestPath}`);
+  console.log(`[advisor]   answer here: ${answerPath}`);
+
+  const deadline = Date.now() + 60 * 60 * 1000;
+  while (!existsSync(answerPath)) {
+    if (Date.now() > deadline) {
+      console.warn("[advisor] no external review after 60 min — treating this run as UNREVIEWED");
+      return { findings: [], usage: null, inconclusive: true };
+    }
+    await new Promise((r) => setTimeout(r, 5000));
+  }
+
+  const text = readFileSync(answerPath, "utf8").trim();
+  if (/^NONE\b/i.test(text)) return { findings: [], usage: null };
+  const findings = text
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith("-"));
+  return { findings, usage: null };
+}
+
 async function runAdvisor(projectDir, taskText, advisorModel, maxTokens) {
   const files = collectProjectFiles(projectDir);
   if (!files.trim()) return { findings: [], usage: null };
@@ -887,7 +929,13 @@ async function main() {
 
         // Run once, on the first time the model tries to stop — that is the moment the whole
         // deliverable exists and the model is still in a position to act on what comes back.
-        if (opts.advisor && advisoryFindings === null) {
+        if (opts.advisorFile && advisoryFindings === null) {
+          const advice = await runExternalAdvisor(opts.project, taskText, opts.advisorFile);
+          advisoryFindings = advice.findings;
+          advisoryInconclusive = !!advice.inconclusive;
+          console.log(`[advisor] external review: ${advisoryFindings.length} finding(s)`);
+          for (const f of advisoryFindings) console.log(`    ${f}`);
+        } else if (opts.advisor && advisoryFindings === null) {
           const advice = await runAdvisor(opts.project, taskText, opts.advisor, ADVISOR_MAX_TOKENS);
           advisoryFindings = advice.findings;
           if (advice.usage) {

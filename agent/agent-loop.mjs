@@ -824,6 +824,11 @@ async function main() {
       env: { SCAN_ROOT: opts.project },
     },
     {
+      name: "identity-guard",
+      entry: process.env.IDENTITYGUARD_SERVER || path.join(siblings, "identity-guard-mcp", "index.mjs"),
+      env: { SCAN_ROOT: opts.project },
+    },
+    {
       // Registered so the model can sweep the whole tree on demand. Note this is the *weaker*
       // half of the secret protection: the half that actually holds is the write_file
       // interception above, which does not depend on the model choosing to call anything.

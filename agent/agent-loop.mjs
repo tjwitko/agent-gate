@@ -680,6 +680,19 @@ async function chat(model, messages, tools, maxTokens) {
 // Loaded from local-copilot-stack so the loop and the git hook cannot disagree about what makes
 // a dependency scan authoritative. Absent sibling repo => treat as not authoritative, which is
 // the advisory (non-blocking) direction.
+// Loaded from terraform-guard so the loop and the tool share one definition of what went
+// missing. Absent sibling repo => no findings, the non-blocking direction.
+async function pendingResourceRemovals(dir) {
+  const entry = path.join(path.resolve(__dirname, "..", ".."), "terraform-guard-mcp", "lib", "resource-census.mjs");
+  if (!existsSync(entry)) return [];
+  try {
+    const { pendingRemovals } = await import(pathToFileURL(entry).href);
+    return [...pendingRemovals(dir)];
+  } catch {
+    return [];
+  }
+}
+
 async function lockfilePresent(projectDir) {
   const entry = path.join(path.resolve(__dirname, "..", ".."), "local-copilot-stack", "validate", "lockfiles.mjs");
   if (!existsSync(entry)) return false;
@@ -776,6 +789,26 @@ async function validateProject(projectDir, toolRegistry) {
       }
     } catch {
       /* non-JSON output means the scan itself failed; not the model's problem to fix */
+    }
+  }
+
+  // Deleting the resource that is the whole point of the project is not a judgment call the way
+  // dismissing a false-positive CVE is. This was advisory, and a measured run read the warning and
+  // deleted an S3 bucket, its versioning and its public-access block anyway, then carried on for
+  // twelve more turns. An advisory control the model demonstrably ignores is not a control.
+  //
+  // Restoring the resource clears it automatically — pendingRemovals drops anything that comes
+  // back. There is deliberately no way for the run to dismiss this itself.
+  for (const dir of tfDirs) {
+    const pending = await pendingResourceRemovals(dir);
+    if (pending.length) {
+      const rel = path.relative(projectDir, dir) || ".";
+      failures.push(
+        `resource regression (${rel}): these resources were declared earlier in this run and are ` +
+          `now gone: ${pending.join(", ")}.\nRestore them. If they were genuinely meant to go, ` +
+          `that is a decision for a human to make, not something to work around here.`
+      );
+      ran.push(`resource_census(${rel})`);
     }
   }
 
@@ -925,6 +958,7 @@ async function main() {
   let lastWrite = { path: null, content: null, repeats: 0 };
   let noProgressNudged = false;
   let noProgressStopped = null;
+  const regressionWarnings = [];
 
   for (let turn = 1; turn <= opts.maxTurns; turn++) {
     let response;
@@ -1131,6 +1165,17 @@ async function main() {
         }
       }
 
+      // The regression warning arrives buried in a tool response, ~600 characters in, and the
+      // per-call log line shows only the first line while the report preview caps at 200. A real
+      // run deleted three Terraform resources and the warning was, for all practical purposes,
+      // unobservable afterwards: fourteen plan calls and no way to establish whether the
+      // guardrail had fired. Give it its own line, like [gate] and [advisor] have.
+      const regression = /\[REGRESSION WARNING\][^\n]*/.exec(String(result));
+      if (regression) {
+        console.log(`    [census] ${regression[0].slice(0, 220)}`);
+        regressionWarnings.push({ turn, text: regression[0] });
+      }
+
       const short = String(result).slice(0, MAX_TOOL_RESULT_CHARS);
       toolCallLog.push({ turn, name, args: name === "write_file" ? { path: args.path } : args, resultPreview: short.slice(0, 200) });
       console.log(`    -> ${name}(${name === "write_file" ? args.path : JSON.stringify(args).slice(0, 80)}) : ${short.split("\n")[0].slice(0, 120)}`);
@@ -1170,6 +1215,7 @@ async function main() {
     advisory: { model: opts.advisor, usage: advisorUsage, inconclusive: advisoryInconclusive, findings: advisoryFindings || [] },
     // Recorded so "validation failed" is distinguishable from "the run never got anywhere".
     stoppedForNoProgress: noProgressStopped,
+    regressionWarnings,
     toolCallLog,
   };
   // Kept inside the project directory rather than beside it, so a run leaves nothing behind in

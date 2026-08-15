@@ -153,6 +153,46 @@ function containedPath(projectDir, rel) {
 //
 // Never overwrites an existing value: that would silently disable husky, lefthook, or the
 // pre-commit framework in a repo that already had its own hooks.
+// Paths that are build output, not work. The gate below ignores them when deciding whether the
+// tree is dirty, and the baseline .gitignore keeps them out of commits.
+//
+// This is not tidiness. `git add -A` with no .gitignore committed an 813MB Terraform provider
+// binary in an earlier run, because .terraform/ holds the downloaded providers.
+const ARTIFACT_PATTERNS = [
+  ".terraform/",
+  "*.tfstate",
+  "*.tfstate.*",
+  "__pycache__/",
+  "*.pyc",
+  "node_modules/",
+  ".venv/",
+  "agent-run-report.json",
+];
+
+function ensureGitignore(projectDir) {
+  const file = path.join(projectDir, ".gitignore");
+  if (existsSync(file)) return; // the project's own choices win
+  try {
+    writeFileSync(
+      file,
+      "# Written by the agent loop because none existed. Build output, not work.\n" +
+        ARTIFACT_PATTERNS.join("\n") +
+        "\n"
+    );
+  } catch {
+    /* advisory scaffolding; never fail a run over it */
+  }
+}
+
+function isArtifact(relPath) {
+  return (
+    relPath === "agent-run-report.json" ||
+    relPath.endsWith(".pyc") ||
+    /(^|\/)(\.terraform|__pycache__|node_modules|\.venv)(\/|$)/.test(relPath) ||
+    /\.tfstate(\.|$)/.test(relPath)
+  );
+}
+
 function protectRepo(projectDir) {
   const inRepo = spawnSync("git", ["rev-parse", "--is-inside-work-tree"], { cwd: projectDir, encoding: "utf8" });
   if (inRepo.status !== 0) return null;
@@ -387,6 +427,7 @@ function localTools(projectDir, secretScanner) {
         // Re-checked here, not only at startup: this is the moment the hook has to be in place,
         // and the repository may not have existed when the run began.
         protectRepo(projectDir);
+        ensureGitignore(projectDir);
         spawnSync("git", ["add", "-A"], { cwd: projectDir, encoding: "utf8" });
         const commit = spawnSync("git", ["commit", "-m", message || "update"], {
           cwd: projectDir,
@@ -809,6 +850,30 @@ async function validateProject(projectDir, toolRegistry) {
           `that is a decision for a human to make, not something to work around here.`
       );
       ran.push(`resource_census(${rel})`);
+    }
+  }
+
+  // Work that was never committed was never seen by the pre-commit hook, and the hook is the
+  // boundary that runs the full check set. Three separate runs ended "validation PASSED" with the
+  // real deliverable sitting uncommitted in the working tree — the loop's own gate is a subset of
+  // what the hook runs, so passing it proves less than it appears to.
+  //
+  // Artifacts are excluded, or this would be unsatisfiable for any project that has run
+  // `terraform init`.
+  const status = spawnSync("git", ["status", "--porcelain"], { cwd: projectDir, encoding: "utf8" });
+  if (status.status === 0) {
+    const dirty = status.stdout
+      .split("\n")
+      .map((l) => l.slice(3).trim())
+      .filter((f) => f && !isArtifact(f));
+    if (dirty.length) {
+      ran.push("uncommitted_work");
+      failures.push(
+        `uncommitted work: ${dirty.length} file(s) are not committed — ${dirty.slice(0, 8).join(", ")}` +
+          `${dirty.length > 8 ? `, +${dirty.length - 8} more` : ""}.\nCommit them with git_commit. ` +
+          `The repository's checks run on commit, so until then nothing has actually validated ` +
+          `this work. If the commit is rejected, fix what it reports and commit again.`
+      );
     }
   }
 

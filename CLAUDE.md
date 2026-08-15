@@ -29,6 +29,10 @@ Two router aliases:
   measuring four runs of one task where the model called `terraform_plan` 3, 1, 4 and 0 times and
   never called `check_dependencies` or `web_search` at all. A tool the model may or may not invoke
   is not a guardrail. See `agent/README.md`.
+  The gate also refuses to let a run end with uncommitted work, because the loop's own validator
+  set is a *subset* of what the pre-commit hook runs — three separate runs reported
+  "validation PASSED" with the real deliverable sitting uncommitted, having never been seen by the
+  boundary that runs the full check set.
   Its `write_file` handler also refuses content containing hardcoded credentials, using
   `../secret-guard-mcp`'s scanner as a **library** rather than through MCP — the check has to run
   inside the synchronous write handler, and the whole point is that the bytes never reach disk.

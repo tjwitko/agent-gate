@@ -697,8 +697,33 @@ async function runAdvisor(projectDir, taskText, advisorModel, maxTokens) {
 //
 // Same timeout scaling index.mjs already uses. setTimeout here is socket inactivity, which for a
 // server that streams nothing is effectively total elapsed time — the semantics we want.
-function requestTimeoutMs(maxTokens) {
-  return 30_000 + (maxTokens || 0) * 150;
+// The prompt term is not optional at large context. This formula originally scaled with
+// max_tokens alone — i.e. with GENERATION — and a run died at turn 71 with the server perfectly
+// healthy: 55,905 tokens of context, and prefill alone took longer than the whole 630s budget
+// that 4,000 max_tokens buys. Re-reading the entire conversation is work the model does before it
+// emits a single token, and it grows every turn, so a generation-only budget gets tighter exactly
+// as the run gets more expensive.
+//
+// 15ms per prompt token is calibrated from that failure, not chosen: it leaves the ceiling
+// unchanged for small contexts (where the old value was fine for eleven runs) and roughly doubles
+// it by 55K. Raising the ceiling does delay detection of a genuinely wedged server — acceptable
+// here, because these runs are unattended and a false timeout discards real work, while a hung
+// server costs only waiting.
+function requestTimeoutMs(maxTokens, promptTokens = 0) {
+  return 30_000 + (maxTokens || 0) * 150 + promptTokens * 15;
+}
+
+// Prompt size in tokens, near enough. ~4 chars/token is crude but this only has to pick a
+// timeout, and being wrong by a third moves the budget by minutes on a budget already measured
+// in tens of minutes.
+function estimatePromptTokens(messages) {
+  let chars = 0;
+  for (const m of messages || []) {
+    if (typeof m.content === "string") chars += m.content.length;
+    else if (Array.isArray(m.content)) chars += JSON.stringify(m.content).length;
+    for (const c of m.tool_calls || []) chars += (c.function?.arguments || "").length;
+  }
+  return Math.ceil(chars / 4);
 }
 
 // keepAlive:false is not incidental. With Node's default agent, llama-server closes the socket
@@ -753,7 +778,7 @@ async function chat(model, messages, tools, maxTokens, provider = "local") {
   return postJson(
     `${LLAMA_URL}/v1/chat/completions`,
     { model, messages, tools, max_tokens: maxTokens },
-    requestTimeoutMs(maxTokens)
+    requestTimeoutMs(maxTokens, estimatePromptTokens(messages))
   );
 }
 

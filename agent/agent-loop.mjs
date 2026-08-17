@@ -17,9 +17,13 @@ import { fileURLToPath, pathToFileURL } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+// Imported eagerly but constructed lazily — the SDK client is only built on first hosted call,
+// so a local run never needs ANTHROPIC_API_KEY to be set.
+import { chatAnthropic, DEFAULT_MODEL as ANTHROPIC_DEFAULT_MODEL } from "./anthropic-adapter.mjs";
+
 function parseArgs() {
   const a = process.argv.slice(2);
-  const o = { model: null, project: null, task: null, maxTurns: 40, maxTokens: 4000, webSearch: false, maxValidationRounds: 3, advisor: null, advisorFile: null };
+  const o = { model: null, project: null, task: null, maxTurns: 40, maxTokens: 4000, webSearch: false, maxValidationRounds: 3, advisor: null, advisorFile: null, provider: "local" };
   for (let i = 0; i < a.length; i++) {
     if (a[i] === "--model") o.model = a[++i];
     else if (a[i] === "--project") o.project = path.resolve(a[++i]);
@@ -39,7 +43,12 @@ function parseArgs() {
     // same builder, without pretending a 12B self-review is the ceiling.
     else if (a[i] === "--advisor-file") o.advisorFile = path.resolve(a[++i]);
     else if (a[i] === "--no-advisor") o.advisor = "none";
+    // "anthropic" routes the builder to a hosted Claude model. Everything else about the run is
+    // unchanged — same tools, same gate, same advisory channel — so a hosted run and a local run
+    // differ in the model and nothing else, and any behavioural difference is attributable.
+    else if (a[i] === "--provider") o.provider = a[++i];
   }
+  if (o.provider === "anthropic" && !o.model) o.model = ANTHROPIC_DEFAULT_MODEL;
   if (!o.model || !o.project || !o.task) {
     console.error(
       "usage: agent-loop.mjs --model <alias> --project <dir> --task <file> " +
@@ -739,7 +748,8 @@ function postJson(url, body, timeoutMs) {
   });
 }
 
-async function chat(model, messages, tools, maxTokens) {
+async function chat(model, messages, tools, maxTokens, provider = "local") {
+  if (provider === "anthropic") return chatAnthropic(model, messages, tools, maxTokens);
   return postJson(
     `${LLAMA_URL}/v1/chat/completions`,
     { model, messages, tools, max_tokens: maxTokens },
@@ -1090,7 +1100,7 @@ async function main() {
   for (let turn = 1; turn <= opts.maxTurns; turn++) {
     let response;
     try {
-      response = await chat(opts.model, messages, toolSchemas, opts.maxTokens);
+      response = await chat(opts.model, messages, toolSchemas, opts.maxTokens, opts.provider);
     } catch (error) {
       console.log(`[loop] turn ${turn} request failed: ${error.message}`);
       break;

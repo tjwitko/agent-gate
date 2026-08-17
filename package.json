@@ -9,6 +9,7 @@
   },
   "license": "ISC",
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.117.1",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "axios": "^1.19.0",
     "zod": "^4.4.3"

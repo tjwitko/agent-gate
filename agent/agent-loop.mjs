@@ -243,6 +243,17 @@ async function loadSecretScanner() {
 const GUARD_CONFIG_FILES = [".gitleaksignore", ".gitleaks.toml", ".tfguard-fixture"];
 
 function localTools(projectDir, secretScanner) {
+  // A rejected commit returns the hook's full report, which is what makes it actionable the first
+  // time and a context sink every time after. One run burned its entire window on 13 consecutive
+  // rejections of the same failure: the uncommitted-work gate says commit, the hook refuses
+  // because validation fails, and the model retries rather than fixing the cause. Repeating a
+  // report the model has already read three times adds no information — it just costs the context
+  // needed to act on it.
+  //
+  // Deliberately not a hard refusal: a genuinely fixed commit must always be able to go through,
+  // or the uncommitted-work gate becomes unsatisfiable. Only the repetition is suppressed.
+  let commitRejectionStreak = 0;
+  let lastRejectionOutput = null;
   return {
     write_file: {
       schema: {
@@ -434,9 +445,27 @@ function localTools(projectDir, secretScanner) {
           encoding: "utf8",
         });
         const output = `${commit.stdout || ""}${commit.stderr || ""}`.slice(0, 2500);
-        return commit.status === 0
-          ? `Commit succeeded.\n${output}`
-          : `COMMIT REJECTED — the repository's checks refused this change. Fix the problems below and commit again.\n${output}`;
+        if (commit.status === 0) {
+          commitRejectionStreak = 0;
+          lastRejectionOutput = null;
+          return `Commit succeeded.\n${output}`;
+        }
+
+        commitRejectionStreak++;
+        const unchanged = output === lastRejectionOutput;
+        lastRejectionOutput = output;
+
+        // Only suppressed when the report is byte-identical: a different failure is new
+        // information and always gets shown in full, however many attempts preceded it.
+        if (commitRejectionStreak >= 3 && unchanged) {
+          return (
+            `COMMIT REJECTED — ${commitRejectionStreak} times in a row, with the identical failure ` +
+            `each time. The report is unchanged from the one you already have, so it is not repeated ` +
+            `here. Retrying cannot help: nothing about the working tree has changed since the last ` +
+            `attempt. Fix what the checks reported, then commit.`
+          );
+        }
+        return `COMMIT REJECTED — the repository's checks refused this change. Fix the problems below and commit again.\n${output}`;
       },
     },
     list_files: {

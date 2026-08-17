@@ -561,7 +561,7 @@ const ADVISOR_SYSTEM =
 // Blocks until an external reviewer answers. Deliberately blocking rather than polling-with-
 // default: an external review that silently times out and returns "no findings" is the same
 // dangerous failure as the empty-answer case below — it reads as a clean bill of health.
-async function runExternalAdvisor(projectDir, taskText, basePath) {
+async function runExternalAdvisor(projectDir, taskText, basePath, advisories = []) {
   const files = collectProjectFiles(projectDir);
   const requestPath = `${basePath}.request.md`;
   const answerPath = `${basePath}.advisory.md`;
@@ -569,7 +569,14 @@ async function runExternalAdvisor(projectDir, taskText, basePath) {
   writeFileSync(
     requestPath,
     `# Advisory request\n\n## The requirement the developer was given\n\n${taskText}\n\n` +
-      `## The files they produced\n\n${files}\n\n---\n` +
+      `## The files they produced\n\n${files}\n\n` +
+      // Surfaced to the reviewer rather than blocking the run. A rename and a deletion are
+      // identical to the census; only a reviewer can tell them apart.
+      (advisories.length
+        ? `## Automated checks flagged these, without blocking\n\n` +
+          advisories.map((a) => `- ${a}`).join("\n") + `\n\n`
+        : "") +
+      `---\n` +
       `Write findings to ${answerPath}: one per line starting "- ", or the single word NONE.\n`
   );
   console.log(`[advisor] waiting for an external review`);
@@ -747,6 +754,8 @@ async function lockfilePresent(projectDir) {
 
 async function validateProject(projectDir, toolRegistry) {
   const failures = [];
+  // Reported to the reviewer, never blocking. See the resource-census block below.
+  const advisories = [];
   const ran = [];
 
   const buildCheck = toolRegistry.get("build_check");
@@ -781,9 +790,21 @@ async function validateProject(projectDir, toolRegistry) {
     // A credentials failure means the security rules could not run — that is an unscanned result,
     // not a passing one, but it is an environment limitation the model cannot fix by editing code.
     // Schema errors and violations are its problem; missing cloud credentials are not.
-    const unscannable = /could not authenticate/i.test(result);
+    const unscannable = /could not authenticate|credential/i.test(result);
     if (/TOOL REPORTED A PROBLEM|Refusing to plan-approve/.test(result) && !unscannable) {
       failures.push(`terraform_plan(${rel}):\n${result.slice(0, 1500)}`);
+    } else if (unscannable) {
+      // Not the model's problem to fix, so it must not block — but it must not read as a pass
+      // either. Every run of this experiment so far reported terraform as validated while not one
+      // plan-based security rule had run: there are no AWS credentials on this machine, the plan
+      // errored at provider configuration, and this branch swallowed it in silence. Same failure
+      // shape the advisor timeout already refuses to have — a check that could not run is not a
+      // check that passed.
+      advisories.push(
+        `terraform_plan(${rel}): the plan could not authenticate to AWS, so NO plan-based ` +
+          `security rule ran against this configuration. This is an environment limitation, not ` +
+          `a defect in the code — but treat the Terraform here as UNSCANNED, not as clean.`
+      );
     }
   }
 
@@ -840,14 +861,26 @@ async function validateProject(projectDir, toolRegistry) {
   //
   // Restoring the resource clears it automatically — pendingRemovals drops anything that comes
   // back. There is deliberately no way for the run to dismiss this itself.
+  //
+  // Reported, never blocking. It was blocking, and that was wrong: the census compares resource
+  // ADDRESSES, so a rename is indistinguishable from a deletion. A real run was told (correctly)
+  // that EKS needs subnets in two AZs and that one overloaded IAM role had to be split; it did
+  // both, `aws_subnet.public` became `public_a`/`public_b`, and the gate then failed the run for
+  // three "regressions" that were the requested fix. The model spent four validation rounds
+  // trying to restore resources that were correctly gone — the exact thrashing this check exists
+  // to prevent, caused by the check. terraform-guard, which owns the census, has always
+  // documented it as advisory; only this gate disagreed.
+  //
+  // Advisory here does not mean discarded. The findings go to the reviewer via the advisory
+  // request, which is the layer that can tell a rename from a regression.
   for (const dir of tfDirs) {
     const pending = await pendingResourceRemovals(dir);
     if (pending.length) {
       const rel = path.relative(projectDir, dir) || ".";
-      failures.push(
-        `resource regression (${rel}): these resources were declared earlier in this run and are ` +
-          `now gone: ${pending.join(", ")}.\nRestore them. If they were genuinely meant to go, ` +
-          `that is a decision for a human to make, not something to work around here.`
+      advisories.push(
+        `resource census (${rel}): these resources were declared earlier in this run and are now ` +
+          `gone: ${pending.join(", ")}. Renaming a resource looks identical to deleting one here, ` +
+          `so this is a question, not a verdict — check whether each was replaced or simply lost.`
       );
       ran.push(`resource_census(${rel})`);
     }
@@ -896,7 +929,7 @@ async function validateProject(projectDir, toolRegistry) {
     }
   }
 
-  return { ran, failures };
+  return { ran, failures, advisories };
 }
 
 async function main() {
@@ -1100,18 +1133,19 @@ async function main() {
       if (/\bDONE\b/i.test(msg.content || "") || choice?.finish_reason === "stop") {
         // The model wanting to stop is a request, not the exit condition. Validators run here
         // whether or not the model ever called them, and failures go back as work to do.
-        const { ran, failures } = await validateProject(opts.project, toolRegistry);
+        const { ran, failures, advisories } = await validateProject(opts.project, toolRegistry);
         validationRounds++;
         console.log(
           `[gate] validation round ${validationRounds}: ran ${ran.join(", ") || "nothing"} — ` +
             `${failures.length} failing`
         );
-        finalValidation = { ran, failures };
+        finalValidation = { ran, failures, advisories };
+        for (const a of advisories) console.log(`[gate] advisory (not blocking): ${a}`);
 
         // Run once, on the first time the model tries to stop — that is the moment the whole
         // deliverable exists and the model is still in a position to act on what comes back.
         if (opts.advisorFile && advisoryFindings === null) {
-          const advice = await runExternalAdvisor(opts.project, taskText, opts.advisorFile);
+          const advice = await runExternalAdvisor(opts.project, taskText, opts.advisorFile, advisories);
           advisoryFindings = advice.findings;
           advisoryInconclusive = !!advice.inconclusive;
           console.log(`[advisor] external review: ${advisoryFindings.length} finding(s)`);
@@ -1273,7 +1307,7 @@ async function main() {
     project: opts.project,
     usage,
     toolCalls: toolCallLog.length,
-    validation: { rounds: validationRounds, ran: finalValidation.ran, failures: finalValidation.failures },
+    validation: { rounds: validationRounds, ran: finalValidation.ran, failures: finalValidation.failures, advisories: finalValidation.advisories || [] },
     validationPassed: finalValidation.failures.length === 0,
     // Deliberately outside `validation`: advisory findings are a sampled opinion and must never
     // be mistaken for, or folded into, the deterministic verdict.

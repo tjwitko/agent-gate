@@ -794,6 +794,81 @@ async function chat(model, messages, tools, maxTokens, provider = "local") {
 // the advisory (non-blocking) direction.
 // Loaded from terraform-guard so the loop and the tool share one definition of what went
 // missing. Absent sibling repo => no findings, the non-blocking direction.
+// Checkov, advisory only. It earns its place for one reason: it parses HCL directly, so it runs
+// on configurations that cannot produce a plan — which was six out of six generated deliverables.
+// Every plan-based check (this project's rule engine, and OPA/Conftest equally) had nothing to
+// evaluate on any of them.
+//
+// Three things it does that would mislead an agent if passed through raw:
+//
+//  1. Without --download-external-modules it silently skips files whose modules it cannot resolve.
+//  2. WITH that flag it reports findings inside the downloaded modules — 9 of 11 on one real
+//     config. Those are not the caller's to fix, and this project has already watched a model
+//     rewrite its own working files ten times chasing errors that lived in vendored code.
+//  3. A file that fails to parse is skipped without comment, so a broken config yields few
+//     findings and reads as a clean one.
+//
+// So: the flag is on, vendored findings are dropped (and counted, never silently), and coverage is
+// reported against the .tf files actually present.
+const CHECKOV_TIMEOUT_MS = 180_000;
+const VENDORED_PATH_RE = /external_modules|\.terraform/;
+
+function checkovAdvisory(dir, projectDir) {
+  const probe = spawnSync("checkov", ["--version"], { encoding: "utf8" });
+  if (probe.status !== 0) return null; // not installed — absence is the non-blocking direction
+
+  let present = [];
+  try {
+    present = readdirSync(dir).filter((f) => f.endsWith(".tf"));
+  } catch {
+    return null;
+  }
+  if (present.length === 0) return null;
+
+  const run = spawnSync(
+    "checkov",
+    ["-d", dir, "--framework", "terraform", "--download-external-modules", "true",
+     "--compact", "--quiet", "-o", "json"],
+    { encoding: "utf8", timeout: CHECKOV_TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024 }
+  );
+  if (!run.stdout) return null;
+
+  let report;
+  try {
+    const parsed = JSON.parse(run.stdout);
+    report = Array.isArray(parsed) ? parsed[0] : parsed;
+  } catch {
+    return null;
+  }
+
+  const failed = report?.results?.failed_checks || [];
+  const passed = report?.results?.passed_checks || [];
+  const own = failed.filter((c) => !VENDORED_PATH_RE.test(c.file_path || ""));
+  const vendored = failed.length - own.length;
+
+  // Which of the caller's own .tf files Checkov actually looked at. A file with no checkable
+  // resources legitimately appears in neither list, so this is a floor, not a precise figure —
+  // but an empty result on a file that exists is the signal worth surfacing.
+  const evaluated = new Set(
+    [...own, ...passed]
+      .map((c) => (c.file_path || "").replace(/^\//, ""))
+      .filter((p) => p && !VENDORED_PATH_RE.test(p))
+  );
+
+  const rel = path.relative(projectDir, dir) || ".";
+  const lines = own.slice(0, 12).map((c) => `    ${c.check_id} ${c.resource} — ${c.check_name}`);
+  const more = own.length > 12 ? `\n    (+${own.length - 12} more)` : "";
+
+  return (
+    `checkov (${rel}): ${own.length} finding(s) in your own configuration — advisory, not blocking. ` +
+    `${vendored ? `${vendored} further finding(s) inside downloaded modules were suppressed: they are ` +
+      `not yours to fix and rewriting your files will not clear them. ` : ""}` +
+    `Checkov evaluated ${evaluated.size} of ${present.length} .tf file(s) here — it skips files it ` +
+    `cannot parse without saying so, so treat a small result as unproven rather than clean.` +
+    (lines.length ? `\n${lines.join("\n")}${more}` : "")
+  );
+}
+
 async function pendingResourceRemovals(dir) {
   const entry = path.join(path.resolve(__dirname, "..", ".."), "terraform-guard-mcp", "lib", "resource-census.mjs");
   if (!existsSync(entry)) return [];
@@ -938,6 +1013,12 @@ async function validateProject(projectDir, toolRegistry) {
   // Advisory here does not mean discarded. The findings go to the reviewer via the advisory
   // request, which is the layer that can tell a rename from a regression.
   for (const dir of tfDirs) {
+    const ckv = checkovAdvisory(dir, projectDir);
+    if (ckv) {
+      advisories.push(ckv);
+      ran.push(`checkov(${path.relative(projectDir, dir) || "."})`);
+    }
+
     const pending = await pendingResourceRemovals(dir);
     if (pending.length) {
       const rel = path.relative(projectDir, dir) || ".";

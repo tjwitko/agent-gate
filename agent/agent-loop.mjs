@@ -249,7 +249,16 @@ async function loadSecretScanner() {
 // Files whose contents turn a security check off: gitleaks' allowlist and config, and the
 // marker that excuses a Terraform directory from the security scan. Kept as basenames because
 // they are meaningful at any depth in a project.
-const GUARD_CONFIG_FILES = [".gitleaksignore", ".gitleaks.toml", ".tfguard-fixture"];
+// .identity-exception was missing from this list for one release and a run found the gap: blocked
+// from committing, the model wrote one and the commit went through. It is the same shape as
+// .tfguard-fixture -- identity-guard's own scan.mjs says so in a comment -- and the two must be
+// added and renamed together. identity-guard/test/scan.test.mjs pins the basename for that reason.
+const GUARD_CONFIG_FILES = [
+  ".gitleaksignore",
+  ".gitleaks.toml",
+  ".tfguard-fixture",
+  ".identity-exception",
+];
 
 function localTools(projectDir, secretScanner) {
   // A rejected commit returns the hook's full report, which is what makes it actionable the first

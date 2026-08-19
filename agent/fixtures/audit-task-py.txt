@@ -1,0 +1,3 @@
+Develop a service that can take system log entries (Make this resemble auditd logs as an example). The service should be able to Add and read logs. Logs should be immutable and appropriate protections should be put in place to ensure immutability. The service should also be run on a kubernettes environment and deployable to a public cloud via terraform.
+
+Use Python as the coding language.

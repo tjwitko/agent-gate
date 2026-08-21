@@ -1055,8 +1055,25 @@ async function validateProject(projectDir, toolRegistry) {
   //
   // Artifacts are excluded, or this would be unsatisfiable for any project that has run
   // `terraform init`.
+  //
+  // The `status !== 0` branch is the one that matters, and it was missing. Outside a repository
+  // `git status` exits non-zero, so this whole block used to be skipped in silence: no failure, no
+  // advisory, and no `uncommitted_work` entry in `ran` either, which is what made it invisible. A
+  // run whose deliverable was never committed reported PASSED, having never met the hook at all. A
+  // check that could not run is not a check that passed, so it now fails outright -- the same rule
+  // this gate applies to everything else.
   const status = spawnSync("git", ["status", "--porcelain"], { cwd: projectDir, encoding: "utf8" });
-  if (status.status === 0) {
+  if (status.status !== 0) {
+    ran.push("uncommitted_work");
+    failures.push(
+      `uncommitted work: could not determine what is committed — \`git status\` failed in ` +
+        `${projectDir} (${(status.stderr || "").trim().split("\n")[0] || `exit ${status.status}`}). ` +
+        `Usually this means the directory is not a git repository, so nothing has been committed ` +
+        `and the repository's own checks — which are a superset of the ones run here — have never ` +
+        `seen this work. Run git_commit; if it reports that this is not a repository, say so in ` +
+        `your final message rather than continuing.`
+    );
+  } else {
     const dirty = status.stdout
       .split("\n")
       .map((l) => l.slice(3).trim())
@@ -1094,9 +1111,28 @@ async function validateProject(projectDir, toolRegistry) {
   return { ran, failures, advisories };
 }
 
+// The pre-commit hook is the only boundary that runs the *full* check set -- the workload-identity
+// scan and terraform-guard's source scan run nowhere else in this pipeline. A project directory
+// that is not a repository has no such boundary, and the loop cannot create one after the fact
+// because git_commit fails on every call with "Not a git repository". One real run made 26
+// write_file calls and 4 git_commit calls into a plain directory, committed nothing, and reported
+// validation PASSED. Initializing here means the boundary exists before the model writes anything.
+function ensureRepo(projectDir) {
+  const inRepo = spawnSync("git", ["rev-parse", "--is-inside-work-tree"], { cwd: projectDir, encoding: "utf8" });
+  if (inRepo.status === 0) return true;
+  const init = spawnSync("git", ["init", "-q"], { cwd: projectDir, encoding: "utf8" });
+  if (init.status !== 0) {
+    console.warn(`[loop] could not initialize a git repository in ${projectDir} — the commit gate will refuse to pass`);
+    return false;
+  }
+  console.log(`[loop] initialized a git repository in ${projectDir} (nothing to commit into otherwise)`);
+  return true;
+}
+
 async function main() {
   const opts = parseArgs();
   mkdirSync(opts.project, { recursive: true });
+  ensureRepo(opts.project);
 
   // Server paths resolve relative to this repo rather than a hardcoded $HOME/LLM, so a checkout
   // anywhere works as long as the sibling repos sit alongside it. Override individually with the

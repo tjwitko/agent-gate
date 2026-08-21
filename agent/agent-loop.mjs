@@ -20,6 +20,14 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Imported eagerly but constructed lazily — the SDK client is only built on first hosted call,
 // so a local run never needs ANTHROPIC_API_KEY to be set.
 import { chatAnthropic, DEFAULT_MODEL as ANTHROPIC_DEFAULT_MODEL } from "./anthropic-adapter.mjs";
+// Shared with bench/, not duplicated: one definition of how this repo talks to Langfuse means the
+// loop and the benchmark can never disagree about which instance or which credentials. Everything
+// it exports degrades to a no-op with the same shape when the stack is down, so tracing can never
+// fail a run -- the same constraint bench/ was written under, and it matters more here, where a
+// run is 40 minutes of real model time.
+import {
+  initTracing, tracingEnabled, startRun, startAttempt, finishAttempt, startStep, scoreRun, shutdownTracing,
+} from "../bench/langfuse-tracing.mjs";
 
 function parseArgs() {
   const a = process.argv.slice(2);
@@ -1211,12 +1219,47 @@ async function main() {
   let noProgressNudged = false;
   let noProgressStopped = null;
   const regressionWarnings = [];
+  let lastTracedMessageCount = 0;
 
+  await initTracing();
+  const run = startRun(`agent-loop:${path.basename(opts.project)}`, {
+    input: taskText,
+    metadata: {
+      model: opts.model,
+      provider: opts.provider,
+      project: opts.project,
+      maxTurns: opts.maxTurns,
+      maxTokens: opts.maxTokens,
+      maxValidationRounds: opts.maxValidationRounds,
+      advisor: opts.advisorFile ? `external:${path.basename(opts.advisorFile)}` : opts.advisor || null,
+      tools: toolSchemas.map((t) => t.function.name),
+    },
+  });
+
+  // Generations and tool spans are both children of the run rather than nested under a per-turn
+  // span. A turn span would be the tidier tree, but this loop exits a turn through eight different
+  // `continue`/`break` paths and a span left unclosed on any one of them is worse than a flat
+  // tree: it reports as an unfinished observation and makes the run look hung. Each observation
+  // carries its turn number in metadata, which is what the flat shape costs and recovers.
   for (let turn = 1; turn <= opts.maxTurns; turn++) {
     let response;
+    // Opened before the call, not after: an observation's duration runs from creation, so building
+    // it afterwards records a 0s generation and throws away the per-turn wall clock. It also means
+    // a turn that never returns shows up as in-flight rather than vanishing.
+    const gen = startAttempt(run, {
+      name: `turn ${turn}`,
+      model: opts.model,
+      modelParameters: { max_tokens: opts.maxTokens },
+      // The delta since the last turn, not the whole conversation. A 41-turn run re-sends a
+      // context that reaches 22k tokens, so recording the full array each time stores the same
+      // prose 41 times and buries what actually changed. Total context size is in metadata below.
+      input: messages.slice(lastTracedMessageCount),
+    });
+    lastTracedMessageCount = messages.length;
     try {
       response = await chat(opts.model, messages, toolSchemas, opts.maxTokens, opts.provider);
     } catch (error) {
+      finishAttempt(gen, { level: "ERROR", statusMessage: error.message, metadata: { turn } });
       console.log(`[loop] turn ${turn} request failed: ${error.message}`);
       break;
     }
@@ -1237,6 +1280,15 @@ async function main() {
     console.log(
       `[turn ${turn}] finish=${choice?.finish_reason} tools=${calls.length} ctx=${response.usage?.prompt_tokens || "?"} ${preview ? `| ${preview}` : ""}`
     );
+    finishAttempt(gen, {
+      output: { content: msg.content || "", toolCalls: calls.map((c) => c.function?.name) },
+      usage: response.usage,
+      // A truncated turn is a real event with a real cost, not an error: it is the shape that
+      // killed one run at turn 23 and it should be findable in the UI without reading the log.
+      level: choice?.finish_reason === "length" ? "WARNING" : undefined,
+      statusMessage: choice?.finish_reason === "length" ? "output truncated at max_tokens" : undefined,
+      metadata: { turn, finishReason: choice?.finish_reason, contextMessages: messages.length },
+    });
 
     // A tool call cut off by the token limit has truncated JSON arguments — a write_file whose
     // `content` string never closes. Keeping it in the history is fatal on the NEXT request:
@@ -1287,8 +1339,15 @@ async function main() {
       if (/\bDONE\b/i.test(msg.content || "") || choice?.finish_reason === "stop") {
         // The model wanting to stop is a request, not the exit condition. Validators run here
         // whether or not the model ever called them, and failures go back as work to do.
+        const gateSpan = startStep(run, `gate:round-${validationRounds + 1}`, { metadata: { turn } });
         const { ran, failures, advisories } = await validateProject(opts.project, toolRegistry);
         validationRounds++;
+        gateSpan
+          .update({
+            output: { ran, failing: failures.length, failures, advisories },
+            level: failures.length ? "WARNING" : "DEFAULT",
+          })
+          .end();
         console.log(
           `[gate] validation round ${validationRounds}: ran ${ran.join(", ") || "nothing"} — ` +
             `${failures.length} failing`
@@ -1299,9 +1358,22 @@ async function main() {
         // Run once, on the first time the model tries to stop — that is the moment the whole
         // deliverable exists and the model is still in a position to act on what comes back.
         if (opts.advisorFile && advisoryFindings === null) {
+          // The external advisor blocks on a human or another agent writing a file, so this span
+          // is mostly wall-clock spent waiting. That is worth seeing: it is the single longest
+          // thing in most runs and it is invisible in token counts.
+          const advSpan = startStep(run, "advisor:external", {
+            input: { requestPath: `${opts.advisorFile}.request.md`, advisories },
+            metadata: { turn },
+          });
           const advice = await runExternalAdvisor(opts.project, taskText, opts.advisorFile, advisories);
           advisoryFindings = advice.findings;
           advisoryInconclusive = !!advice.inconclusive;
+          advSpan
+            .update({
+              output: { findings: advice.findings, inconclusive: !!advice.inconclusive },
+              level: advice.inconclusive ? "WARNING" : "DEFAULT",
+            })
+            .end();
           console.log(`[advisor] external review: ${advisoryFindings.length} finding(s)`);
           for (const f of advisoryFindings) console.log(`    ${f}`);
         } else if (opts.advisor && advisoryFindings === null) {
@@ -1381,6 +1453,7 @@ async function main() {
       }
 
       const entry = toolRegistry.get(name);
+      const toolSpan = startStep(run, `tool:${name}`, { input: args, metadata: { turn, kind: entry?.kind } });
       let result;
       if (!entry) {
         result = `ERROR: no such tool "${name}".`;
@@ -1391,6 +1464,16 @@ async function main() {
           result = `ERROR: ${error.message}`;
         }
       }
+      // A refusal is not an exception, so it would otherwise be indistinguishable from a normal
+      // write in the trace -- and refusals (a blocked credential, a guard-config file) are exactly
+      // what a run gets reviewed for afterwards.
+      const refused = typeof result === "string" && /^(ERROR|REFUSED|COMMIT REJECTED)\b/.test(result);
+      toolSpan
+        .update({
+          output: typeof result === "string" ? result.slice(0, 4000) : result,
+          level: refused ? "WARNING" : undefined,
+        })
+        .end();
 
       // No-progress detection. The gate asks whether the validators pass; nothing asked whether
       // the model was still moving. A real run wrote app/database.py 39 times across turns 41-70,
@@ -1452,7 +1535,21 @@ async function main() {
   // gate result. The loop can exit on max-turns after the model has already fixed what the gate
   // complained about, and reporting the stale verdict would claim a failure that no longer exists
   // — the same class of dishonest signal this gate exists to remove.
+  const finalSpan = startStep(run, "gate:final", {
+    metadata: { note: "re-run against the files as they finally stand, not the last gate result" },
+  });
   finalValidation = await validateProject(opts.project, toolRegistry);
+  finalSpan
+    .update({
+      output: {
+        ran: finalValidation.ran,
+        failing: finalValidation.failures.length,
+        failures: finalValidation.failures,
+        advisories: finalValidation.advisories || [],
+      },
+      level: finalValidation.failures.length ? "WARNING" : "DEFAULT",
+    })
+    .end();
   // Servers are torn down only after the final validation — killing them first left the
   // re-validation writing to dead stdin and crashing the run with EPIPE.
   for (const s of servers) s.kill();
@@ -1494,10 +1591,46 @@ async function main() {
   if (!report.validationPassed) {
     for (const f of finalValidation.failures) console.log(`  - ${f.split("\n")[0]}`);
   }
+
+  // Scores rather than metadata, because these are the numbers worth comparing across runs. The
+  // adv-series has produced fifteen of them and every comparison so far has been done by hand
+  // against saved logs; charted, "did raising the context window change anything?" stops being an
+  // archaeology exercise.
+  scoreRun(run, { name: "validation-passed", value: report.validationPassed ? 1 : 0 });
+  scoreRun(run, { name: "turns-used", value: usage.calls });
+  scoreRun(run, { name: "tool-calls", value: toolCallLog.length });
+  scoreRun(run, { name: "total-tokens", value: usage.total });
+  scoreRun(run, { name: "validation-rounds", value: validationRounds });
+  scoreRun(run, {
+    name: "advisory-findings",
+    value: (advisoryFindings || []).length,
+    comment: advisoryInconclusive ? "advisor returned no answer" : undefined,
+  });
+  run
+    .update({
+      output: {
+        validationPassed: report.validationPassed,
+        failures: finalValidation.failures,
+        validatorsRun: finalValidation.ran,
+        stoppedForNoProgress: noProgressStopped,
+        regressionWarnings,
+        byTool,
+        usage,
+      },
+      level: report.validationPassed ? "DEFAULT" : "WARNING",
+    })
+    .end();
+  // Before process.exit, or the OTel processor is killed with spans still buffered and the run
+  // that just finished never appears. Bounded inside shutdownTracing, so an unreachable server
+  // cannot turn a completed run into a hung process.
+  if (tracingEnabled()) console.log("[loop] flushing traces to langfuse...");
+  await shutdownTracing();
   process.exit(0);
 }
 
-main().catch((e) => {
+main().catch(async (e) => {
   console.error(e);
+  // A crashed run is the one most worth having a trace of.
+  await shutdownTracing();
   process.exit(1);
 });

@@ -40,6 +40,10 @@ Two router aliases:
   a real run: asked to write a file containing a GitHub PAT, the model got
   `REFUSED: settings.py was NOT written` and no file appeared. The gate additionally runs
   `scan_path` over the whole tree, which covers files the model did not write.
+  Runs are traced to Langfuse via the shared `bench/langfuse-tracing.mjs` — one generation per
+  turn, a span per tool call, spans for each gate round and the advisor wait, and six scores.
+  Tracing is best-effort and no-ops when the stack is down; a run is 40 minutes of real model time
+  and must never be lost to a sidecar.
 - `bench/` — reusable benchmark for deciding whether a candidate local model is worth adopting
   into `local-copilot-stack`'s `presets.ini`. `bench/run-benchmark.mjs --model <alias>` runs a
   standardized codegen task through the real delegation tool, escalating `max_tokens`
@@ -252,6 +256,27 @@ No build step. Run directly by an MCP client via:
   (`launchctl unload`/`load -w` the plist) clears it. If a model that was
   working starts failing instantly, suspect this before the request or the
   model.
+- **The commit gate must fail when it cannot run, not disappear.** The uncommitted-work check was
+  wrapped in `if (status.status === 0)`, and `git status` exits non-zero outside a repository — so
+  a run into a plain directory made 26 `write_file` calls, got `Not a git repository` from all four
+  `git_commit` calls, and reported `validation PASSED`. There was no failure, no advisory, and no
+  `uncommitted_work` entry in the validators-run list, which is what made it invisible rather than
+  merely wrong. This matters more than a missed lint: the pre-commit hook is the **only** place the
+  workload-identity scan and terraform-guard's source scan run in this pipeline. `ensureRepo()` now
+  `git init`s the project at startup so the boundary exists before the model writes anything — the
+  loop cannot create it later, because `git_commit` is broken in exactly the case that needs it —
+  and the gate fails loudly if `git status` still errors.
+- **`GUARD_CONFIG_FILES` must name every sibling's suppression file.** It listed `.gitleaksignore`,
+  `.gitleaks.toml` and `.tfguard-fixture` but not `.identity-exception`, so a model blocked from
+  committing wrote one and the commit went through — the guard the model can edit is not a guard,
+  which is the reason the list exists. The basename is hardcoded rather than imported, to avoid
+  depending on an optional sibling repo loading at startup; `identity-guard-mcp`'s test suite pins
+  the value so a rename cannot drift the two apart silently.
+- **`git commit` commits the index, not what your process just staged.** Two agent sessions sharing
+  this working tree produced a commit containing one intended file plus 1,715 lines another session
+  had staged, under a message describing only the first. Nothing warns about this. Use
+  `git commit -- <paths>` when anything else might be working in the tree, and read the
+  `N files changed` line afterwards — that line is what caught it, one commit late.
 - **The two `context_files`/prose-cost fixes above are documentation-only,
   not code-enforced — and that's probably as far as this line of fixes
   goes.** The server can't tell whether a context file was already lying

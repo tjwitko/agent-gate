@@ -63,6 +63,23 @@ Two router aliases:
   declared in the generated project's `package.json` (`missingDependencies` in the report) — a
   real bug from the same round (a model used `ajv` without declaring it) that isn't specific to
   either task shape. See `bench/README.md`. `bench/runs/` is gitignored scratch output.
+  `bench/run-experiment.mjs --models a,b --tasks task.json,task-iac.json` compares several
+  candidates across several tasks in one Langfuse experiment. It is a thin layer over
+  `run-benchmark.mjs` — each grid cell is a real child-process invocation of it, so the real
+  delegation path and every existing check still apply — and it runs strictly sequentially
+  because parallel runs contend for one `llama-server` and would corrupt the wall-clock and
+  token numbers being compared.
+- `bench/langfuse-tracing.mjs` — optional tracing to the sibling
+  [`../langfuse-local`](../langfuse-local) self-hosted Langfuse stack. Records one generation per
+  attempt (with the model's own token counts), spans for the verification phases, and the report's
+  numbers as scores, so model comparisons survive `bench/runs/` being overwritten. Two design
+  points worth not undoing: **tracing can never fail a benchmark** (it probes
+  `/api/public/health` first and falls back to no-op objects with the same shape as real
+  observations, so with the stack down the harness produces identical stdout, report and exit
+  code), and **it instruments the harness, not `index.mjs`** — tracing from inside the server
+  would mean widening its five-key env allowlist to carry Langfuse credentials into a process
+  whose whole point is a minimal environment, and the harness already parses the `[usage]` line
+  and owns the timing.
 
 There is no other test directory in this repo. Ad-hoc testing during
 development has used a throwaway harness script (spawn `index.mjs` as a

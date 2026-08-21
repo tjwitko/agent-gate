@@ -26,6 +26,12 @@
 // in the generated project's package.json — a real bug found in a delegated run (a model used
 // `ajv` without adding it as a dependency) that isn't specific to either task shape.
 //
+// If the sibling langfuse-local stack is running, every run is also traced to it: one
+// generation per attempt (with the model's own token counts), spans for the verification
+// phases, and the report's numbers attached as scores so runs are comparable in the UI over
+// time. Tracing is strictly additive — with the stack down, this script behaves exactly as it
+// did before, same stdout and same exit codes. See bench/README.md.
+//
 // Usage:
 //   node run-benchmark.mjs --model <router-preset-alias> [options]
 //   --start-max-tokens <n>    initial budget (default 3000)
@@ -41,6 +47,7 @@ import { readFileSync, writeFileSync, mkdirSync, cpSync, existsSync, readdirSync
 import path from "path";
 import { fileURLToPath } from "url";
 import { builtinModules } from "module";
+import { initTracing, startRun, startStep, startAttempt, finishAttempt, scoreRun, shutdownTracing } from "./langfuse-tracing.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SERVER_PATH = path.join(__dirname, "..", "index.mjs");
@@ -284,6 +291,22 @@ async function main() {
   const runDir = path.join(RUNS_DIR, opts.label);
 
   console.log(`==> benchmarking "${opts.model}" (taskType=${task.taskType || "node-rest"}, run dir: ${runDir})`);
+
+  await initTracing();
+  const run = startRun(`bench:${task.taskType || "node-rest"}`, {
+    input: { task: task.task, system_prompt: task.system_prompt, context_files: task.context_files },
+    metadata: {
+      modelAlias: opts.model,
+      label: opts.label,
+      taskType: task.taskType || "node-rest",
+      taskFile: path.basename(opts.taskPath),
+      startMaxTokens: opts.startMaxTokens,
+      maxTokensCeiling: opts.maxTokensCeiling,
+      maxAttempts: opts.maxAttempts,
+      expectedOutputLines: task.expected_output_lines,
+    },
+  });
+
   cpSync(referenceDir, runDir, { recursive: true });
   if (existsSync(path.join(runDir, "package.json"))) {
     console.log("==> npm install...");
@@ -297,12 +320,30 @@ async function main() {
   for (let attempt = 1; attempt <= opts.maxAttempts; attempt++) {
     const timeoutMs = TIMEOUT_BASE_MS + maxTokens * TIMEOUT_PER_TOKEN_MS + HARNESS_TIMEOUT_BUFFER_MS;
     console.log(`==> attempt ${attempt}/${opts.maxAttempts}: max_tokens=${maxTokens} (harness timeout ${Math.round(timeoutMs / 1000)}s)`);
+    // Opened before the call so the generation's duration is the real model wall-clock.
+    const attemptSpan = startAttempt(run, {
+      name: `attempt-${attempt}`,
+      model: opts.model,
+      modelParameters: { max_tokens: maxTokens },
+      input: { task: task.task, context_files: task.context_files },
+    });
+
     const result = await callDelegate({
       cwd: runDir,
       args: { ...task, model: "capable", max_tokens: maxTokens },
       timeoutMs,
       modelAlias: opts.model,
     });
+    // A failed attempt is closed out too, not skipped: "four instant tool-errors" is exactly the
+    // llama-server crash signature the README warns about, and it should be visible in the UI.
+    finishAttempt(attemptSpan, {
+      output: result.ok ? result.text : null,
+      usage: result.usage,
+      level: result.ok ? "DEFAULT" : "ERROR",
+      statusMessage: result.ok ? undefined : result.reason,
+      metadata: { attempt, elapsedMs: result.elapsedMs, reason: result.reason, message: result.message },
+    });
+
     attempts.push({ attempt, maxTokens, elapsedMs: result.elapsedMs, usage: result.usage, ok: result.ok, reason: result.reason });
     console.log(`    -> ${result.ok ? "responded" : `failed (${result.reason})`}, ${Math.round(result.elapsedMs / 1000)}s, usage=${JSON.stringify(result.usage)}`);
 
@@ -330,22 +371,61 @@ async function main() {
     completed: !!finalResult,
   };
 
+  // Every number the report compares across models becomes a score, so the UI can chart them.
+  const emitScores = (r) => {
+    scoreRun(run, { name: "completed", value: r.completed ? 1 : 0 });
+    scoreRun(run, { name: "attempts", value: r.attempts, comment: "lower is better" });
+    scoreRun(run, { name: "total_local_tokens", value: r.totalLocalTokens, comment: "lower is better" });
+    scoreRun(run, { name: "wall_clock_seconds", value: r.totalElapsedSeconds, comment: "lower is better" });
+    if (Array.isArray(r.missingDependencies)) {
+      scoreRun(run, {
+        name: "missing_dependencies",
+        value: r.missingDependencies.length,
+        comment: r.missingDependencies.join(", ") || "none",
+      });
+    }
+    if (typeof r.testsPassedCleanly === "boolean") {
+      scoreRun(run, { name: "tests_passed_cleanly", value: r.testsPassedCleanly ? 1 : 0 });
+    }
+    if (typeof r.testsPass === "number") scoreRun(run, { name: "tests_pass", value: r.testsPass });
+    if (typeof r.testsFail === "number") scoreRun(run, { name: "tests_fail", value: r.testsFail });
+    if (typeof r.terraformValid === "boolean") {
+      scoreRun(run, { name: "terraform_valid", value: r.terraformValid ? 1 : 0 });
+    }
+    if (typeof r.dockerBuildOk === "boolean") {
+      scoreRun(run, { name: "docker_build_ok", value: r.dockerBuildOk ? 1 : 0 });
+    }
+  };
+
   if (!finalResult) {
     console.log("\n==> RESULT: never produced a complete response within the attempt/token budget.");
     console.log(JSON.stringify(report, null, 2));
     writeFileSync(path.join(runDir, "bench-report.json"), JSON.stringify(report, null, 2));
+    emitScores(report);
+    run.update({ output: report, level: "ERROR", statusMessage: "no complete response within budget" }).end();
+    // Flush before exiting, or the attempts just recorded never reach the server.
+    await shutdownTracing();
     process.exit(1);
   }
 
+  const splitSpan = startStep(run, "split-files");
   splitFiles(finalResult.text, runDir);
+  splitSpan.update({ output: { runDir } }).end();
 
+  const depSpan = startStep(run, "dependency-completeness");
   const depCheck = checkDependencyCompleteness(runDir);
   report.missingDependencies = depCheck.missing;
+  depSpan.update({
+    output: depCheck,
+    level: depCheck.missing.length > 0 ? "WARNING" : "DEFAULT",
+    statusMessage: depCheck.missing.length > 0 ? `undeclared: ${depCheck.missing.join(", ")}` : undefined,
+  }).end();
   if (depCheck.missing.length > 0) {
     console.log(`==> WARNING: imported but not declared in package.json: ${depCheck.missing.join(", ")}`);
   }
 
   let passedCleanly;
+  const verifySpan = startStep(run, `verify:${verifyType}`);
   if (verifyType === "terraform-docker") {
     console.log("==> running terraform validate + docker build...");
     const iacResult = verifyTerraformAndDocker(runDir, task.verify || {});
@@ -354,6 +434,9 @@ async function main() {
     writeFileSync(path.join(runDir, "terraform-validate-output.txt"), iacResult.terraformOutput);
     writeFileSync(path.join(runDir, "docker-build-output.txt"), iacResult.dockerOutput);
     passedCleanly = iacResult.terraformValid !== false && iacResult.dockerBuildOk !== false;
+    verifySpan.update({
+      output: { terraformValid: iacResult.terraformValid, dockerBuildOk: iacResult.dockerBuildOk },
+    });
     if (iacResult.terraformValid === null) console.log("==> NOTE: terraform not available, skipped");
     if (iacResult.dockerBuildOk === null) console.log("==> NOTE: docker not available, skipped");
   } else {
@@ -367,11 +450,23 @@ async function main() {
     report.testsPassedCleanly = testRun.status === 0;
     writeFileSync(path.join(runDir, "test-output.txt"), testOutput);
     passedCleanly = report.testsPassedCleanly;
+    verifySpan.update({
+      output: { testsPass: report.testsPass, testsFail: report.testsFail, exitCode: testRun.status },
+    });
   }
+  verifySpan.update({ level: passedCleanly ? "DEFAULT" : "WARNING" }).end();
 
   console.log("\n==> RESULT");
   console.log(JSON.stringify(report, null, 2));
   writeFileSync(path.join(runDir, "bench-report.json"), JSON.stringify(report, null, 2));
+
+  emitScores(report);
+  run.update({
+    output: report,
+    level: passedCleanly ? "DEFAULT" : "WARNING",
+    statusMessage: passedCleanly ? undefined : "verification did not pass cleanly",
+  }).end();
+  await shutdownTracing();
 
   if (!passedCleanly) {
     console.log(

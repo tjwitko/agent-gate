@@ -943,13 +943,37 @@ async function validateProject(projectDir, toolRegistry) {
     const rel = path.relative(projectDir, dir) || ".";
     const result = await tfPlan.server.call("terraform_plan", { working_dir: rel });
     ran.push(`terraform_plan(${rel})`);
-    // A credentials failure means the security rules could not run — that is an unscanned result,
-    // not a passing one, but it is an environment limitation the model cannot fix by editing code.
-    // Schema errors and violations are its problem; missing cloud credentials are not.
-    const unscannable = /could not authenticate|credential/i.test(result);
-    if (/TOOL REPORTED A PROBLEM|Refusing to plan-approve/.test(result) && !unscannable) {
-      failures.push(`terraform_plan(${rel}):\n${result.slice(0, 1500)}`);
-    } else if (unscannable) {
+    // A credentials failure means the plan-based rules could not run — an unscanned result, not a
+    // passing one, but an environment limitation the model cannot fix by editing code. Schema
+    // errors and violations are its problem; missing cloud credentials are not.
+    //
+    // This used to be decided by `/could not authenticate|credential/i` over the whole response,
+    // which is wrong in both directions and was wrong in practice. Every credential finding
+    // contains the word "credential", so a real hardcoded secret found by the credential-free
+    // source scan was classified as an authentication failure and demoted to advisory — a run
+    // shipped `db_password = "dummypassword"` in a .tfvars file and reported validation PASSED.
+    // terraform_plan now reports `planScanned` and `violations` as structured fields; read those.
+    let parsed = null;
+    try {
+      parsed = JSON.parse(result);
+    } catch {
+      /* older/plain-text responses fall back to the prose check below */
+    }
+    const planScanned = parsed ? parsed.planScanned !== false : !/could not authenticate/i.test(result);
+    // Findings are the model's problem whether or not the plan itself ran. The source scan needs no
+    // credentials, so this is exactly the path where its findings are the only signal there is.
+    const findings = parsed?.violations || [];
+    if (findings.length > 0) {
+      failures.push(
+        `terraform_plan(${rel}):\n${(parsed.message || result).slice(0, 1500)}`
+      );
+    } else if (!planScanned && parsed?.unscannableReason !== "provider-authentication") {
+      // Scanned nothing, but not because of credentials — a validate or schema error, which is the
+      // model's to fix. This has to sit ahead of the advisory branch: both look like "the plan did
+      // not run", and only authentication is outside the model's control. The old prose check got
+      // this wrong too, matching the word "credential" anywhere in the response.
+      failures.push(`terraform_plan(${rel}):\n${(parsed?.message || result).slice(0, 1500)}`);
+    } else if (!planScanned) {
       // Not the model's problem to fix, so it must not block — but it must not read as a pass
       // either. Every run of this experiment so far reported terraform as validated while not one
       // plan-based security rule had run: there are no AWS credentials on this machine, the plan
@@ -957,10 +981,15 @@ async function validateProject(projectDir, toolRegistry) {
       // shape the advisor timeout already refuses to have — a check that could not run is not a
       // check that passed.
       advisories.push(
-        `terraform_plan(${rel}): the plan could not authenticate to AWS, so NO plan-based ` +
-          `security rule ran against this configuration. This is an environment limitation, not ` +
-          `a defect in the code — but treat the Terraform here as UNSCANNED, not as clean.`
+        `terraform_plan(${rel}): the plan could not authenticate to the cloud provider, so NO ` +
+          `plan-based security rule ran against this ` +
+          `configuration. The credential-free source scan did run and found nothing. This is an ` +
+          `environment limitation, not a defect in the code — but treat the Terraform here as ` +
+          `UNSCANNED, not as clean.`
       );
+    } else if (/TOOL REPORTED A PROBLEM|Refusing to plan-approve/.test(result)) {
+      // Scanned, no findings, but still refused: a schema or validate error. The model's to fix.
+      failures.push(`terraform_plan(${rel}):\n${result.slice(0, 1500)}`);
     }
   }
 

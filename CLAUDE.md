@@ -85,6 +85,22 @@ Two router aliases:
   whose whole point is a minimal environment, and the harness already parses the `[usage]` line
   and owns the timing.
 
+`agent/immutability.mjs` is the one **blocking** validator that judges the task's requirement
+rather than the code's correctness, and it exists because of a measured failure. Across nineteen
+runs of an "immutable audit log" task, not one deliverable implemented an immutability control
+before review — 0 for 4 in the runs whose round-1 state was preserved. That is not forgetfulness:
+the model states its reasoning in its own comments ("The logs are immutable as the service only
+provides endpoints for adding and reading logs"), and the reasoning is coherent if this client is
+the only thing holding the credential. Advisory findings never changed it in any run; in the same
+run where immutability was advised and ignored, five refused `write_file` calls moved a hardcoded
+credential to AWS Secrets Manager. Advice was not working, refusal was. Three properties to keep:
+it fires only on a store that names itself an audit log (firing on every table is how a blocking
+check gets switched off), an undetermined answer is an advisory and never a pass, and it is tested
+against the four real deliverables whose ground truth is known — two protected, two not, 4 for 4.
+
+`agent/immutability.test.mjs` runs with `node --test agent/immutability.test.mjs`. Note the path
+must be the file: `node --test agent/` tries to load the directory as a module and fails.
+
 There is no other test directory in this repo. Ad-hoc testing during
 development has used a throwaway harness script (spawn `index.mjs` as a
 child process, drive raw MCP JSON-RPC over its stdin/stdout: `initialize` →

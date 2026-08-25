@@ -21,6 +21,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Imported eagerly but constructed lazily — the SDK client is only built on first hosted call,
 // so a local run never needs ANTHROPIC_API_KEY to be set.
 import { chatAnthropic, DEFAULT_MODEL as ANTHROPIC_DEFAULT_MODEL } from "./anthropic-adapter.mjs";
+import { immutabilityFailures } from "./immutability.mjs";
 // Shared with bench/, not duplicated: one definition of how this repo talks to Langfuse means the
 // loop and the benchmark can never disagree about which instance or which credentials. Everything
 // it exports degrades to a no-op with the same shape when the stack is down, so tracing can never
@@ -1066,6 +1067,19 @@ async function validateProject(projectDir, toolRegistry) {
   //
   // Advisory here does not mean discarded. The findings go to the reviewer via the advisory
   // request, which is the layer that can tell a rename from a regression.
+  // Blocking, and deliberately so. Across nineteen runs of an "immutable audit log" task, not one
+  // deliverable implemented an immutability control before review, and advisory findings never
+  // changed that -- while in the same run, five refused write_file calls moved a hardcoded
+  // credential to a secret manager. Advice was not working; refusal was. This moves the task's
+  // central requirement from the column that gets ignored into the column that gets fixed.
+  //
+  // It stays quiet unless it can identify an append-only store that names itself as one, and an
+  // undetermined answer is reported as an advisory rather than passed silently.
+  const immutability = immutabilityFailures(projectDir);
+  ran.push("immutability");
+  failures.push(...immutability.failures);
+  advisories.push(...immutability.advisories);
+
   for (const dir of tfDirs) {
     const ckv = checkovAdvisory(dir, projectDir);
     if (ckv) {

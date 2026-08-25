@@ -23,7 +23,12 @@
 import { readdirSync, readFileSync, statSync } from "fs";
 import path from "path";
 
-const SKIP_DIRS = new Set([".git", ".terraform", "node_modules", "__pycache__", ".venv", "venv", "dist", "build"]);
+// `.external_modules` holds Checkov's downloaded modules and lives inside the project. Reading it
+// would let a third-party module's table decide this verdict, and would mean walking thousands of
+// files on every gate round.
+const SKIP_DIRS = new Set([
+  ".git", ".terraform", ".external_modules", "node_modules", "__pycache__", ".venv", "venv", "dist", "build",
+]);
 const READ_EXT = new Set([".py", ".sql", ".tf", ".tfvars", ".js", ".mjs", ".ts", ".yaml", ".yml"]);
 
 // The store is in scope only if it names itself after an audit trail. Deliberately narrow: firing

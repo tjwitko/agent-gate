@@ -7,13 +7,15 @@ terraform {
   }
 }
 
+# Credentials are deliberately absent. `terraform validate`, which is what the IaC benchmark runs,
+# needs none -- and this file is shown to the model as the pattern to imitate, so anything in it is
+# something a model may reproduce. It previously carried access_key/secret_key literals, which is
+# precisely the shape terraform-guard's hardcoded-credentials rule exists to refuse.
 provider "aws" {
   region                      = var.aws_region
   skip_credentials_validation = true
   skip_requesting_account_id  = true
   skip_metadata_api_check     = true
-  access_key                  = "test"
-  secret_key                  = "test"
 }
 
 module "logs_bucket" {

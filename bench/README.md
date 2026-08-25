@@ -34,6 +34,14 @@ itself doesn't hardcode any one task shape. Two shapes exist so far:
   happens to touch. Treat that class of bug as something to check by hand per task, the way it was
   found originally.
 
+  **The root `terraform/main.tf` is deliberately NOT in `context_files`, and the fixture holds no
+  credentials.** It used to be both: the file carried `access_key`/`secret_key` literals and was
+  handed to the model as the pattern to imitate, while the task asked it to output that same file —
+  a direct teaching vector for the one shape `terraform-guard` refuses. The keys are gone
+  (`terraform validate`, which is all this task runs, needs none) and the root module is now
+  described in the task prose instead of shown. **This re-baselined the task**: `iac` results from
+  before that change are not comparable with results after it.
+
 It automates, regardless of task shape:
 - calling the model with an escalating `max_tokens` budget when a response comes back truncated
   or empty (the two failure signatures found manually: hitting `max_tokens` mid-file, or filling

@@ -10,6 +10,7 @@
 //   node agent-loop.mjs --model <alias> --project <dir> --task <file> [--max-turns 40]
 
 import { spawn, spawnSync } from "child_process";
+import { createHash } from "crypto";
 import http from "http";
 import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync } from "fs";
 import path from "path";
@@ -532,6 +533,13 @@ const MAX_TOOL_RESULT_CHARS = 2500;
 // looping, and by the fifth it has proven it will not stop on its own.
 const NO_PROGRESS_NUDGE = 3;
 const NO_PROGRESS_STOP = 5;
+// How many recent versions of each file to remember. Progress was originally judged against the
+// immediately preceding write only, which catches a model repeating itself and misses one
+// oscillating: a real run alternated between a 20-line and a 26-line provider.tf for its last ten
+// writes -- 26, 20, 26, 20, 26, 20 -- and never produced two identical writes in a row, so the
+// counter reset every time and the run burned all 120 turns. Remembering a short history catches
+// both shapes, since a repeat is a repeat whether or not something else came between.
+const WRITE_HISTORY = 6;
 
 // ---------------------------------------------------------------------------
 // Advisory pass. The deterministic validators answer "is this well-formed?"; nothing in the
@@ -1280,8 +1288,9 @@ async function main() {
   let advisoryFindings = null;   // null = not run yet
   let advisoryDelivered = false;
   let advisoryInconclusive = false;
-  let lastWrite = { path: null, content: null, repeats: 0 };
-  let noProgressNudged = false;
+  // path -> { hashes: recent content digests, revisits: how often a version came back }
+  const writeHistory = new Map();
+  let noProgressNudged = null;   // the path that triggered the nudge, or null
   let noProgressStopped = null;
   const regressionWarnings = [];
   let lastTracedMessageCount = 0;
@@ -1548,18 +1557,24 @@ async function main() {
       // Nudge first, then stop. A model that has genuinely lost the thread will not be rescued by
       // a fourth attempt, but one that is merely repeating itself sometimes recovers when told.
       if (name === "write_file" && args.path) {
-        if (args.path === lastWrite.path && (args.content ?? "") === lastWrite.content) {
-          lastWrite.repeats++;
-        } else {
-          lastWrite = { path: args.path, content: args.content ?? "", repeats: 1 };
-        }
-        if (lastWrite.repeats === NO_PROGRESS_NUDGE) {
-          console.log(`[loop] ${args.path} written ${lastWrite.repeats}x with identical content — nudging`);
-          noProgressNudged = true;
-        } else if (lastWrite.repeats >= NO_PROGRESS_STOP) {
+        const digest = createHash("sha1").update(args.content ?? "").digest("hex");
+        const seen = writeHistory.get(args.path) || { hashes: [], revisits: 0 };
+        // Content this file has already held is not progress, whether it came back immediately or
+        // after a detour through another version. Genuinely new content resets the count, so a
+        // model that reverts one bad edit and moves on is not penalised for it.
+        if (seen.hashes.includes(digest)) seen.revisits++;
+        else seen.revisits = 0;
+        seen.hashes.push(digest);
+        if (seen.hashes.length > WRITE_HISTORY) seen.hashes.shift();
+        writeHistory.set(args.path, seen);
+
+        if (seen.revisits === NO_PROGRESS_NUDGE) {
+          console.log(`[loop] ${args.path} keeps returning to content it already had — nudging`);
+          noProgressNudged = args.path;
+        } else if (seen.revisits >= NO_PROGRESS_STOP) {
           console.log(
-            `[loop] stopping: ${args.path} written ${lastWrite.repeats} times with identical ` +
-              `content — the run is not making progress.`
+            `[loop] stopping: ${args.path} has been rewritten ${seen.revisits} times with content ` +
+              `it already had — the run is cycling, not making progress.`
           );
           noProgressStopped = args.path;
           break;
@@ -1585,13 +1600,15 @@ async function main() {
 
     if (noProgressStopped) break;
     if (noProgressNudged) {
-      noProgressNudged = false;
+      const cyclingPath = noProgressNudged;
+      noProgressNudged = null;
       messages.push({
         role: "user",
         content:
-          `You have now written ${lastWrite.path} several times with exactly the same content, ` +
-          `so nothing has changed. Whatever you are trying to fix, this is not fixing it. Read ` +
-          `the file, do something different, or say DONE and explain what is unresolved.`,
+          `You keep rewriting ${cyclingPath} with content it has already held — switching between ` +
+          `versions you have written before, so nothing is changing. Whatever you are trying to ` +
+          `fix, this is not fixing it. Read the file, do something genuinely different, or say ` +
+          `DONE and explain what is unresolved.`,
       });
     }
   }

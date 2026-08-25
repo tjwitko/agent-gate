@@ -179,6 +179,10 @@ function containedPath(projectDir, rel) {
 // binary in an earlier run, because .terraform/ holds the downloaded providers.
 const ARTIFACT_PATTERNS = [
   ".terraform/",
+  // Checkov writes downloaded modules here when run with --download-external-modules, and unlike
+  // .terraform it is created by a validator this loop runs itself. One run accumulated 5,040
+  // vendored .tf files, staged them all, and could not commit.
+  ".external_modules/",
   "*.tfstate",
   "*.tfstate.*",
   "__pycache__/",
@@ -207,7 +211,7 @@ function isArtifact(relPath) {
   return (
     relPath === "agent-run-report.json" ||
     relPath.endsWith(".pyc") ||
-    /(^|\/)(\.terraform|__pycache__|node_modules|\.venv)(\/|$)/.test(relPath) ||
+    /(^|\/)(\.terraform|\.external_modules|__pycache__|node_modules|\.venv)(\/|$)/.test(relPath) ||
     /\.tfstate(\.|$)/.test(relPath)
   );
 }

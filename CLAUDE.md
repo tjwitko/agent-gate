@@ -98,8 +98,19 @@ it fires only on a store that names itself an audit log (firing on every table i
 check gets switched off), an undetermined answer is an advisory and never a pass, and it is tested
 against the four real deliverables whose ground truth is known — two protected, two not, 4 for 4.
 
-`agent/immutability.test.mjs` runs with `node --test agent/immutability.test.mjs`. Note the path
-must be the file: `node --test agent/` tries to load the directory as a module and fails.
+`agent/authentication.mjs` is the second such validator, added for the same measured reason: "no
+endpoint authenticates" appeared in 5 of 5 preserved reviews and was still unfixed six runs later.
+It is paired with the immutability check deliberately — an immutable store filled by anonymous
+writers is a tamper-proof record of unattributable claims, so closing one without the other buys
+little. Two properties to keep: it judges **per route**, because a real run authenticated POST and
+left GET open and any project-level "is there auth here" test would have passed it; and it does not
+treat `Depends(...)` as authentication, because another run had `Depends(get_db)` on every route and
+authenticated none — that distinction is the whole check. Health and readiness probes are exempt.
+Validated against the five preserved deliverables whose auth state is known by hand, including both
+partial cases: 5 for 5.
+
+Both test files run per-file (`node --test agent/immutability.test.mjs`). Note the path must be the
+file: `node --test agent/` tries to load the directory as a module and fails.
 
 There is no other test directory in this repo. Ad-hoc testing during
 development has used a throwaway harness script (spawn `index.mjs` as a

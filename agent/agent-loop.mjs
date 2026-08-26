@@ -22,6 +22,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // so a local run never needs ANTHROPIC_API_KEY to be set.
 import { chatAnthropic, DEFAULT_MODEL as ANTHROPIC_DEFAULT_MODEL } from "./anthropic-adapter.mjs";
 import { immutabilityFailures } from "./immutability.mjs";
+import { authenticationFailures } from "./authentication.mjs";
 // Shared with bench/, not duplicated: one definition of how this repo talks to Langfuse means the
 // loop and the benchmark can never disagree about which instance or which credentials. Everything
 // it exports degrades to a no-op with the same shape when the stack is down, so tracing can never
@@ -1091,6 +1092,15 @@ async function validateProject(projectDir, toolRegistry) {
   ran.push("immutability");
   failures.push(...immutability.failures);
   advisories.push(...immutability.advisories);
+
+  // Blocking for the same measured reason as immutability, and paired with it deliberately: an
+  // immutable store filled by anonymous writers is a tamper-proof record of unattributable claims,
+  // so closing Tampering while leaving Spoofing open buys very little. "No endpoint authenticates"
+  // appeared in 5 of 5 preserved reviews and was still unfixed six runs later.
+  const authentication = authenticationFailures(projectDir);
+  ran.push("authentication");
+  failures.push(...authentication.failures);
+  advisories.push(...authentication.advisories);
 
   for (const dir of tfDirs) {
     const ckv = checkovAdvisory(dir, projectDir);

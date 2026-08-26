@@ -23,6 +23,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import { chatAnthropic, DEFAULT_MODEL as ANTHROPIC_DEFAULT_MODEL } from "./anthropic-adapter.mjs";
 import { immutabilityFailures, taskRequiresImmutability } from "./immutability.mjs";
 import { authenticationFailures } from "./authentication.mjs";
+import { manifestContractFailures } from "./manifest-contract.mjs";
 import { SKIP_DIRS } from "./skip-dirs.mjs";
 import { ensureGitignore, isArtifact, ensureRepo } from "./commit-gate.mjs";
 // Shared with bench/, not duplicated: one definition of how this repo talks to Langfuse means the
@@ -1066,6 +1067,14 @@ async function validateProject(projectDir, toolRegistry, taskText = "") {
   ran.push("authentication");
   failures.push(...authentication.failures);
   advisories.push(...authentication.advisories);
+
+  // Blocking, and it is the only check that looks at two artifacts at once. Each is correct on its
+  // own terms -- the code reads a variable, the manifests set some variables -- so nothing else
+  // here can see the gap between them, which is where a whole class of deployment failures lives.
+  const contract = manifestContractFailures(projectDir);
+  ran.push("manifest_contract");
+  failures.push(...contract.failures);
+  advisories.push(...contract.advisories);
 
   for (const dir of tfDirs) {
     const ckv = checkovAdvisory(dir, projectDir);

@@ -12,7 +12,8 @@
     "@anthropic-ai/sdk": "^0.117.1",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "axios": "^1.19.0",
-    "zod": "^4.4.3"
+    "zod": "^4.4.3",
+    "yaml": "^2.8.1"
   },
   "devDependencies": {
     "@langfuse/client": "^5.10.1",

@@ -103,7 +103,12 @@ export function checkImmutability(projectDir, { required = false } = {}) {
   // ---- in-memory ---------------------------------------------------------
   // A process-memory list cannot be immutable and cannot be made immutable: the process that owns
   // it can rewrite it, and a restart erases it. There is no control to look for.
-  const inMemory = /^\s*(\w*(?:log|audit|event)\w*)\s*(?::\s*[^=]+)?=\s*(\[\]|\{\})\s*$/im.exec(all);
+  // Keyed on the shape, not the name. This used to require the variable to be called something
+  // containing log/audit/event, which is vocabulary from the first benchmark task: a webhook
+  // receiver storing rows in `callbacks = []` has exactly the same defect and was reported as "no
+  // store could be identified", with advice to rename it. A module-level empty list or dict that
+  // something appends to is a process-memory store whatever it is called.
+  const inMemory = /^\s*([A-Za-z_]\w*)\s*(?::\s*[^=]+)?=\s*(\[\]|\{\})\s*$/im.exec(all);
   if (inMemory && /\.append\(|\.push\(/.test(all)) {
     stores.push({
       kind: "in-memory",
@@ -111,7 +116,7 @@ export function checkImmutability(projectDir, { required = false } = {}) {
       protected: false,
       missing:
         "a process-memory store cannot be immutable — the process that owns it can rewrite it, and a " +
-        "restart erases every record. Move the log to a durable store before adding any control",
+        "restart erases every record. Move the records to a durable store before adding any control",
     });
   }
 
@@ -186,7 +191,7 @@ export function checkImmutability(projectDir, { required = false } = {}) {
       stores: [],
       unknown:
         "no append-only store could be identified, so nothing was checked. If this project stores " +
-        "audit records, name the table, bucket or collection for what it is",
+        "records that must not change, name the table, bucket or collection for what it is",
     };
   }
   return { ran: true, stores, unknown: null };
@@ -203,10 +208,12 @@ export function immutabilityFailures(projectDir, { taskRequiresImmutability = fa
     if (taskRequiresImmutability) {
       return {
         failures: [
-          `immutability: the task requires logs to be immutable, and no append-only store could be ` +
+          `immutability: the task requires records to be unchangeable once written, and no ` +
+            `append-only store could be ` +
             `identified to check — ${why}. Either the records are not being stored anywhere durable, ` +
             `or the table, bucket or collection holding them is named such that nothing can tell it ` +
-            `is the audit log. Name it for what it is, and put the protection below the API.`,
+            `is the one that must not change. Name it for what it is, and put the protection below ` +
+            `the API.`,
         ],
         advisories: [],
       };

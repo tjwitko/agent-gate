@@ -486,3 +486,63 @@ test("an equality-compared signature is reported even when every route is protec
   };
   assert.deepEqual(run(fixed, authenticationFailures).failures, [], "clears once compared safely");
 });
+
+// Found by hand-testing a webhook receiver that authenticated both routes, passed this gate, and
+// still served every stored callback to an unauthenticated request: its Deployment never set
+// SUPPORT_API_KEY, and `None != None` is false. The same file validated three other environment
+// variables at startup and not these two.
+test("a credential compared against an unset environment variable is a vacuous check", () => {
+  const { failures } = run(
+    {
+      "src/main.py":
+        "import os\n" +
+        'SUPPORT_API_KEY = os.getenv("SUPPORT_API_KEY")\n\n' +
+        "def verify(x_support_key: str = Header(None)):\n" +
+        "    if x_support_key != SUPPORT_API_KEY:\n" +
+        "        raise HTTPException(403)\n\n" +
+        "@app.get('/lookup')\n" +
+        "async def lookup(_ = Depends(verify)):\n    pass\n",
+    },
+    authenticationFailures
+  );
+  assert.equal(failures.length, 1, "the route is protected, so this is the vacuous finding alone");
+  assert.match(failures[0], /SUPPORT_API_KEY/);
+  assert.match(failures[0], /does not fail closed/);
+});
+
+test("a credential validated at startup is not vacuous", () => {
+  for (const guard of [
+    'if not SUPPORT_API_KEY:\n    raise RuntimeError("required")\n',
+    "if SUPPORT_API_KEY is None:\n    raise RuntimeError()\n",
+  ]) {
+    const { failures } = run(
+      {
+        "src/main.py":
+          "import os\n" +
+          'SUPPORT_API_KEY = os.getenv("SUPPORT_API_KEY")\n' +
+          guard +
+          "\ndef verify(x_support_key: str = Header(None)):\n" +
+          "    if x_support_key != SUPPORT_API_KEY:\n        raise HTTPException(403)\n\n" +
+          "@app.get('/lookup')\nasync def lookup(_ = Depends(verify)):\n    pass\n",
+      },
+      authenticationFailures
+    );
+    assert.deepEqual(failures, [], guard.split("\n")[0]);
+  }
+});
+
+// os.environ[...] raises on a missing key, so it cannot be vacuous.
+test("a credential read with os.environ[] is not vacuous", () => {
+  const { failures } = run(
+    {
+      "src/main.py":
+        "import os\n" +
+        'SUPPORT_API_KEY = os.environ["SUPPORT_API_KEY"]\n\n' +
+        "def verify(x_support_key: str = Header(None)):\n" +
+        "    if x_support_key != SUPPORT_API_KEY:\n        raise HTTPException(403)\n\n" +
+        "@app.get('/lookup')\nasync def lookup(_ = Depends(verify)):\n    pass\n",
+    },
+    authenticationFailures
+  );
+  assert.deepEqual(failures, []);
+});

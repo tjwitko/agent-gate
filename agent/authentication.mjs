@@ -119,6 +119,45 @@ const CONSTANT_TIME_COMPARE = /\b(compare_digest|timingSafeEqual|hmac\.Equal|Mes
 const LEAKY_SIGNATURE_COMPARE =
   /\b\w*(signature|digest|hmac|hash)\w*\s*(===?|!==?)|(===?|!==?)\s*\w*(signature|digest|hmac)\w*\b/i;
 
+// A credential read from the environment with a defaulting getter, so it can be undefined at
+// runtime. Compared with == or != against what the caller sent, an unset value makes the check
+// vacuous: in Python `None != None` is false, so a missing environment variable does not fail
+// closed -- it opens the endpoint.
+//
+// Found by hand-testing a webhook receiver that authenticated both routes, passed this gate, and
+// served every stored callback to an unauthenticated request because its Deployment never set
+// SUPPORT_API_KEY. The same file validated three other environment variables at startup and not
+// these two. A gate that confirms a check exists, without asking whether it can be satisfied by
+// nothing, certifies exactly this.
+const PY_ENV_CREDENTIAL =
+  /^\s*([A-Z_][A-Z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL)[A-Z0-9_]*)\s*=\s*os\.(?:getenv\s*\(|environ\.get\s*\()/gm;
+
+function validatedAtStartup(all, name) {
+  const patterns = [
+    new RegExp(`if\\s+not\\s+${name}\\b`),
+    new RegExp(`if\\s+${name}\\s+is\\s+None`),
+    new RegExp(`if\\s*\\(?\\s*not\\s+${name}\\b`),
+    new RegExp(`${name}\\s*=\\s*os\\.environ\\[`),            // raises KeyError when absent
+    new RegExp(`assert\\s+${name}\\b`),
+    new RegExp(`${name}\\s*=\\s*os\\.(getenv|environ\\.get)[^\\n]*,\\s*['"\`]`), // real default
+  ];
+  return patterns.some((re) => re.test(all));
+}
+
+/** Credentials compared against an environment value that may be unset, making the check vacuous. */
+export function vacuousCredentialChecks(all) {
+  const out = [];
+  PY_ENV_CREDENTIAL.lastIndex = 0;
+  let m;
+  while ((m = PY_ENV_CREDENTIAL.exec(all))) {
+    const name = m[1];
+    if (validatedAtStartup(all, name)) continue;
+    const compared = new RegExp(`[!=]==?\\s*${name}\\b|\\b${name}\\s*[!=]==?`).test(all);
+    if (compared) out.push(name);
+  }
+  return [...new Set(out)];
+}
+
 /** A signature is verified somewhere, but not in constant time. */
 export function leakySignatureCheck(all) {
   if (!verifiesSignature(all)) return false;
@@ -463,10 +502,12 @@ export function checkAuthentication(projectDir) {
   const routes = [];
   const languages = [];
   let leakySignature = false;
+  const vacuous = new Set();
   for (const [adapter, adapterFiles] of byAdapter) {
     const all = adapterFiles.map((f) => f.text).join("\n");
     const global = adapter.globalAuth(all);
     if (leakySignatureCheck(all)) leakySignature = true;
+    for (const n of vacuousCredentialChecks(all)) vacuous.add(n);
     let found = 0;
     for (const file of adapterFiles) {
       for (const r of adapter.routes(file.text)) {
@@ -495,7 +536,7 @@ export function checkAuthentication(projectDir) {
         "they are declared in a form this check does not recognise",
     };
   }
-  return { ran: true, routes, languages, leakySignature, unknown: null };
+  return { ran: true, routes, languages, leakySignature, vacuousCredentials: [...vacuous], unknown: null };
 }
 
 /** Blocking failures for the gate. */
@@ -519,6 +560,19 @@ export function authenticationFailures(projectDir) {
       ]
     : [];
 
+  const vacuousNames = report.vacuousCredentials || [];
+  if (vacuousNames.length) {
+    timing.push(
+      `authentication: ${vacuousNames.join(", ")} ${vacuousNames.length === 1 ? "is" : "are"} read ` +
+        `from the environment with a getter that returns None when unset, and compared with == or ` +
+        `!= against what the caller sent. When the variable is missing the comparison is between ` +
+        `two Nones, which succeeds — so a deployment that forgets it does not fail closed, it ` +
+        `serves the endpoint to anyone. Validate at startup and refuse to start without it, the ` +
+        `way this file already treats its other required configuration, and compare with ` +
+        `hmac.compare_digest so the check is constant-time as well as non-vacuous.`
+    );
+  }
+
   const open = report.routes.filter((r) => !r.protectedBy);
   if (open.length === 0) return { failures: timing, advisories: [] };
 
@@ -535,7 +589,7 @@ export function authenticationFailures(projectDir) {
           ? `Other routes here are authenticated, so this is a gap rather than an omission: an ` +
             `attacker uses the unprotected one. `
           : "") +
-        `Unauthenticated writes damage an audit log more than unauthenticated reads: a log anyone ` +
+        `Unauthenticated writes damage a system of record more than unauthenticated reads: a store anyone ` +
         `can append to proves nothing about the records already in it, and an immutable store ` +
         `filled by anonymous writers is a tamper-proof record of unattributable claims. Require a ` +
         `caller identity on every route — ${idioms.join("; or ")}. Health and readiness probes are ` +

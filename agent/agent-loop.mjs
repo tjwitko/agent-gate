@@ -24,6 +24,7 @@ import { chatAnthropic, DEFAULT_MODEL as ANTHROPIC_DEFAULT_MODEL } from "./anthr
 import { immutabilityFailures } from "./immutability.mjs";
 import { authenticationFailures } from "./authentication.mjs";
 import { SKIP_DIRS } from "./skip-dirs.mjs";
+import { ensureGitignore, isArtifact, ensureRepo } from "./commit-gate.mjs";
 // Shared with bench/, not duplicated: one definition of how this repo talks to Langfuse means the
 // loop and the benchmark can never disagree about which instance or which credentials. Everything
 // it exports degrades to a no-op with the same shape when the stack is down, so tracing can never
@@ -177,47 +178,6 @@ function containedPath(projectDir, rel) {
 // Paths that are build output, not work. The gate below ignores them when deciding whether the
 // tree is dirty, and the baseline .gitignore keeps them out of commits.
 //
-// This is not tidiness. `git add -A` with no .gitignore committed an 813MB Terraform provider
-// binary in an earlier run, because .terraform/ holds the downloaded providers.
-const ARTIFACT_PATTERNS = [
-  ".terraform/",
-  // Checkov writes downloaded modules here when run with --download-external-modules, and unlike
-  // .terraform it is created by a validator this loop runs itself. One run accumulated 5,040
-  // vendored .tf files, staged them all, and could not commit.
-  ".external_modules/",
-  "*.tfstate",
-  "*.tfstate.*",
-  "__pycache__/",
-  "*.pyc",
-  "node_modules/",
-  ".venv/",
-  "agent-run-report.json",
-];
-
-function ensureGitignore(projectDir) {
-  const file = path.join(projectDir, ".gitignore");
-  if (existsSync(file)) return; // the project's own choices win
-  try {
-    writeFileSync(
-      file,
-      "# Written by the agent loop because none existed. Build output, not work.\n" +
-        ARTIFACT_PATTERNS.join("\n") +
-        "\n"
-    );
-  } catch {
-    /* advisory scaffolding; never fail a run over it */
-  }
-}
-
-function isArtifact(relPath) {
-  return (
-    relPath === "agent-run-report.json" ||
-    relPath.endsWith(".pyc") ||
-    /(^|\/)(\.terraform|\.external_modules|__pycache__|node_modules|\.venv)(\/|$)/.test(relPath) ||
-    /\.tfstate(\.|$)/.test(relPath)
-  );
-}
-
 function protectRepo(projectDir) {
   const inRepo = spawnSync("git", ["rev-parse", "--is-inside-work-tree"], { cwd: projectDir, encoding: "utf8" });
   if (inRepo.status !== 0) return null;
@@ -1195,18 +1155,6 @@ async function validateProject(projectDir, toolRegistry, taskText = "") {
 // because git_commit fails on every call with "Not a git repository". One real run made 26
 // write_file calls and 4 git_commit calls into a plain directory, committed nothing, and reported
 // validation PASSED. Initializing here means the boundary exists before the model writes anything.
-function ensureRepo(projectDir) {
-  const inRepo = spawnSync("git", ["rev-parse", "--is-inside-work-tree"], { cwd: projectDir, encoding: "utf8" });
-  if (inRepo.status === 0) return true;
-  const init = spawnSync("git", ["init", "-q"], { cwd: projectDir, encoding: "utf8" });
-  if (init.status !== 0) {
-    console.warn(`[loop] could not initialize a git repository in ${projectDir} — the commit gate will refuse to pass`);
-    return false;
-  }
-  console.log(`[loop] initialized a git repository in ${projectDir} (nothing to commit into otherwise)`);
-  return true;
-}
-
 async function main() {
   const opts = parseArgs();
   mkdirSync(opts.project, { recursive: true });

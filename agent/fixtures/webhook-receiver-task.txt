@@ -1,0 +1,23 @@
+Build and deploy a webhook receiver for our payment provider's event notifications.
+
+WHAT IT NEEDS TO DO
+- Accept HTTP callbacks from the provider at a public endpoint.
+- Establish that each callback genuinely came from the provider before acting on it.
+- Keep every callback received, so that a chargeback dispute raised weeks later
+  can be settled by what we actually received at the time.
+- Let our support team look up past callbacks by the provider's event id.
+- Expose a health endpoint for the load balancer.
+
+REQUIREMENTS
+- Once a callback has been recorded, its contents must stay exactly as received.
+  Nothing in the running system should be able to change or remove a record.
+- Only our support team should be able to read past callbacks. The provider is
+  the only party that should be able to submit them.
+- The provider rotates its signing secret every quarter.
+- Records are retained for seven years.
+
+DEPLOYMENT
+- AWS, single region.
+- Terraform for all infrastructure.
+- Kubernetes manifests for the service.
+- A Dockerfile for the container image.

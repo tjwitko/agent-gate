@@ -36,6 +36,29 @@ const READ_EXT = new Set([".py", ".sql", ".tf", ".tfvars", ".js", ".mjs", ".ts",
 // on every table would make this noise, and noise is how a blocking check gets switched off.
 const AUDIT_NAME = /(audit|auditd|log_?entr|logs?|event_?log|trail)/i;
 
+// Whether the task itself demands that records not change. Lives here rather than as a regex in
+// the caller, because it decides whether an undetermined answer blocks, and it has to survive a
+// task that never uses the word.
+//
+// The first version tested only /immutab/i. A second benchmark task required exactly this property
+// -- "its contents must stay exactly as received", "Nothing in the running system should be able to
+// change or remove a record" -- without the word appearing once, so the gate would have quietly
+// downgraded itself to advisory on the task it most needed to hold.
+const IMMUTABILITY_PHRASES = [
+  /\bimmutab/i,
+  /\bunalterable\b/i,
+  /\bappend[- ]only\b/i,
+  /\bwrite[- ]once\b/i,
+  /\bWORM\b/,
+  /\btamper[- ]?(proof|evident|resistant)\b/i,
+  /stay\s+(exactly\s+)?as\s+received/i,
+  /\b(cannot|must not|may not|should not|nothing)\b[^.]{0,60}\b(chang|modif|alter|delet|remov|overwrit|edit)/i,
+];
+
+export function taskRequiresImmutability(taskText = "") {
+  return IMMUTABILITY_PHRASES.some((re) => re.test(taskText));
+}
+
 function walk(dir, acc = [], root = dir) {
   let entries;
   try {
@@ -62,7 +85,7 @@ function walk(dir, acc = [], root = dir) {
  * Which append-only stores this project appears to use, and whether each is actually protected.
  * Returns { ran, stores: [{kind, evidence, protected, missing}], unknown }.
  */
-export function checkImmutability(projectDir) {
+export function checkImmutability(projectDir, { required = false } = {}) {
   const files = walk(projectDir);
   if (files.length === 0) return { ran: false, stores: [], unknown: "no readable source files" };
 
@@ -96,7 +119,8 @@ export function checkImmutability(projectDir) {
   const tableDecl =
     /__tablename__\s*=\s*["'](\w+)["']/i.exec(all) || /CREATE TABLE(?:\s+IF NOT EXISTS)?\s+["']?(\w+)/i.exec(all);
   const usesRelational = /sqlalchemy|psycopg2|sqlite3|aws_db_instance/i.test(all);
-  if (usesRelational && tableDecl && AUDIT_NAME.test(tableDecl[1])) {
+  const inScope = (name) => AUDIT_NAME.test(name) || required;
+  if (usesRelational && tableDecl && inScope(tableDecl[1])) {
     const hasTrigger = /CREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER[\s\S]{0,400}?BEFORE\s+(UPDATE|DELETE)/i.test(sqlText);
     const raises = /RAISE\s+(EXCEPTION|ABORT|FAIL)/i.test(sqlText);
     const revokes = /REVOKE\s+[^;]*\b(UPDATE|DELETE|ALL)\b/i.test(sqlText);
@@ -117,7 +141,7 @@ export function checkImmutability(projectDir) {
   // ---- DynamoDB ----------------------------------------------------------
   const ddbTable = /resource\s+"aws_dynamodb_table"\s+"(\w+)"/i.exec(tfText);
   const usesDdb = /dynamodb/i.test(all);
-  if (usesDdb && (!ddbTable || AUDIT_NAME.test(ddbTable[1]))) {
+  if (usesDdb && (!ddbTable || inScope(ddbTable[1]))) {
     const conditional = /ConditionExpression\s*=\s*["'][^"']*attribute_not_exists/i.test(all);
     // Only judge the IAM policy if one actually grants DynamoDB actions here.
     const grants = [...tfText.matchAll(/"dynamodb:(\w+)"/g)].map((m) => m[1]);
@@ -144,7 +168,7 @@ export function checkImmutability(projectDir) {
 
   // ---- S3 ----------------------------------------------------------------
   const bucket = /resource\s+"aws_s3_bucket"\s+"(\w+)"/i.exec(tfText);
-  if (bucket && AUDIT_NAME.test(bucket[1])) {
+  if (bucket && inScope(bucket[1])) {
     const locked =
       /object_lock_enabled\s*=\s*true/i.test(tfText) ||
       /resource\s+"aws_s3_bucket_object_lock_configuration"/i.test(tfText);
@@ -170,7 +194,7 @@ export function checkImmutability(projectDir) {
 
 /** Human-readable failures for the gate. Empty array means every identified store is protected. */
 export function immutabilityFailures(projectDir, { taskRequiresImmutability = false } = {}) {
-  const report = checkImmutability(projectDir);
+  const report = checkImmutability(projectDir, { required: taskRequiresImmutability });
   const undetermined = !report.ran || report.unknown;
   if (undetermined) {
     const why = report.unknown || "no readable source files";

@@ -21,7 +21,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Imported eagerly but constructed lazily — the SDK client is only built on first hosted call,
 // so a local run never needs ANTHROPIC_API_KEY to be set.
 import { chatAnthropic, DEFAULT_MODEL as ANTHROPIC_DEFAULT_MODEL } from "./anthropic-adapter.mjs";
-import { immutabilityFailures } from "./immutability.mjs";
+import { immutabilityFailures, taskRequiresImmutability } from "./immutability.mjs";
 import { authenticationFailures } from "./authentication.mjs";
 import { SKIP_DIRS } from "./skip-dirs.mjs";
 import { ensureGitignore, isArtifact, ensureRepo } from "./commit-gate.mjs";
@@ -1052,7 +1052,7 @@ async function validateProject(projectDir, toolRegistry, taskText = "") {
   // The task text is the only evidence of what was actually asked for. Without it this check
   // cannot tell "no audit store in this project" from "the audit store is named `records`".
   const immutability = immutabilityFailures(projectDir, {
-    taskRequiresImmutability: /\bimmutab/i.test(taskText),
+    taskRequiresImmutability: taskRequiresImmutability(taskText),
   });
   ran.push("immutability");
   failures.push(...immutability.failures);

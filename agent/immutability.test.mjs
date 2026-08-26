@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
 
-import { checkImmutability, immutabilityFailures } from "./immutability.mjs";
+import { checkImmutability, immutabilityFailures, taskRequiresImmutability } from "./immutability.mjs";
 
 function withProject(files) {
   const dir = mkdtempSync(path.join(tmpdir(), "immutability-"));
@@ -182,10 +182,42 @@ test("an unidentifiable store blocks when the task demanded immutability", () =>
   assert.deepEqual(withoutSignal.failures, [], "not in scope when the task did not ask for it");
   assert.equal(withoutSignal.advisories.length, 1);
 
+  // With the signal on, the store is in scope whatever it is called, so the failure names the
+  // actual store and the actual missing control rather than reporting that nothing was found.
+  // The name heuristic exists to avoid false positives on projects that are not record-keeping
+  // systems, and that risk is gone once the task says immutability is required.
   const withSignal = run(files, (d) => immutabilityFailures(d, { taskRequiresImmutability: true }));
   assert.equal(withSignal.failures.length, 1);
-  assert.match(withSignal.failures[0], /no append-only store could be identified/);
-  assert.match(withSignal.failures[0], /Name it for what it is/);
+  assert.match(withSignal.failures[0], /table "records"/);
+  assert.match(withSignal.failures[0], /TRUNCATE does not fire row-level triggers/);
+});
+
+// The "nothing found at all" path still has to block when the task demanded immutability -- a
+// project storing nothing durable fails the requirement as surely as one storing it unprotected.
+test("a project with no store at all still blocks when immutability was required", () => {
+  const { failures } = run(
+    { "app/main.py": "from fastapi import FastAPI\napp = FastAPI()\n" },
+    (d) => immutabilityFailures(d, { taskRequiresImmutability: true })
+  );
+  assert.equal(failures.length, 1);
+  assert.match(failures[0], /no append-only store could be identified/);
+});
+
+// A second benchmark task requires exactly this property without ever using the word: "its
+// contents must stay exactly as received", "Nothing in the running system should be able to change
+// or remove a record". Testing only for /immutab/i would have downgraded the gate to advisory on
+// the task it most needed to hold.
+test("the task signal survives a task that never says the word", () => {
+  assert.equal(
+    taskRequiresImmutability("Once a callback has been recorded, its contents must stay exactly as received."),
+    true
+  );
+  assert.equal(
+    taskRequiresImmutability("Nothing in the running system should be able to change or remove a record."),
+    true
+  );
+  assert.equal(taskRequiresImmutability("Build a CRUD todo app where users edit and delete their todos."), false);
+  assert.equal(taskRequiresImmutability("Write a REST API for projects and tasks."), false);
 });
 
 // A project that genuinely has no audit store must not be dragged in by the same signal once a

@@ -118,3 +118,312 @@ test("an undetermined answer is reported, never passed silently", () => {
   assert.deepEqual(failures, []);
   assert.equal(advisories.length, 1);
 });
+
+// ---------------------------------------------------------------------------------------------
+// JavaScript / TypeScript
+//
+// The reason this file grew. Run against this repo's own Express reference project -- which
+// authenticates nothing -- the Python-only check reported "not checked, no Python source files
+// found" and could not block. These pin the behaviour that replaced it.
+// ---------------------------------------------------------------------------------------------
+
+test("express: an unprotected route fails, and names method and path", () => {
+  const { failures } = run(
+    { "src/app.js": "const app = express();\napp.post('/logs', (req, res) => res.send('ok'));\n" },
+    authenticationFailures
+  );
+  assert.equal(failures.length, 1);
+  assert.match(failures[0], /POST \/logs/);
+});
+
+test("express: route middleware counts as authentication", () => {
+  const { failures } = run(
+    { "src/app.js": "app.post('/logs', requireAuth, (req, res) => res.send('ok'));\n" },
+    authenticationFailures
+  );
+  assert.deepEqual(failures, []);
+});
+
+test("express: an app-wide use() protects every route", () => {
+  const { failures } = run(
+    { "src/app.js": "app.use(authenticateRequest);\napp.get('/logs', list);\napp.post('/logs', create);\n" },
+    authenticationFailures
+  );
+  assert.deepEqual(failures, []);
+});
+
+// The single most likely false positive in Express, and the reason the path must start with `/`
+// and be followed by a comma: `app.get(name)` is the settings *getter*, and it appears in
+// virtually every Express application.
+test("express: app.get('port') is a settings read, not a route", () => {
+  const report = run(
+    { "src/app.js": "app.set('port', 3000);\nconst port = app.get('port');\nconst env = app.get('env');\n" },
+    checkAuthentication
+  );
+  assert.equal(report.routes.length, 0);
+  assert.ok(report.unknown, "no routes reported, and that is undetermined rather than a pass");
+});
+
+// Same guard, different shape: ordinary collection calls take string keys too.
+test("express: map.delete and cache.get are not routes", () => {
+  const report = run(
+    {
+      "src/store.js":
+        "cache.get('user:1');\nsessions.delete('abc');\nheaders.get('content-type');\napp.post('/logs', create);\n",
+    },
+    checkAuthentication
+  );
+  assert.equal(report.routes.length, 1);
+  assert.equal(report.routes[0].route, "/logs");
+});
+
+test("express: non-auth middleware does not count as authentication", () => {
+  const { failures } = run(
+    {
+      "src/app.js":
+        "app.use(cors());\napp.use(express.json());\napp.use(morgan('dev'));\napp.post('/logs', create);\n",
+    },
+    authenticationFailures
+  );
+  assert.equal(failures.length, 1);
+  assert.match(failures[0], /POST \/logs/);
+});
+
+// `login` is deliberately absent from the auth vocabulary: a handler that issues a credential is
+// not a handler that checks one.
+test("express: a handler named loginHandler does not protect a route", () => {
+  const { failures } = run({ "src/app.js": "app.post('/logs', loginHandler);\n" }, authenticationFailures);
+  assert.equal(failures.length, 1);
+});
+
+test("express: chained app.route() is judged per verb", () => {
+  const { failures } = run(
+    { "src/app.js": "app.route('/logs')\n  .get(list)\n  .post(requireAuth, create);\n" },
+    authenticationFailures
+  );
+  assert.equal(failures.length, 1);
+  assert.match(failures[0], /GET \/logs/);
+  assert.doesNotMatch(failures[0], /POST \/logs/);
+});
+
+test("fastify: a preHandler hook counts, its absence does not", () => {
+  const withHook = run(
+    {
+      "src/server.js":
+        "fastify.route({ method: 'POST', url: '/logs', preHandler: fastify.authenticate, handler: create });\n",
+    },
+    authenticationFailures
+  );
+  assert.deepEqual(withHook.failures, []);
+
+  const without = run(
+    { "src/server.js": "fastify.route({ method: 'POST', url: '/logs', handler: create });\n" },
+    authenticationFailures
+  );
+  assert.equal(without.failures.length, 1);
+  assert.match(without.failures[0], /POST \/logs/);
+});
+
+test("nestjs: @UseGuards on the method protects it", () => {
+  const guarded = run(
+    {
+      "src/logs.controller.ts":
+        "@Controller('logs')\nexport class LogsController {\n  @UseGuards(AuthGuard)\n  @Post('/logs')\n  create() {}\n}\n",
+    },
+    authenticationFailures
+  );
+  assert.deepEqual(guarded.failures, []);
+
+  const bare = run(
+    {
+      "src/logs.controller.ts":
+        "@Controller('logs')\nexport class LogsController {\n  @Post('/logs')\n  create() {}\n}\n",
+    },
+    authenticationFailures
+  );
+  assert.equal(bare.failures.length, 1);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Go
+// ---------------------------------------------------------------------------------------------
+
+test("go: an unprotected chi route fails", () => {
+  const { failures } = run({ "main.go": 'r.Post("/logs", createLog)\n' }, authenticationFailures);
+  assert.equal(failures.length, 1);
+  assert.match(failures[0], /POST \/logs/);
+});
+
+test("go: middleware in the chain counts, and Use() protects everything", () => {
+  const perRoute = run({ "main.go": 'r.Post("/logs", RequireAuth(createLog))\n' }, authenticationFailures);
+  assert.deepEqual(perRoute.failures, []);
+
+  const global = run({ "main.go": 'r.Use(AuthMiddleware)\nr.Get("/logs", listLogs)\n' }, authenticationFailures);
+  assert.deepEqual(global.failures, []);
+});
+
+// net/http's HandleFunc carries no method, and reporting a guessed one would be worse than none.
+test("go: HandleFunc is reported as ANY rather than guessed", () => {
+  const report = run({ "main.go": 'http.HandleFunc("/logs", handler)\n' }, checkAuthentication);
+  assert.equal(report.routes.length, 1);
+  assert.equal(report.routes[0].method, "ANY");
+});
+
+// ---------------------------------------------------------------------------------------------
+// Java (Spring)
+// ---------------------------------------------------------------------------------------------
+
+test("java: a mapping without an authorization annotation fails", () => {
+  const { failures } = run(
+    {
+      "src/LogController.java":
+        '@RestController\npublic class LogController {\n  @PostMapping("/logs")\n  public void create() {}\n}\n',
+    },
+    authenticationFailures
+  );
+  assert.equal(failures.length, 1);
+  assert.match(failures[0], /POST \/logs/);
+});
+
+test("java: @PreAuthorize counts, and a security filter chain protects everything", () => {
+  const annotated = run(
+    { "src/LogController.java": '@PostMapping("/logs")\n@PreAuthorize("hasRole(\'WRITER\')")\npublic void create() {}\n' },
+    authenticationFailures
+  );
+  assert.deepEqual(annotated.failures, []);
+
+  const chain = run(
+    {
+      "src/SecurityConfig.java": "http.authorizeHttpRequests(a -> a.anyRequest().authenticated());\n",
+      "src/LogController.java": '@GetMapping("/logs")\npublic void list() {}\n',
+    },
+    authenticationFailures
+  );
+  assert.deepEqual(chain.failures, []);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Ruby
+// ---------------------------------------------------------------------------------------------
+
+test("ruby: a Sinatra route without a before filter fails", () => {
+  const { failures } = run({ "app.rb": "post '/logs' do\n  Log.create(params)\nend\n" }, authenticationFailures);
+  assert.equal(failures.length, 1);
+  assert.match(failures[0], /POST \/logs/);
+});
+
+test("ruby: before_action :authenticate_user! protects the controller", () => {
+  const { failures } = run(
+    {
+      "app.rb":
+        "class LogsController\n  before_action :authenticate_user!\nend\n\nget '/logs' do\n  Log.all\nend\n",
+    },
+    authenticationFailures
+  );
+  assert.deepEqual(failures, []);
+});
+
+// Anchored to the start of a line so a method call inside a body is not read as a declaration.
+test("ruby: a get call inside a body is not a route declaration", () => {
+  const report = run(
+    { "app.rb": "def fetch\n  response = client.get '/upstream' do |r|\n  end\nend\n" },
+    checkAuthentication
+  );
+  assert.equal(report.routes.length, 0);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Cross-cutting
+// ---------------------------------------------------------------------------------------------
+
+// Global auth is judged per language against that language's own files. A Python app-wide
+// dependency says nothing about an Express server sitting beside it in the same repo.
+test("one language's global auth does not protect another's routes", () => {
+  const { failures } = run(
+    {
+      "api/main.py":
+        "app = FastAPI(dependencies=[Depends(verify_api_key)])\n@app.get('/reports')\ndef read():\n    pass\n",
+      "web/server.js": "app.post('/logs', create);\n",
+    },
+    authenticationFailures
+  );
+  assert.equal(failures.length, 1);
+  assert.match(failures[0], /POST \/logs/);
+  assert.doesNotMatch(failures[0], /\/reports/);
+});
+
+test("health probes are exempt in every language", () => {
+  const { failures } = run(
+    {
+      "src/app.js": "app.get('/health', ok);\n",
+      "main.go": 'r.Get("/healthz", ok)\n',
+      "app.rb": "get '/ping' do\nend\n",
+    },
+    authenticationFailures
+  );
+  assert.deepEqual(failures, []);
+});
+
+// An endpoint whose job is to issue a credential cannot require one first.
+test("credential-issuing endpoints are exempt, but paths beneath them are not", () => {
+  const exempt = run({ "src/app.js": "app.post('/login', doLogin);\n" }, authenticationFailures);
+  assert.deepEqual(exempt.failures, []);
+
+  const notExempt = run({ "src/app.js": "app.get('/auth/admin/users', listUsers);\n" }, authenticationFailures);
+  assert.equal(notExempt.failures.length, 1);
+});
+
+test("an unrecognised language is undetermined, not a pass", () => {
+  const { failures, advisories } = run(
+    { "src/main.php": "<?php Route::post('/logs', 'LogController@create');\n" },
+    authenticationFailures
+  );
+  assert.deepEqual(failures, []);
+  assert.equal(advisories.length, 1);
+  assert.match(advisories[0], /not checked/);
+});
+
+test("the remediation names the idiom of the language actually found", () => {
+  const { failures } = run({ "src/app.js": "app.post('/logs', create);\n" }, authenticationFailures);
+  assert.match(failures[0], /app\.use\(requireAuth\)|preHandler|UseGuards/);
+  assert.doesNotMatch(failures[0], /FastAPI/);
+});
+
+// Found by running this check over its own repository: 15 phantom routes came from this very test
+// file, whose fixtures quote route calls as strings. A phantom route carries no middleware, so it
+// reports as unprotected, so it would block a project that is in fact correct.
+test("route calls quoted inside a test file are not routes", () => {
+  const report = run(
+    {
+      "src/app.js": "app.post('/logs', requireAuth, create);\n",
+      "src/app.test.js": "it('rejects anonymous writes', () => {\n  const src = \"app.post('/logs', create);\";\n});\n",
+      "src/handlers.spec.ts": "describe('x', () => { const s = \"app.get('/admin', list);\"; });\n",
+    },
+    checkAuthentication
+  );
+  assert.equal(report.routes.length, 1, "only the real route in src/app.js should count");
+  assert.equal(report.routes[0].file, "src/app.js");
+});
+
+test("test files in other languages are skipped too", () => {
+  const report = run(
+    {
+      "main_test.go": 'r.Post("/logs", createLog)\n',
+      "test_api.py": "@app.post('/logs')\ndef add():\n    pass\n",
+      "app_spec.rb": "post '/logs' do\nend\n",
+    },
+    checkAuthentication
+  );
+  assert.equal(report.routes.length, 0);
+  assert.ok(report.unknown, "nothing to check is undetermined, not a pass");
+});
+
+// The scanner's own remediation text describes a route shape. If that text were written as a
+// quoted path followed by a comma, the check would declare a route every time it explained one.
+test("the remediation text does not itself parse as a route", () => {
+  const report = run(
+    { "src/doc.js": "const help = \"middleware on the route (app.post(path, requireAuth, handler))\";\n" },
+    checkAuthentication
+  );
+  assert.equal(report.routes.length, 0);
+});

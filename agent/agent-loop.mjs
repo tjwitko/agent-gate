@@ -536,6 +536,9 @@ const LLAMA_URL = process.env.LOCAL_LLM_URL || "http://localhost:8080";
 const MAX_TOOL_RESULT_CHARS = 2500;
 // Identical consecutive writes to the same path. Two could be a hiccup; by the third the model is
 // looping, and by the fifth it has proven it will not stop on its own.
+// A model cannot act on more than a handful of failures per turn, and an uncapped list can exceed
+// the context window on its own.
+const MAX_FAILURES_SHOWN = 8;
 const NO_PROGRESS_NUDGE = 3;
 const NO_PROGRESS_STOP = 5;
 // How many recent versions of each file to remember. Progress was originally judged against the
@@ -938,7 +941,12 @@ async function validateProject(projectDir, toolRegistry) {
   const tfDirs = [];
   const findTf = (dir) => {
     for (const e of readdirSync(dir, { withFileTypes: true })) {
-      if ([".terraform", "node_modules", ".git", ".venv"].includes(e.name)) continue;
+      // `.external_modules` holds Checkov's downloaded modules and lives INSIDE the project. Without
+      // it here, a run with one vendored EKS module presented 2,499 Terraform roots, 2,490 of them
+      // third-party, and the gate ran init+validate+plan against every one -- hours of work, and a
+      // failure list so long the next request was 143,066 tokens against a 65,536 context, which
+      // ended the run outright. Fifth place this same omission appeared.
+      if ([".terraform", ".external_modules", "node_modules", ".git", ".venv"].includes(e.name)) continue;
       const full = path.join(dir, e.name);
       if (e.isDirectory()) findTf(full);
       else if (e.name.endsWith(".tf") && !tfDirs.includes(dir)) tfDirs.push(dir);
@@ -1517,12 +1525,23 @@ async function main() {
           console.log(`[loop] stopping: validation still failing after ${opts.maxValidationRounds} rounds.`);
           break;
         }
+        // Capped, because the failure list is built from however many things the validators found
+        // and is fed straight back into the conversation. One run produced thousands of failures and
+        // the resulting request was 143,066 tokens against a 65,536-token context -- the gate killed
+        // the run it was meant to guide. Whatever causes that many failures, the model cannot act on
+        // more than a handful at once anyway.
+        const shown = failures.slice(0, MAX_FAILURES_SHOWN);
+        const omitted = failures.length - shown.length;
         messages.push({
           role: "user",
           content:
             (advisoryDelivered ? "" : ((advisoryDelivered = true), advisoryText)) +
             `Validation failed. You are not finished. Fix these and do not remove working code ` +
-            `to make them pass:\n\n${failures.join("\n\n")}`,
+            `to make them pass:\n\n${shown.join("\n\n")}` +
+            (omitted > 0
+              ? `\n\n(+${omitted} more failure(s) not shown. Fix these first, then the rest will be ` +
+                `reported again.)`
+              : ""),
         });
         continue;
       }

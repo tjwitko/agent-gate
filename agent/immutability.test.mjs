@@ -144,3 +144,29 @@ test("S3 needs Object Lock", () => {
   );
   assert.deepEqual(locked.failures, []);
 });
+
+// The control does not have to live in a .sql file. A run wrote both triggers, the REVOKE, and a
+// separate admin connection as SQLAlchemy text() literals inside app/database.py, and an earlier
+// version of this check called that missing -- while passing another run whose .sql file nothing
+// ever executed. Judging the mechanism by its file extension measured the wrong thing.
+test("SQL embedded in application code counts as a control", () => {
+  const { failures } = run(
+    {
+      "app/models.py": 'import sqlalchemy\nclass LogEntry(Base):\n    __tablename__ = "audit_logs"\n',
+      "app/database.py":
+        "from sqlalchemy import text\n" +
+        "def init_db_schema(admin_url):\n" +
+        '    admin_db.execute(text("""\n' +
+        "    CREATE OR REPLACE FUNCTION prevent_update_func() RETURNS trigger AS $$\n" +
+        "    BEGIN RAISE EXCEPTION 'Updates are not allowed'; END; $$ LANGUAGE plpgsql;\n" +
+        "    CREATE TRIGGER prevent_updates BEFORE UPDATE ON audit_logs\n" +
+        "      FOR EACH ROW EXECUTE FUNCTION prevent_update_func();\n" +
+        "    CREATE TRIGGER prevent_deletes BEFORE DELETE ON audit_logs\n" +
+        "      FOR EACH ROW EXECUTE FUNCTION prevent_update_func();\n" +
+        "    REVOKE UPDATE, DELETE, TRUNCATE ON audit_logs FROM audit_app;\n" +
+        '    """))\n',
+    },
+    immutabilityFailures
+  );
+  assert.deepEqual(failures, []);
+});

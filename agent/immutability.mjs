@@ -66,7 +66,13 @@ export function checkImmutability(projectDir) {
   if (files.length === 0) return { ran: false, stores: [], unknown: "no readable source files" };
 
   const all = files.map((f) => f.text).join("\n");
-  const sqlText = files.filter((f) => f.rel.endsWith(".sql")).map((f) => f.text).join("\n");
+  // SQL wherever it lives, not only in .sql files. A run wrote a complete and correct control --
+  // both triggers, the REVOKE, and a separate admin connection so the app would not own the table --
+  // as SQLAlchemy text() literals inside app/database.py, and this check called it missing. That is
+  // the better pattern of the two: embedded SQL that the application actually executes, against a
+  // .sql file that another run shipped and nothing ever ran. Judging the mechanism by the file
+  // extension it lives in measured the wrong thing.
+  const sqlText = all;
   const tfText = files.filter((f) => f.rel.endsWith(".tf")).map((f) => f.text).join("\n");
   const stores = [];
 

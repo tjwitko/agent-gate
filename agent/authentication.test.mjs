@@ -427,3 +427,62 @@ test("the remediation text does not itself parse as a route", () => {
   );
   assert.equal(report.routes.length, 0);
 });
+
+// A webhook sender proves identity by signing the payload, not by presenting a bearer token. This
+// check reported such an endpoint as unauthenticated on a real webhook receiver -- a false
+// positive only a different task shape would surface, since every earlier run used API keys.
+test("a verified request signature is authentication", () => {
+  const { failures } = run(
+    {
+      "src/main.py":
+        "import hmac, hashlib\n" +
+        "def verify(body, sig):\n" +
+        "    expected = hmac.new(SECRET.encode(), body, hashlib.sha256).hexdigest()\n" +
+        "    return hmac.compare_digest(expected, sig)\n\n" +
+        "@app.post('/webhook')\n" +
+        "async def receive(request: Request, x_signature: str = Header(None)):\n" +
+        "    pass\n",
+    },
+    authenticationFailures
+  );
+  assert.deepEqual(failures, []);
+});
+
+// The same discipline that keeps Depends(get_db) from counting: a header is not a control until
+// something checks it.
+test("a signature header with no verification anywhere is not authentication", () => {
+  const { failures } = run(
+    {
+      "src/main.py":
+        "@app.post('/webhook')\nasync def receive(x_signature: str = Header(None)):\n    return {'ok': True}\n",
+    },
+    authenticationFailures
+  );
+  assert.equal(failures.length, 1);
+  assert.match(failures[0], /POST \/webhook/);
+});
+
+// Recognising a signature as authentication without this would leave the gate certifying a
+// control with an exploitable timing leak, which is worse than not recognising it at all.
+test("an equality-compared signature is reported even when every route is protected", () => {
+  const leaky = {
+    "src/main.py":
+      "import hmac, hashlib\n" +
+      "def verify(body, sig):\n" +
+      "    expected_signature = hmac.new(S.encode(), body, hashlib.sha256).hexdigest()\n" +
+      "    return expected_signature == sig\n\n" +
+      "@app.post('/webhook')\n" +
+      "async def receive(request: Request, x_signature: str = Header(None)):\n    pass\n",
+  };
+  const r = run(leaky, authenticationFailures);
+  assert.equal(r.failures.length, 1, "no route is open, so this is the timing finding alone");
+  assert.match(r.failures[0], /constant-time/);
+
+  const fixed = {
+    "src/main.py": leaky["src/main.py"].replace(
+      "return expected_signature == sig",
+      "return hmac.compare_digest(expected_signature, sig)"
+    ),
+  };
+  assert.deepEqual(run(fixed, authenticationFailures).failures, [], "clears once compared safely");
+});

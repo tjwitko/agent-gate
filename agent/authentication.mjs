@@ -85,6 +85,47 @@ const PY_AUTH_DEPENDENCY =
 const PY_AUTH_HEADER_PARAM =
   /\b(x_api_key|api_key|authorization|x_auth_token|access_token|bearer)\b\s*:[^,)]*Header\s*\(/i;
 
+// A request-signature header, which is how a webhook sender proves identity: there is no bearer
+// token because the caller is a machine that signs each payload with a shared secret. This check
+// reported such an endpoint as unauthenticated on a real webhook receiver -- a false positive, and
+// one only a different task shape would have surfaced, since every earlier run used API keys.
+const SIGNATURE_HEADER_PARAM =
+  /\b(x[_-]?(hub[_-]?)?signature(_?256)?|signature|x[_-]?\w+[_-]signature|stripe[_-]signature)\b\s*[:=]/i;
+
+// Evidence that the file actually verifies a signature, rather than merely accepting the header.
+// The same discipline that keeps Depends(get_db) from counting as authentication: a parameter is
+// not a control until something checks it.
+const VERIFIES_SIGNATURE = [
+  /\bhmac\.(new|compare_digest)\s*\(/,          // Python
+  /\bcreateHmac\s*\(/,                           // Node
+  /\btimingSafeEqual\s*\(/,                      // Node
+  /\bOpenSSL::HMAC\b/,                            // Ruby
+  /\bhmac\.New\s*\(|hmac\.Equal\s*\(/,        // Go
+  /\bMac\.getInstance\s*\(/,                    // Java
+];
+
+function verifiesSignature(all) {
+  return VERIFIES_SIGNATURE.some((re) => re.test(all));
+}
+
+// Constant-time comparison, which is the only safe way to check a signature.
+const CONSTANT_TIME_COMPARE = /\b(compare_digest|timingSafeEqual|hmac\.Equal|MessageDigest\.isEqual|secure_compare)\s*\(/;
+
+// An ordinary equality test against something signature-shaped. `==` returns on the first differing
+// byte, so an attacker who can send repeated callbacks recovers the digest one byte at a time
+// without ever learning the secret -- the canonical way webhook verification is broken. Recognising
+// a signature as authentication without saying this would leave the gate certifying a control with
+// an exploitable leak in it, which is worse than not recognising it at all.
+const LEAKY_SIGNATURE_COMPARE =
+  /\b\w*(signature|digest|hmac|hash)\w*\s*(===?|!==?)|(===?|!==?)\s*\w*(signature|digest|hmac)\w*\b/i;
+
+/** A signature is verified somewhere, but not in constant time. */
+export function leakySignatureCheck(all) {
+  if (!verifiesSignature(all)) return false;
+  if (CONSTANT_TIME_COMPARE.test(all)) return false;
+  return LEAKY_SIGNATURE_COMPARE.test(all);
+}
+
 const pythonAdapter = {
   name: "Python",
   extensions: [".py"],
@@ -111,10 +152,11 @@ const pythonAdapter = {
     return null;
   },
 
-  routeAuth(r) {
+  routeAuth(r, all) {
     if (/dependencies\s*=/.test(r.declaration)) return "a route dependency";
     if (PY_AUTH_DEPENDENCY.test(r.context)) return "an auth dependency";
     if (PY_AUTH_HEADER_PARAM.test(r.context)) return "a credential header";
+    if (SIGNATURE_HEADER_PARAM.test(r.context) && verifiesSignature(all)) return "a verified request signature";
     return null;
   },
 };
@@ -420,9 +462,11 @@ export function checkAuthentication(projectDir) {
 
   const routes = [];
   const languages = [];
+  let leakySignature = false;
   for (const [adapter, adapterFiles] of byAdapter) {
     const all = adapterFiles.map((f) => f.text).join("\n");
     const global = adapter.globalAuth(all);
+    if (leakySignatureCheck(all)) leakySignature = true;
     let found = 0;
     for (const file of adapterFiles) {
       for (const r of adapter.routes(file.text)) {
@@ -451,7 +495,7 @@ export function checkAuthentication(projectDir) {
         "they are declared in a form this check does not recognise",
     };
   }
-  return { ran: true, routes, languages, unknown: null };
+  return { ran: true, routes, languages, leakySignature, unknown: null };
 }
 
 /** Blocking failures for the gate. */
@@ -460,8 +504,23 @@ export function authenticationFailures(projectDir) {
   if (!report.ran) return { failures: [], advisories: [`authentication: not checked — ${report.unknown}`] };
   if (report.unknown) return { failures: [], advisories: [`authentication: ${report.unknown}`] };
 
+  // Reported whether or not any route is open, and separately from the open-route finding: a
+  // service can authenticate every endpoint and still have a leaky comparison in the one control
+  // that matters. Conflating the two would let a fix for one hide the other.
+  const timing = report.leakySignature
+    ? [
+        `authentication: a request signature is verified with an ordinary equality comparison ` +
+          `rather than a constant-time one. \`==\` returns as soon as it finds a differing byte, so ` +
+          `an attacker who can send repeated callbacks measures response times and recovers the ` +
+          `correct digest one byte at a time, without ever learning the secret. This is the ` +
+          `canonical way signature verification is broken. Use hmac.compare_digest (Python), ` +
+          `crypto.timingSafeEqual (Node), hmac.Equal (Go) or the equivalent, and compare the raw ` +
+          `digests rather than their hex strings where the language offers it.`,
+      ]
+    : [];
+
   const open = report.routes.filter((r) => !r.protectedBy);
-  if (open.length === 0) return { failures: [], advisories: [] };
+  if (open.length === 0) return { failures: timing, advisories: [] };
 
   const list = open.map((r) => `${r.method} ${r.route} (${r.file}:${r.line})`).join(", ");
   const someProtected = report.routes.some((r) => r.protectedBy);
@@ -469,6 +528,7 @@ export function authenticationFailures(projectDir) {
 
   return {
     failures: [
+      ...timing,
       `authentication: ${open.length} of ${report.routes.length} endpoint(s) accept requests from ` +
         `anyone who can reach the service — ${list}.\n` +
         (someProtected

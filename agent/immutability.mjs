@@ -13,9 +13,14 @@
 //
 // Two rules shape everything here:
 //
-//  1. **An undetermined answer is not a pass.** If the storage cannot be identified, this reports
-//     `unknown` and the caller surfaces it -- it never silently succeeds. Every silent-success bug
-//     found in this stack came from a check that could not run saying nothing.
+//  1. **An undetermined answer is not a pass, and when the task demands immutability it blocks.**
+//     Reporting `unknown` as an advisory was too weak here, and this module's own argument says why:
+//     advisories did not change behaviour in any run. The store name is chosen by the model, and the
+//     heuristic below only recognises audit-shaped names -- so a table called `records`, `ledger` or
+//     `journal` produced zero findings on a project with no protection at all. When the caller says
+//     the task requires immutability, being unable to find the store is itself the failure: either
+//     there is no append-only store, or it is named such that nobody can tell. Without that signal
+//     the result stays advisory, because a project with no audit store is not in scope.
 //  2. **It only fires on a store that claims to be an audit log.** A project with an ordinary
 //     `users` table is not in scope. Intent is read from the store's name, which is the only
 //     evidence available without asking the model what it meant.
@@ -23,12 +28,8 @@
 import { readdirSync, readFileSync, statSync } from "fs";
 import path from "path";
 
-// `.external_modules` holds Checkov's downloaded modules and lives inside the project. Reading it
-// would let a third-party module's table decide this verdict, and would mean walking thousands of
-// files on every gate round.
-const SKIP_DIRS = new Set([
-  ".git", ".terraform", ".external_modules", "node_modules", "__pycache__", ".venv", "venv", "dist", "build",
-]);
+import { SKIP_DIRS } from "./skip-dirs.mjs";
+
 const READ_EXT = new Set([".py", ".sql", ".tf", ".tfvars", ".js", ".mjs", ".ts", ".yaml", ".yml"]);
 
 // The store is in scope only if it names itself after an audit trail. Deliberately narrow: firing
@@ -168,10 +169,26 @@ export function checkImmutability(projectDir) {
 }
 
 /** Human-readable failures for the gate. Empty array means every identified store is protected. */
-export function immutabilityFailures(projectDir) {
+export function immutabilityFailures(projectDir, { taskRequiresImmutability = false } = {}) {
   const report = checkImmutability(projectDir);
-  if (!report.ran) return { failures: [], advisories: [`immutability: not checked — ${report.unknown}`] };
-  if (report.unknown) return { failures: [], advisories: [`immutability: ${report.unknown}`] };
+  const undetermined = !report.ran || report.unknown;
+  if (undetermined) {
+    const why = report.unknown || "no readable source files";
+    // The harness knows what the task asked for; this module did not use it. If immutability was
+    // required and no store can be identified, that is a finding, not a shrug.
+    if (taskRequiresImmutability) {
+      return {
+        failures: [
+          `immutability: the task requires logs to be immutable, and no append-only store could be ` +
+            `identified to check — ${why}. Either the records are not being stored anywhere durable, ` +
+            `or the table, bucket or collection holding them is named such that nothing can tell it ` +
+            `is the audit log. Name it for what it is, and put the protection below the API.`,
+        ],
+        advisories: [],
+      };
+    }
+    return { failures: [], advisories: [`immutability: ${why}`] };
+  }
 
   const failures = report.stores
     .filter((s) => !s.protected)

@@ -170,3 +170,36 @@ test("SQL embedded in application code counts as a control", () => {
   );
   assert.deepEqual(failures, []);
 });
+
+// The store's name is chosen by the model, and the heuristic only recognises audit-shaped names.
+// A table called `records`, `ledger` or `journal` therefore produced zero findings on a project
+// with no protection at all -- an advisory, in a module whose own argument is that advisories do
+// not change behaviour. The harness knows what the task asked for; now this uses it.
+test("an unidentifiable store blocks when the task demanded immutability", () => {
+  const files = { "app/models.py": 'import sqlalchemy\nclass R(Base):\n    __tablename__ = "records"\n' };
+
+  const withoutSignal = run(files, (d) => immutabilityFailures(d));
+  assert.deepEqual(withoutSignal.failures, [], "not in scope when the task did not ask for it");
+  assert.equal(withoutSignal.advisories.length, 1);
+
+  const withSignal = run(files, (d) => immutabilityFailures(d, { taskRequiresImmutability: true }));
+  assert.equal(withSignal.failures.length, 1);
+  assert.match(withSignal.failures[0], /no append-only store could be identified/);
+  assert.match(withSignal.failures[0], /Name it for what it is/);
+});
+
+// A project that genuinely has no audit store must not be dragged in by the same signal once a
+// real, protected store is present.
+test("the task signal does not override a store that is actually protected", () => {
+  const { failures } = run(
+    {
+      "app/models.py": 'import sqlalchemy\nclass L(Base):\n    __tablename__ = "audit_logs"\n',
+      "db/init.sql":
+        "CREATE TRIGGER t BEFORE UPDATE ON audit_logs FOR EACH ROW EXECUTE FUNCTION f();\n" +
+        "CREATE TRIGGER d BEFORE DELETE ON audit_logs FOR EACH ROW EXECUTE FUNCTION f();\n" +
+        "RAISE EXCEPTION 'no';\nREVOKE UPDATE, DELETE, TRUNCATE ON audit_logs FROM app_role;\n",
+    },
+    (d) => immutabilityFailures(d, { taskRequiresImmutability: true })
+  );
+  assert.deepEqual(failures, []);
+});

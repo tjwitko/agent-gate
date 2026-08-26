@@ -23,6 +23,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import { chatAnthropic, DEFAULT_MODEL as ANTHROPIC_DEFAULT_MODEL } from "./anthropic-adapter.mjs";
 import { immutabilityFailures } from "./immutability.mjs";
 import { authenticationFailures } from "./authentication.mjs";
+import { SKIP_DIRS } from "./skip-dirs.mjs";
 // Shared with bench/, not duplicated: one definition of how this repo talks to Langfuse means the
 // loop and the benchmark can never disagree about which instance or which credentials. Everything
 // it exports degrades to a no-op with the same shape when the stack is down, so tracing can never
@@ -925,7 +926,7 @@ async function lockfilePresent(projectDir) {
   }
 }
 
-async function validateProject(projectDir, toolRegistry) {
+async function validateProject(projectDir, toolRegistry, taskText = "") {
   const failures = [];
   // Reported to the reviewer, never blocking. See the resource-census block below.
   const advisories = [];
@@ -947,7 +948,7 @@ async function validateProject(projectDir, toolRegistry) {
       // third-party, and the gate ran init+validate+plan against every one -- hours of work, and a
       // failure list so long the next request was 143,066 tokens against a 65,536 context, which
       // ended the run outright. Fifth place this same omission appeared.
-      if ([".terraform", ".external_modules", "node_modules", ".git", ".venv"].includes(e.name)) continue;
+      if (SKIP_DIRS.has(e.name)) continue;
       const full = path.join(dir, e.name);
       if (e.isDirectory()) findTf(full);
       else if (e.name.endsWith(".tf") && !tfDirs.includes(dir)) tfDirs.push(dir);
@@ -1088,7 +1089,11 @@ async function validateProject(projectDir, toolRegistry) {
   //
   // It stays quiet unless it can identify an append-only store that names itself as one, and an
   // undetermined answer is reported as an advisory rather than passed silently.
-  const immutability = immutabilityFailures(projectDir);
+  // The task text is the only evidence of what was actually asked for. Without it this check
+  // cannot tell "no audit store in this project" from "the audit store is named `records`".
+  const immutability = immutabilityFailures(projectDir, {
+    taskRequiresImmutability: /\bimmutab/i.test(taskText),
+  });
   ran.push("immutability");
   failures.push(...immutability.failures);
   advisories.push(...immutability.advisories);
@@ -1450,7 +1455,7 @@ async function main() {
         // The model wanting to stop is a request, not the exit condition. Validators run here
         // whether or not the model ever called them, and failures go back as work to do.
         const gateSpan = startStep(run, `gate:round-${validationRounds + 1}`, { metadata: { turn } });
-        const { ran, failures, advisories } = await validateProject(opts.project, toolRegistry);
+        const { ran, failures, advisories } = await validateProject(opts.project, toolRegistry, taskText);
         validationRounds++;
         gateSpan
           .update({
@@ -1667,7 +1672,7 @@ async function main() {
   const finalSpan = startStep(run, "gate:final", {
     metadata: { note: "re-run against the files as they finally stand, not the last gate result" },
   });
-  finalValidation = await validateProject(opts.project, toolRegistry);
+  finalValidation = await validateProject(opts.project, toolRegistry, taskText);
   finalSpan
     .update({
       output: {

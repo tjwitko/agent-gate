@@ -17,9 +17,8 @@
 import { readdirSync, readFileSync, statSync } from "fs";
 import path from "path";
 
-const SKIP_DIRS = new Set([
-  ".git", ".terraform", ".external_modules", "node_modules", "__pycache__", ".venv", "venv", "dist", "build",
-]);
+import { SKIP_DIRS } from "./skip-dirs.mjs";
+
 
 // FastAPI and Flask route decorators. The method is captured so failures can name the route.
 const ROUTE_RE = /@(\w+)\.(get|post|put|patch|delete|route)\(\s*["']([^"']*)["']([^)]*)\)/g;

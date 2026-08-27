@@ -705,6 +705,34 @@ async function runAdvisor(projectDir, taskText, advisorModel, maxTokens) {
 // it by 55K. Raising the ceiling does delay detection of a genuinely wedged server — acceptable
 // here, because these runs are unattended and a false timeout discards real work, while a hung
 // server costs only waiting.
+// Loading the weights is not a function of how many tokens were asked for, so the formula below
+// cannot cover it. A 12B model at a 64k context is roughly 9GB, and on a machine under memory
+// pressure that first read took longer than the entire per-request budget: three consecutive runs
+// died on `turn 1 request failed: llama-server did not respond within 637s`, while the identical
+// request -- same ten tool schemas, same 7,439 bytes -- answered in 60s once the model was resident.
+//
+// So the first request of a run is made deliberately, tiny, and with a budget sized for a disk
+// read rather than a generation. It turns a mid-run failure into a startup wait that says what it
+// is waiting for.
+const WARMUP_TIMEOUT_MS = 15 * 60 * 1000;
+
+async function warmModel(model, provider) {
+  if (provider !== "local") return; // hosted providers have no local load to pay for
+  const started = Date.now();
+  try {
+    await postJson(
+      `${LLAMA_URL}/v1/chat/completions`,
+      { model, messages: [{ role: "user", content: "ready" }], max_tokens: 1 },
+      WARMUP_TIMEOUT_MS
+    );
+    const secs = ((Date.now() - started) / 1000).toFixed(0);
+    if (Number(secs) > 20) console.log(`[loop] model loaded in ${secs}s (cold start)`);
+  } catch (error) {
+    // Not fatal: the turn loop reports the real failure with better context than a warmup can.
+    console.warn(`[loop] warmup failed after ${((Date.now() - started) / 1000).toFixed(0)}s: ${error.message}`);
+  }
+}
+
 function requestTimeoutMs(maxTokens, promptTokens = 0) {
   return 30_000 + (maxTokens || 0) * 150 + promptTokens * 15;
 }
@@ -1292,6 +1320,10 @@ async function main() {
   let noProgressStopped = null;
   const regressionWarnings = [];
   let lastTracedMessageCount = 0;
+
+  // Before the first turn, so a cold model load is a startup wait rather than a failed turn 1.
+  console.log(`[loop] warming ${opts.model}...`);
+  await warmModel(opts.model, opts.provider);
 
   await initTracing();
   const run = startRun(`agent-loop:${path.basename(opts.project)}`, {

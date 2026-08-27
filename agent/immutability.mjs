@@ -147,7 +147,13 @@ export function checkImmutability(projectDir, { required = false } = {}) {
   const ddbTable = /resource\s+"aws_dynamodb_table"\s+"(\w+)"/i.exec(tfText);
   const usesDdb = /dynamodb/i.test(all);
   if (usesDdb && (!ddbTable || inScope(ddbTable[1]))) {
-    const conditional = /ConditionExpression\s*=\s*["'][^"']*attribute_not_exists/i.test(all);
+    // `=` is Python's assignment; `:` is a JavaScript/TypeScript object literal, which is how the
+    // AWS SDK v3 takes it. Requiring `=` cost a whole run: a TypeScript deliverable wrote
+    // `ConditionExpression: "attribute_not_exists(eventId)"` in round 1, this check called it
+    // missing in all five validation rounds, and the model rewrote that file six times trying to
+    // satisfy a condition it had already met, then failed on the fourth round. A false positive in
+    // a blocking gate does not merely fail to catch something -- it actively destroys the work.
+    const conditional = /ConditionExpression\s*[:=]\s*["'`][^"'`]*attribute_not_exists/i.test(all);
     // Only judge the IAM policy if one actually grants DynamoDB actions here.
     const grants = [...tfText.matchAll(/"dynamodb:(\w+)"/g)].map((m) => m[1]);
     const mutating = grants.filter((a) => /^(DeleteItem|UpdateItem|BatchWriteItem)$/i.test(a));

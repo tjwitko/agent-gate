@@ -546,3 +546,87 @@ test("a credential read with os.environ[] is not vacuous", () => {
   );
   assert.deepEqual(failures, []);
 });
+
+// TypeScript, from a real run. The Python adapter learned about request signatures after a webhook
+// receiver was wrongly reported open; this adapter did not, so the next receiver -- same task, same
+// defect class, different language -- was wrongly reported open too.
+test("an Express route whose handler verifies a signature is authenticated", () => {
+  const { failures } = run(
+    {
+      "src/index.ts":
+        "import { handleWebhook } from './handlers/webhook';\n" +
+        "app.post('/webhook', express.raw({ type: 'application/json' }), handleWebhook);\n",
+      "src/handlers/webhook.ts":
+        "import crypto from 'crypto';\n" +
+        "export const handleWebhook = async (req, res) => {\n" +
+        "  const digest = crypto.createHmac('sha256', secret).update(req.body).digest('hex');\n" +
+        "  if (!crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(sig))) return res.status(401).send();\n" +
+        "  return res.status(200).send();\n};\n",
+    },
+    authenticationFailures
+  );
+  assert.deepEqual(failures, []);
+});
+
+// The corpus handed to an adapter is every file in that language concatenated. Reading a fixed
+// window from a handler therefore runs past its end into the next file: an earlier attempt read
+// 2500 characters from an unauthenticated handler, reached another route's signature code, and
+// called the unauthenticated one verified. Worse than the miss it replaced.
+test("signature verification in one handler does not protect another", () => {
+  const { failures } = run(
+    {
+      "src/index.ts":
+        "import { handleWebhook } from './handlers/webhook';\n" +
+        "import { lookup } from './handlers/lookup';\n" +
+        "app.post('/webhook', express.raw({ type: 'application/json' }), handleWebhook);\n" +
+        "app.get('/lookup/:id', lookup);\n",
+      "src/handlers/webhook.ts":
+        "import crypto from 'crypto';\n" +
+        "export const handleWebhook = async (req, res) => {\n" +
+        "  const d = crypto.createHmac('sha256', s).update(req.body).digest('hex');\n" +
+        "  return res.status(200).send();\n};\n",
+      "src/handlers/lookup.ts":
+        "export const lookup = async (req, res) => {\n  return res.status(200).json({});\n};\n",
+    },
+    authenticationFailures
+  );
+  assert.equal(failures.length, 1);
+  assert.match(failures[0], /GET \/lookup/);
+  assert.doesNotMatch(failures[0], /POST \/webhook/);
+});
+
+// process.env.X is undefined when unset and `undefined !== undefined` is false, exactly as in
+// Python. The comparison is against the local the value was assigned to, not the env expression,
+// which is why matching only on the env name found nothing in a deliverable that had the defect.
+test("a TypeScript credential compared against an unset env var is vacuous", () => {
+  const { failures } = run(
+    {
+      "src/index.ts": "app.get('/lookup/:id', requireSupportAuth, lookup);\n",
+      "src/middleware.ts":
+        "export const requireSupportAuth = (req, res, next) => {\n" +
+        "  const supportKey = req.headers['x-support-key'];\n" +
+        "  const expectedSupportKey = process.env.SUPPORT_TEAM_KEY;\n" +
+        "  if (supportKey !== expectedSupportKey) return res.status(403).send();\n" +
+        "  next();\n};\n",
+    },
+    authenticationFailures
+  );
+  assert.ok(failures.some((f) => /SUPPORT_TEAM_KEY/.test(f) && /does not fail closed/.test(f)));
+});
+
+test("a TypeScript credential guarded before comparison is not vacuous", () => {
+  const { failures } = run(
+    {
+      "src/index.ts": "app.get('/lookup/:id', requireSupportAuth, lookup);\n",
+      "src/middleware.ts":
+        "export const requireSupportAuth = (req, res, next) => {\n" +
+        "  const supportKey = req.headers['x-support-key'];\n" +
+        "  const expectedKey = process.env.SUPPORT_TEAM_KEY;\n" +
+        "  if (!expectedKey || !supportKey) return res.status(403).send();\n" +
+        "  if (supportKey !== expectedKey) return res.status(403).send();\n" +
+        "  next();\n};\n",
+    },
+    authenticationFailures
+  );
+  assert.deepEqual(failures, []);
+});

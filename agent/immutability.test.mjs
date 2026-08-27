@@ -235,3 +235,28 @@ test("the task signal does not override a store that is actually protected", () 
   );
   assert.deepEqual(failures, []);
 });
+
+// `=` is Python's assignment; `:` is a JavaScript object literal, which is how the AWS SDK v3 takes
+// it. Requiring `=` cost a whole run: a TypeScript deliverable wrote the condition in round 1, this
+// check called it missing in all five validation rounds, and the model rewrote that one file six
+// times trying to satisfy a condition it had already met.
+test("a DynamoDB condition written as an object literal counts", () => {
+  const { failures } = run(
+    {
+      "src/services/dynamodb.ts":
+        "import { PutCommand } from '@aws-sdk/lib-dynamodb';\n" +
+        "const TABLE = 'webhook_records';\n" +
+        "export async function save(id, payload) {\n" +
+        "  const command = new PutCommand({\n" +
+        "    TableName: TABLE,\n" +
+        "    Item: { eventId: id, payload },\n" +
+        '    ConditionExpression: "attribute_not_exists(eventId)",\n' +
+        "  });\n};\n",
+      "terraform/main.tf":
+        'resource "aws_dynamodb_table" "webhook_records" {}\n' +
+        'resource "aws_iam_role_policy" "p" { policy = jsonencode({ Action = ["dynamodb:PutItem","dynamodb:GetItem"] }) }\n',
+    },
+    (d) => immutabilityFailures(d, { taskRequiresImmutability: true })
+  );
+  assert.deepEqual(failures, []);
+});

@@ -129,6 +129,24 @@ const LEAKY_SIGNATURE_COMPARE =
 // SUPPORT_API_KEY. The same file validated three other environment variables at startup and not
 // these two. A gate that confirms a check exists, without asking whether it can be satisfied by
 // nothing, certifies exactly this.
+// process.env.X is undefined when unset, and `undefined !== undefined` is false -- the same
+// vacuous comparison as Python's os.getenv, in the language the second webhook receiver used.
+const JS_ENV_CREDENTIAL =
+  /\b(?:const|let|var)\s+(\w*(?:[Kk]ey|[Ss]ecret|[Tt]oken|[Pp]assword|[Cc]redential)\w*)\s*=\s*process\.env\.(\w+)/g;
+// Or read inline at the comparison site: `req.headers['x'] !== process.env.SUPPORT_TEAM_KEY`.
+const JS_INLINE_ENV_COMPARE = /[!=]==?\s*process\.env\.([A-Z_][A-Z0-9_]*)|process\.env\.([A-Z_][A-Z0-9_]*)\s*[!=]==?/g;
+
+function jsValidatedAtStartup(all, name) {
+  return [
+    new RegExp(`if\\s*\\(\\s*!\\s*${name}\\b`),
+    new RegExp(`if\\s*\\([^)]*${name}\\s*===?\\s*undefined`),
+    new RegExp(`${name}\\s*\\?\\?`),                       // ?? fallback
+    new RegExp(`process\\.env\\.${name}\\s*\\|\\|`),   // || default
+    new RegExp(`throw[^\\n]*${name}`),
+    new RegExp(`assert[^\\n]*${name}`),
+  ].some((re) => re.test(all));
+}
+
 const PY_ENV_CREDENTIAL =
   /^\s*([A-Z_][A-Z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL)[A-Z0-9_]*)\s*=\s*os\.(?:getenv\s*\(|environ\.get\s*\()/gm;
 
@@ -147,6 +165,25 @@ function validatedAtStartup(all, name) {
 /** Credentials compared against an environment value that may be unset, making the check vacuous. */
 export function vacuousCredentialChecks(all) {
   const out = [];
+  for (const re of [JS_ENV_CREDENTIAL, JS_INLINE_ENV_COMPARE]) {
+    re.lastIndex = 0;
+    let j;
+    while ((j = re.exec(all))) {
+      const local = j[2] ? j[1] : null;                 // `const local = process.env.ENV`
+      const envName = j[2] || j[1] || j[3];
+      if (!envName || !/key|secret|token|password|credential/i.test(envName)) continue;
+      // Validation, like the comparison, is usually written against the local alias rather than
+      // the env expression -- `const expectedKey = process.env.X; if (!expectedKey) ...`.
+      if ([envName, local].filter(Boolean).some((n) => jsValidatedAtStartup(all, n))) continue;
+      // The comparison is usually against the local alias, not the env expression. Missing that
+      // is why this check saw nothing in a deliverable that had the defect.
+      const names = [envName, local].filter(Boolean);
+      const compared = names.some((n) =>
+        new RegExp(`[!=]==?\\s*(process\\.env\\.)?${n}\\b|\\b${n}\\s*[!=]==?`).test(all)
+      );
+      if (compared) out.push(envName);
+    }
+  }
   PY_ENV_CREDENTIAL.lastIndex = 0;
   let m;
   while ((m = PY_ENV_CREDENTIAL.exec(all))) {
@@ -225,6 +262,59 @@ const JS_CHAIN_VERB_RE = /\.\s*(get|post|put|patch|delete|all)\s*\(([^)]*)\)/g;
 // the controller's own base path --
 // and auth is a decorator either on the method or on the class.
 const JS_NEST_ROUTE_RE = /@(Get|Post|Put|Patch|Delete|All)\s*\(\s*(?:(['"`])([^'"`]*)\2)?\s*\)/g;
+
+// The identifiers a route hands its request to, e.g.
+// `app.post('/webhook', express.raw({...}), handleWebhook)`. JS_ROUTE_RE stops at the comma after
+// the path, so the handlers are in the route's trailing context, not in its declaration -- reading
+// the declaration finds nothing at all, which is why an earlier attempt at this resolved no handler
+// and reported a verified endpoint as open.
+//
+// Every bare identifier up to the closing paren is a candidate: Express takes a chain of
+// middleware and the verifier may be any of them, not only the last.
+function routeHandlerNames(context) {
+  const call = context.slice(0, context.indexOf(");") + 1 || context.length);
+  return [...call.matchAll(/(^|[,\s(])([A-Za-z_$][\w$]*)\s*(?=[,)])/g)].map((m) => m[2]);
+}
+
+// The handler's own body, bounded by its braces. A fixed-size window instead of this read past the
+// end of one handler into the next file -- the adapter searches a concatenation of every file in
+// the language, so 2500 characters from an unauthenticated handler reached signature code that
+// belonged to a different route, and reported the unauthenticated one as verified.
+function functionBodyAt(text, start) {
+  const open = text.indexOf("{", start);
+  if (open === -1) return text.slice(start, start + 400);
+  let depth = 0;
+  for (let i = open; i < text.length && i < open + 20000; i++) {
+    if (text[i] === "{") depth++;
+    else if (text[i] === "}") {
+      depth--;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return text.slice(start, open + 2500);
+}
+
+/** Does the handler this route names actually verify a signature? */
+function handlerVerifiesSignature(route, all) {
+  if (!verifiesSignature(all)) return false;              // nothing in the project verifies anything
+  const names = routeHandlerNames(route.context);
+  if (names.length === 0) return false;
+  // Read each named handler's own body, not the whole corpus: a project that verifies a signature
+  // somewhere must not thereby mark every route protected. A first attempt did exactly that and
+  // reported an unauthenticated support endpoint as safe, which is worse than missing one.
+  for (const name of names) {
+    const def = new RegExp(`(?:export\\s+)?(?:const|let|var|function|async\\s+function)\\s+${name}\\b`).exec(all);
+    if (!def) continue;
+    const body = functionBodyAt(all, def.index);
+    // Constructing an HMAC, not merely comparing in constant time. timingSafeEqual on its own is
+    // how any secret should be compared -- a support API key included -- so accepting it as
+    // evidence of a *signature* labels a key check as signature verification. The verdict is the
+    // same either way; the reason given to the reader is not.
+    if (/verif\w*signature|checkSignature|validateSignature/i.test(body)) return true;
+    if (/\bcreateHmac\s*\(|\bhmac\.new\s*\(|OpenSSL::HMAC|hmac\.New\s*\(/.test(body)) return true;
+  }
+  return false;
+}
 
 const jsAdapter = {
   name: "JavaScript/TypeScript",
@@ -310,8 +400,18 @@ const jsAdapter = {
     return null;
   },
 
-  routeAuth(r) {
+  routeAuth(r, all) {
     if (/@UseGuards\s*\(/.test(r.context)) return "a route guard";
+    // A machine sender proves identity by signing the payload, not with a bearer token. Taught to
+    // the Python adapter after a webhook receiver was wrongly reported open, and not to this one,
+    // so the next receiver -- TypeScript -- was wrongly reported open too.
+    //
+    // Resolved per route rather than file-wide. A first attempt accepted any route in a project
+    // that verified a signature anywhere, which marked an unauthenticated support endpoint as
+    // protected: worse than the false positive it replaced, because a gate that invents protection
+    // is more dangerous than one that misses it. Express handlers are named imports, so the route
+    // names its handler and the handler's body is what has to do the verifying.
+    if (handlerVerifiesSignature(r, all)) return "a verified request signature";
     if (/\b(preHandler|onRequest|preValidation)\s*:/.test(r.declaration) && AUTH_WORD.test(r.declaration)) {
       return "a Fastify hook";
     }

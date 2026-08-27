@@ -733,8 +733,21 @@ async function warmModel(model, provider) {
   }
 }
 
+// The per-token term is a throughput floor in disguise: at 150ms/token a full-budget generation
+// has to sustain 6.4 tok/s to finish inside its own timeout. This machine measured 5.5, 11.0, 15.9,
+// 19.3 and 21.7 tok/s across one afternoon depending on memory pressure -- the floor sat inside the
+// observed range, so a run died whenever it landed at the low end. Three did, and the failure reads
+// as "llama-server did not respond", which points at the server when the server was generating
+// normally and the client gave up: its own log records `Connection handling canceled`, not an error.
+//
+// 400ms/token puts the floor at 2.5 tok/s, below anything measured here. The cost of being wrong in
+// this direction is a slow run; the cost of being wrong in the other is a dead one, and a dead run
+// throws away everything before it.
+const MS_PER_OUTPUT_TOKEN = 400;
+const MS_PER_PROMPT_TOKEN = 15;
+
 function requestTimeoutMs(maxTokens, promptTokens = 0) {
-  return 30_000 + (maxTokens || 0) * 150 + promptTokens * 15;
+  return 30_000 + (maxTokens || 0) * MS_PER_OUTPUT_TOKEN + promptTokens * MS_PER_PROMPT_TOKEN;
 }
 
 // Prompt size in tokens, near enough. ~4 chars/token is crude but this only has to pick a

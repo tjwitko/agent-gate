@@ -80,10 +80,26 @@ const PY_ROUTE_RE = /@(\w+)\.(get|post|put|patch|delete|route)\(\s*["']([^"']*)[
 const PY_AUTH_DEPENDENCY =
   /\b(Security|Depends)\s*\(\s*(\w*(auth|verify|current_user|require|api_?key|token|principal|identity)\w*)/i;
 
-// An API-key style header parameter. Restricted to credential-shaped names so an ordinary header
-// such as `user_agent: str = Header(None)` is not mistaken for authentication.
-const PY_AUTH_HEADER_PARAM =
-  /\b(x_api_key|api_key|authorization|x_auth_token|access_token|bearer)\b\s*:[^,)]*Header\s*\(/i;
+// A credential-shaped header parameter. This was a fixed list of six names
+// (x_api_key|api_key|authorization|x_auth_token|access_token|bearer), which reported a real
+// support endpoint guarded by `x_internal_token: str = Header(None)` as open to anyone -- the same
+// defect class as the JS inline-arrow false positive: a hardcoded list of spellings standing in
+// for a test of shape. Matched on the credential-ish WORD a name contains instead, so
+// x_internal_token, support_api_key and admin_secret all resolve without enumerating them.
+//
+// Signature headers are deliberately NOT credential words here. A machine sender proves identity
+// by signing the payload, and that path demands corroboration that something actually verifies
+// the signature; letting `x_provider_signature` match as a plain credential would hand a route
+// protection merely for naming the header.
+const PY_CREDENTIAL_HEADER_PARAM =
+  /\b(\w*(?:api_?key|token|secret|credential|authorization)\w*)\s*:[^,)=]*=\s*Header\s*\(/i;
+
+// Declaring the parameter is not checking it. Widening the names above without this would widen
+// the surface for the worse error -- a gate that INVENTS protection is more dangerous than one
+// that misses it -- so a credential header only counts when the handler both references the
+// parameter and has a path that rejects the request. Mirrors the corroboration the signature
+// branch already required via verifiesSignature().
+const PY_AUTH_REJECTION = /\bstatus_code\s*=\s*(?:401|403)\b|\babort\s*\(\s*(?:401|403)\b|\bPermissionError\b|\bHTTPException\s*\(\s*(?:401|403)\b/;
 
 // A request-signature header, which is how a webhook sender proves identity: there is no bearer
 // token because the caller is a machine that signs each payload with a shared secret. This check
@@ -202,6 +218,21 @@ export function leakySignatureCheck(all) {
   return LEAKY_SIGNATURE_COMPARE.test(all);
 }
 
+// The handler's own body: everything from the `def` until the indentation returns to column 0,
+// which for a module-level route function is the next decorator or top-level statement. Bounded by
+// a dedent rather than a line count so it neither truncates a long handler nor runs into the next
+// one -- reading past a handler into its neighbour is how an unauthenticated route once got
+// credited with another route's verification.
+function pyRouteBody(lines, startIdx) {
+  const out = [];
+  for (let i = startIdx; i < lines.length && out.length < 300; i++) {
+    const l = lines[i];
+    if (out.length && l.trim() && !/^\s/.test(l)) break;
+    out.push(l);
+  }
+  return out.join("\n");
+}
+
 const pythonAdapter = {
   name: "Python",
   extensions: [".py"],
@@ -216,7 +247,14 @@ const pythonAdapter = {
       const line = text.slice(0, m.index).split("\n").length;
       // Signature can wrap across lines; take enough to cover it without running into the body.
       const signature = lines.slice(line, line + 8).join("\n").split(/:\s*(?:\n|$)/)[0];
-      out.push({ method: m[2].toUpperCase(), route: m[3], declaration: m[0], context: signature, line });
+      out.push({
+        method: m[2].toUpperCase(),
+        route: m[3],
+        declaration: m[0],
+        context: signature,
+        body: pyRouteBody(lines, line),
+        line,
+      });
     }
     return out;
   },
@@ -231,7 +269,13 @@ const pythonAdapter = {
   routeAuth(r, all) {
     if (/dependencies\s*=/.test(r.declaration)) return "a route dependency";
     if (PY_AUTH_DEPENDENCY.test(r.context)) return "an auth dependency";
-    if (PY_AUTH_HEADER_PARAM.test(r.context)) return "a credential header";
+    const credential = PY_CREDENTIAL_HEADER_PARAM.exec(r.context);
+    if (credential) {
+      const name = credential[1];
+      const body = r.body || "";
+      const referenced = new RegExp(`\\b${name}\\b`).test(body);
+      if (referenced && PY_AUTH_REJECTION.test(body)) return "a credential header";
+    }
     if (SIGNATURE_HEADER_PARAM.test(r.context) && verifiesSignature(all)) return "a verified request signature";
     return null;
   },

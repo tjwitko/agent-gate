@@ -41,8 +41,14 @@ test("an auth dependency or a credential header counts", () => {
   );
   assert.deepEqual(dep.failures, []);
 
+  // The handler must actually CHECK the credential. `pass` here originally passed the gate, which
+  // meant a handler that ignored its own api-key header was reported as authenticated.
   const header = run(
-    { "app/main.py": "@app.post('/logs')\ndef add(x_api_key: str = Header(...)):\n    pass\n" },
+    {
+      "app/main.py":
+        "@app.post('/logs')\ndef add(x_api_key: str = Header(...)):\n" +
+        "    if x_api_key != API_KEY:\n        raise HTTPException(status_code=403)\n    pass\n",
+    },
     authenticationFailures
   );
   assert.deepEqual(header.failures, []);
@@ -54,7 +60,8 @@ test("a partially protected surface still fails, and says so", () => {
   const { failures } = run(
     {
       "app/main.py":
-        "@app.post('/logs')\ndef add(x_api_key: str = Header(...)):\n    pass\n\n" +
+        "@app.post('/logs')\ndef add(x_api_key: str = Header(...)):\n" +
+        "    if x_api_key != API_KEY:\n        raise HTTPException(status_code=403)\n    pass\n\n" +
         "@app.get('/logs')\ndef read(limit: int = 50):\n    pass\n",
     },
     authenticationFailures
@@ -751,5 +758,56 @@ test("a chained .route().get() with no guard still flags", () => {
     },
     checkAuthentication
   );
+  assert.equal(routes[0].protectedBy, null);
+});
+
+// --- python credential headers ------------------------------------------------------------------
+// The name list was fixed at six spellings, so a real support endpoint guarded by
+// `x_internal_token` was reported as open to anyone. Found while grading webhook-5: the endpoint
+// rejected every caller, and the gate called it unauthenticated.
+
+test("a credential header the list never enumerated still counts", () => {
+  const { routes } = run(
+    {
+      "app/main.py":
+        "@app.get('/support/callbacks/{event_id}')\n" +
+        "async def get_callback(event_id: str, x_internal_token: str = Header(None)):\n" +
+        "    if x_internal_token != internal_token:\n" +
+        "        raise HTTPException(status_code=403, detail='Unauthorized')\n" +
+        "    return {}\n",
+    },
+    checkAuthentication
+  );
+  assert.equal(routes.length, 1);
+  assert.equal(routes[0].protectedBy, "a credential header");
+});
+
+// The corroboration that makes widening the names safe. Declaring a credential parameter is not
+// checking it, and a gate that invents protection is worse than one that misses it.
+test("a credential header the handler never checks does NOT count", () => {
+  const { routes } = run(
+    {
+      "app/main.py":
+        "@app.get('/logs')\n" +
+        "def read(x_internal_token: str = Header(None)):\n" +
+        "    return db.all()\n",
+    },
+    checkAuthentication
+  );
+  assert.equal(routes[0].protectedBy, null);
+});
+
+test("a signature header is not credited as a plain credential", () => {
+  const { routes } = run(
+    {
+      "app/main.py":
+        "@app.post('/webhook')\n" +
+        "async def hook(x_provider_signature: str = Header(None)):\n" +
+        "    if not x_provider_signature:\n        raise HTTPException(status_code=401)\n" +
+        "    return {}\n",
+    },
+    checkAuthentication
+  );
+  // Nothing in this project verifies a signature, so naming the header must not protect the route.
   assert.equal(routes[0].protectedBy, null);
 });

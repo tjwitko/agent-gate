@@ -294,18 +294,72 @@ function functionBodyAt(text, start) {
   return text.slice(start, open + 2500);
 }
 
+// An inline handler -- `app.post(PATH, (req, res) => { ... })` -- gives routeHandlerNames no
+// identifier to resolve, so a route whose verification lives in an arrow body read as unverified.
+// Confirmed by holding the logic constant and varying only the handler shape: named-and-guarded
+// passed, named-with-the-guard-removed flagged (so the check is live in that shape), and
+// inline-and-guarded flagged with the identical guard. Inline arrows are ordinary Express, and of
+// the two directions this one is the false positive -- the direction that gets a gate switched off.
+//
+// The body is brace-matched from the arrow's own position rather than read out of `route.context`:
+// that window is capped at 300 characters and 4 lines on purpose, so a long handler cannot drag an
+// unrelated `auth` mention into the decision, and widening it would trade this false positive for
+// that false negative.
+const INLINE_HANDLER_HEAD =
+  /(?:\([^()]{0,200}\)|[A-Za-z_$][\w$]*)\s*=>\s*\{|function\s*\*?\s*[A-Za-z_$]*\s*\([^()]{0,200}\)\s*\{/g;
+
+// The extent of the route call itself. The search for inline bodies is bounded by the call's own
+// closing paren so it cannot run into the next route: an earlier fixed-size window did exactly
+// that and credited one route with signature code belonging to another.
+function callExtent(text, startOfCall) {
+  const open = text.indexOf("(", startOfCall);
+  if (open === -1) return null;
+  let depth = 0;
+  for (let i = open; i < text.length && i < open + 20000; i++) {
+    const c = text[i];
+    if (c === "(") depth++;
+    else if (c === ")") {
+      depth--;
+      if (depth === 0) return [open, i];
+    }
+  }
+  return [open, Math.min(text.length, open + 20000)];
+}
+
+/** Bodies of every inline function expression passed to this route call. */
+function inlineHandlerBodies(text, startOfCall) {
+  const extent = callExtent(text, startOfCall);
+  if (!extent) return [];
+  const [open, close] = extent;
+  const bodies = [];
+  let i = open;
+  for (let guard = 0; guard < 12 && i < close; guard++) {
+    INLINE_HANDLER_HEAD.lastIndex = 0;
+    const m = INLINE_HANDLER_HEAD.exec(text.slice(i, close));
+    if (!m) break;
+    const headAt = i + m.index;
+    const body = functionBodyAt(text, headAt);
+    bodies.push(body);
+    i = headAt + Math.max(body.length, 1);
+  }
+  return bodies;
+}
+
 /** Does the handler this route names actually verify a signature? */
 function handlerVerifiesSignature(route, all) {
   if (!verifiesSignature(all)) return false;              // nothing in the project verifies anything
   const names = routeHandlerNames(route.context);
-  if (names.length === 0) return false;
+  const bodies = [...(route.inlineBodies || [])];
+  if (names.length === 0 && bodies.length === 0) return false;
   // Read each named handler's own body, not the whole corpus: a project that verifies a signature
   // somewhere must not thereby mark every route protected. A first attempt did exactly that and
   // reported an unauthenticated support endpoint as safe, which is worse than missing one.
   for (const name of names) {
     const def = new RegExp(`(?:export\\s+)?(?:const|let|var|function|async\\s+function)\\s+${name}\\b`).exec(all);
     if (!def) continue;
-    const body = functionBodyAt(all, def.index);
+    bodies.push(functionBodyAt(all, def.index));
+  }
+  for (const body of bodies) {
     // Constructing an HMAC, not merely comparing in constant time. timingSafeEqual on its own is
     // how any secret should be compared -- a support API key included -- so accepting it as
     // evidence of a *signature* labels a key check as signature verification. The verdict is the
@@ -336,7 +390,14 @@ const jsAdapter = {
       // Everything from the path to the end of the call is where route middleware lives. Bounded
       // so a long handler body cannot drag an unrelated `auth` mention into the decision.
       const tail = text.slice(m.index + m[0].length, m.index + m[0].length + 300).split("\n").slice(0, 4).join("\n");
-      out.push({ method: m[2].toUpperCase(), route: m[4], declaration: m[0], context: tail, line: lineAt(m.index) });
+      out.push({
+        method: m[2].toUpperCase(),
+        route: m[4],
+        declaration: m[0],
+        context: tail,
+        inlineBodies: inlineHandlerBodies(text, m.index),
+        line: lineAt(m.index),
+      });
     }
 
     JS_FASTIFY_ROUTE_RE.lastIndex = 0;
@@ -359,12 +420,24 @@ const jsAdapter = {
       const route = m[2];
       const chain = m[3];
       const line = lineAt(m.index);
+      // The chain group is the trailing capture, so its offset is fixed from the match's end --
+      // needed because JS_CHAIN_VERB_RE reads a substring while inline bodies must be brace-matched
+      // against the real file. Its `[^)]*` argument capture also stops at the first `)`, which an
+      // inline arrow's own parameter list supplies, so `context` alone cannot see an inline guard.
+      const chainStart = m.index + m[0].length - chain.length;
       JS_CHAIN_VERB_RE.lastIndex = 0;
       let v;
       while ((v = JS_CHAIN_VERB_RE.exec(chain))) {
         // Each verb carries its own middleware list, so they are judged separately -- the whole
         // point of this check is that `.get(handler).post(requireAuth, handler)` is a gap.
-        out.push({ method: v[1].toUpperCase(), route, declaration: v[0], context: v[2], line });
+        out.push({
+          method: v[1].toUpperCase(),
+          route,
+          declaration: v[0],
+          context: v[2],
+          inlineBodies: inlineHandlerBodies(text, chainStart + v.index),
+          line,
+        });
       }
     }
 

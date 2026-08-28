@@ -630,3 +630,126 @@ test("a TypeScript credential guarded before comparison is not vacuous", () => {
   );
   assert.deepEqual(failures, []);
 });
+
+// --- inline arrow handlers ---------------------------------------------------------------------
+// Handler resolution originally worked by identifier, on the assumption that "Express handlers are
+// named imports". An inline arrow has no identifier, so identical guarded logic was judged
+// differently depending purely on handler shape. The three tests below are the probe that found it:
+// the middle one is what proves the check is still live in that shape rather than dead.
+
+const SIG_HELPERS =
+  'import crypto from "crypto";\n' +
+  'const SECRET = process.env.WEBHOOK_SECRET;\n' +
+  "function verifySignature(raw, sig) {\n" +
+  '  const mac = crypto.createHmac("sha256", SECRET).update(raw).digest();\n' +
+  '  return crypto.timingSafeEqual(mac, Buffer.from(sig, "hex"));\n' +
+  "}\n";
+
+const GUARD =
+  '  if (!verifySignature(req.rawBody, req.headers["x-signature"])) return res.status(401).end();\n';
+
+test("named middleware with a signature guard is clean", () => {
+  const { failures } = run(
+    {
+      "server.js":
+        SIG_HELPERS +
+        "function handleWebhook(req, res) {\n" + GUARD + "  res.json({ ok: true });\n}\n" +
+        'app.post("/webhook", express.raw({ type: "*/*" }), handleWebhook);\n',
+    },
+    authenticationFailures
+  );
+  assert.deepEqual(failures, []);
+});
+
+test("named middleware with the guard removed still flags (the check is live in this shape)", () => {
+  const { failures } = run(
+    {
+      "server.js":
+        SIG_HELPERS +
+        "function handleWebhook(req, res) {\n  res.json({ ok: true });\n}\n" +
+        'app.post("/webhook", express.raw({ type: "*/*" }), handleWebhook);\n',
+    },
+    authenticationFailures
+  );
+  assert.equal(failures.length, 1);
+  assert.match(failures[0], /POST \/webhook/);
+});
+
+test("an inline arrow handler with the same guard is clean", () => {
+  const { routes } = run(
+    {
+      "server.js":
+        SIG_HELPERS +
+        'app.post("/webhook", express.raw({ type: "*/*" }), (req, res) => {\n' +
+        GUARD +
+        "  res.json({ ok: true });\n});\n",
+    },
+    checkAuthentication
+  );
+  assert.equal(routes.length, 1);
+  assert.equal(routes[0].protectedBy, "a verified request signature");
+});
+
+// Reading an inline body must not credit the NEXT route with it. A fixed-size window did exactly
+// that once, reporting an unauthenticated endpoint as verified using another route's code — worse
+// than the false positive it replaced, so both orderings are pinned here.
+test("an inline body does not protect a following unguarded route", () => {
+  const { routes, failures } = run(
+    {
+      "server.js":
+        SIG_HELPERS +
+        'app.post("/webhook", express.raw({ type: "*/*" }), (req, res) => {\n' +
+        GUARD +
+        "  res.json({ ok: true });\n});\n" +
+        'app.get("/lookup/:id", (req, res) => {\n  res.json({ event: store.get(req.params.id) });\n});\n',
+      "x.js": "",
+    },
+    (d) => ({ ...checkAuthentication(d), ...authenticationFailures(d) })
+  );
+  assert.equal(routes.find((r) => r.route === "/webhook").protectedBy, "a verified request signature");
+  assert.equal(routes.find((r) => r.route === "/lookup/:id").protectedBy, null);
+  assert.equal(failures.length, 1);
+});
+
+test("an unguarded inline route does not borrow a named handler defined after it", () => {
+  const { routes } = run(
+    {
+      "server.js":
+        SIG_HELPERS +
+        'app.get("/lookup/:id", (req, res) => {\n  res.json({ event: store.get(req.params.id) });\n});\n' +
+        "function handleWebhook(req, res) {\n" + GUARD + "  res.json({ ok: true });\n}\n" +
+        'app.post("/webhook", express.raw({ type: "*/*" }), handleWebhook);\n',
+    },
+    checkAuthentication
+  );
+  assert.equal(routes.find((r) => r.route === "/lookup/:id").protectedBy, null);
+  assert.equal(routes.find((r) => r.route === "/webhook").protectedBy, "a verified request signature");
+});
+
+// Express's chained form has the same shape gap, and worse: JS_CHAIN_VERB_RE's `[^)]*` argument
+// capture stops at the first `)`, which an inline arrow's own parameter list supplies — so its
+// `context` is the useless fragment "(req, res" and cannot see a guard at all.
+test("a chained .route().post() with an inline guard is clean", () => {
+  const { routes } = run(
+    {
+      "server.js":
+        SIG_HELPERS +
+        'app.route("/webhook").post((req, res) => {\n' + GUARD + "  res.json({ ok: true });\n});\n",
+    },
+    checkAuthentication
+  );
+  assert.equal(routes.length, 1);
+  assert.equal(routes[0].protectedBy, "a verified request signature");
+});
+
+test("a chained .route().get() with no guard still flags", () => {
+  const { routes } = run(
+    {
+      "server.js":
+        SIG_HELPERS +
+        'app.route("/lookup").get((req, res) => {\n  res.json({ event: store.get(req.query.id) });\n});\n',
+    },
+    checkAuthentication
+  );
+  assert.equal(routes[0].protectedBy, null);
+});

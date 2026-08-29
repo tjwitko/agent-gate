@@ -21,6 +21,8 @@ happened to produce, so the next project's ordinary idiom reads as a violation.
 | authentication (JS) | handlers resolved by identifier | inline arrow handlers | false positive |
 | authentication (Py) | six credential header names | `x_internal_token` | false positive |
 | vacuous credentials | `os.getenv` only | TypeScript `process.env` | false negative |
+| secret rotation (first cut) | `get_secret(` as a fetch | an ordinary helper of that name | false positive |
+| credential timing (first cut) | file-wide "compares in constant time" | one correct comparison beside one wrong one | false negative |
 
 Three of four are false positives, which is the direction that gets a gate switched off. The fix is
 the same each time: test the shape, not the spelling.
@@ -57,34 +59,74 @@ identity by signing, and that path must keep demanding proof that something veri
 
 ---
 
+## Resolved (second pass — the webhook-5 misses)
+
+webhook-5 passed every gate it reached and graded D. These are the checks written afterwards, each
+against a defect confirmed by executing that deliverable.
+
+### Kubernetes manifests that parse but are not valid Kubernetes — `k8s-manifest.mjs`
+
+Three findings, all blocking, all previously invisible because the YAML is well-formed and each
+file reads correctly on its own:
+
+- **A container field on the PodSpec.** webhook-5 put `resources` on the pod spec. PodSpec has no
+  such field, so the API server rejects the object — the Deployment does not deploy at all, rather
+  than merely missing its limits.
+- **`${...}` interpolation.** Kubernetes substitutes `$(VAR)` in container env and command, and
+  nothing else. webhook-5 shipped `arn:aws:iam::${var.account_id}:role/...` as the IRSA annotation
+  on both the ServiceAccount and the pod template, so the role binding could never resolve. The
+  same defect turned out to be in webhook-1, which nobody had noticed.
+- **A health endpoint with no probe wired to it** (was open item 1). Gated on the app actually
+  exposing a health path, so it has a target rather than nagging; Jobs and CronJobs are exempt,
+  since a batch task that exits is supposed to have no readiness probe.
+
+### A secret cached forever under a stated rotation requirement — `secret-rotation.mjs`
+
+Gated on the task saying the secret rotates, exactly as the immutability check is gated on the task
+saying immutability: caching a secret is ordinary and correct when nothing rotates it.
+
+**The first cut of this check was a false positive**, and it is worth keeping the reason. It matched
+a bare `get_secret(` — an ordinary user-defined helper name — and accepted any nearby `if not X:` as
+a cache guard. It fired on webhook-4, whose helper fetches fresh on *every* request: the one shape
+that rotates correctly. Fixed by matching only real managed-store APIs, and by requiring the guard's
+identifier to be the same identifier assigned near the fetch. A conditional guarding something else
+is not evidence of a cache.
+
+### Timing-unsafe comparison of a non-signature credential — `authentication.mjs` (was open item 2)
+
+`leakySignatureCheck` covered signatures only. Kept as a separate finding rather than folded in, for
+the reason already recorded on `CONSTANT_TIME_COMPARE`: `timingSafeEqual` is how *any* secret should
+be compared, so merging them would report a bearer-token check as signature verification — same
+verdict, wrong reason.
+
+**The first cut of this one was a false negative**, and the shape is worth remembering. It stood down
+whenever the file compared *anything* in constant time. webhook-5 used `hmac.compare_digest` for the
+signature and a bare `!=` for the support token, so one correct comparison suppressed the report of
+an incorrect one sitting forty lines below it. A constant-time call contains no equality operator,
+so a match is evidence on its own and the file-wide gate was never needed.
+
+---
+
 ## Open
 
-### 1. Health endpoint is never wired to a probe
+### 1. A credential compared against a value of the wrong type
 
-The task asks for "a health endpoint for the load balancer". webhook-5 exposes `GET /health`
-returning 200 and declares **no** `livenessProbe` or `readinessProbe`, so nothing consumes it.
+The defect that made webhook-5's support endpoint unusable: `get_internal_token()` returned the whole
+parsed secret dict rather than the token field, so `x_internal_token != internal_token` compared a
+`str` to a `dict` and was unequal for every caller, support included.
 
-Measured consequence, not a hypothetical: with `SECRET_ID` unset, `/health` returned 200 while every
-webhook returned 500. A load balancer would have kept routing to a pod that recorded nothing. The
-manifest contract check catches the missing variable; nothing catches the unwired probe.
+Still uncaught, and honestly assessed it is the hardest of the set — it is a type error in a
+dynamically typed language, visible to `mypy` with annotations the model did not write, and invisible
+to any pattern this file's checks use. The timing check now flags that exact line for a *different*
+reason, which means the line gets attention, but nothing states the real defect.
 
-**Shape to test, not spelling:** a container exposing an HTTP health path with no probe referencing
-it. Beware the inverse false positive — probes are legitimately absent for Jobs and CronJobs.
+**Worth noting the asymmetry:** the gate previously called this endpoint "open to anyone" when it was
+closed to everyone. Being wrong in the reassuring direction and wrong in the alarming direction are
+both wrong, but only one of them sends someone to read the code.
 
-### 2. Timing-unsafe comparison for non-signature credentials
+### 2. Retention is never verified against the stated period
 
-`leakySignatureCheck` covers signature comparison only. webhook-5 compares its support token with
-`x_internal_token != internal_token` — an ordinary `!=`, byte-short-circuiting, on a bearer-style
-secret an attacker can retry freely.
-
-The reason it is not simply an extension of the existing check is recorded in `authentication.mjs`:
-`timingSafeEqual` on its own is how *any* secret should be compared, so accepting it as evidence of
-a *signature* would label a key check as signature verification. The verdict would be the same; the
-reason given to the reader would be wrong. A separate finding, sharing the comparison logic.
-
-### 3. Retention is never verified against the stated period
-
-The task says "records are retained for seven years". Nothing checks that any configured retention
+The task says "records are retained for seven years". Nothing checks that a configured retention
 matches the requirement. webhook-5 got this right (Object Lock COMPLIANCE, 2555 days) and so did
 webhook-1 — but by inspection, not because anything verified it.
 
@@ -92,3 +134,13 @@ Harder than it looks, and the reason it is still open: the period lives in the t
 needs the requirement parsed out and compared against a plan value, which is a different kind of
 check from everything else here. A version that assumed seven years universally would be
 benchmark-hardcoding of exactly the kind this file exists to catch.
+
+### 3. Client errors surfacing as 500
+
+webhook-5 wraps its handler body in `except Exception`, which catches the `HTTPException(400)` it
+raises itself and re-raises it as a 500 carrying `"400: Missing event ID"` — leaking the intended
+status into the message. A bad request is reported as a server fault, and the detail string exposes
+internals to the caller.
+
+Detectable in principle: a broad `except Exception` enclosing a `raise HTTPException`. Not yet built,
+and it competes for attention with the two above.

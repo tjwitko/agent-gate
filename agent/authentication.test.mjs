@@ -6,6 +6,11 @@ import path from "path";
 
 import { checkAuthentication, authenticationFailures } from "./authentication.mjs";
 
+// These fixtures often carry more than one real defect -- a credential compared with `!=` against
+// an unset env var is BOTH vacuous and timing-unsafe. Asserting on totals would make every test
+// brittle to a new finding; assert on the finding under test instead.
+const vacuous = (failures) => failures.filter((f) => /does not fail closed/.test(f));
+
 function run(files, fn) {
   const dir = mkdtempSync(path.join(tmpdir(), "auth-"));
   for (const [rel, contents] of Object.entries(files)) {
@@ -47,7 +52,7 @@ test("an auth dependency or a credential header counts", () => {
     {
       "app/main.py":
         "@app.post('/logs')\ndef add(x_api_key: str = Header(...)):\n" +
-        "    if x_api_key != API_KEY:\n        raise HTTPException(status_code=403)\n    pass\n",
+        "    if not compare_digest(x_api_key, API_KEY):\n        raise HTTPException(status_code=403)\n    pass\n",
     },
     authenticationFailures
   );
@@ -61,7 +66,7 @@ test("a partially protected surface still fails, and says so", () => {
     {
       "app/main.py":
         "@app.post('/logs')\ndef add(x_api_key: str = Header(...)):\n" +
-        "    if x_api_key != API_KEY:\n        raise HTTPException(status_code=403)\n    pass\n\n" +
+        "    if not compare_digest(x_api_key, API_KEY):\n        raise HTTPException(status_code=403)\n    pass\n\n" +
         "@app.get('/logs')\ndef read(limit: int = 50):\n    pass\n",
     },
     authenticationFailures
@@ -512,9 +517,10 @@ test("a credential compared against an unset environment variable is a vacuous c
     },
     authenticationFailures
   );
-  assert.equal(failures.length, 1, "the route is protected, so this is the vacuous finding alone");
-  assert.match(failures[0], /SUPPORT_API_KEY/);
-  assert.match(failures[0], /does not fail closed/);
+  const v = vacuous(failures);
+  assert.equal(v.length, 1, "the route is protected, so the vacuous finding stands alone");
+  assert.match(v[0], /SUPPORT_API_KEY/);
+  assert.match(v[0], /does not fail closed/);
 });
 
 test("a credential validated at startup is not vacuous", () => {
@@ -534,7 +540,7 @@ test("a credential validated at startup is not vacuous", () => {
       },
       authenticationFailures
     );
-    assert.deepEqual(failures, [], guard.split("\n")[0]);
+    assert.deepEqual(vacuous(failures), [], guard.split("\n")[0]);
   }
 });
 
@@ -551,7 +557,7 @@ test("a credential read with os.environ[] is not vacuous", () => {
     },
     authenticationFailures
   );
-  assert.deepEqual(failures, []);
+  assert.deepEqual(vacuous(failures), []);
 });
 
 // TypeScript, from a real run. The Python adapter learned about request signatures after a webhook
@@ -810,4 +816,77 @@ test("a signature header is not credited as a plain credential", () => {
   );
   // Nothing in this project verifies a signature, so naming the header must not protect the route.
   assert.equal(routes[0].protectedBy, null);
+});
+
+// --- timing-unsafe comparison of a non-signature credential --------------------------------------
+// A support token is a better timing target than a signature: it is stable across attempts, so one
+// recovered value keeps working, and the caller may retry freely.
+
+test("a bearer credential compared with != is reported", () => {
+  const { failures } = run(
+    {
+      "app/main.py":
+        "@app.get('/support/{id}')\n" +
+        "async def get(id: str, x_internal_token: str = Header(None)):\n" +
+        "    if x_internal_token != internal_token:\n" +
+        "        raise HTTPException(status_code=403)\n    return {}\n",
+    },
+    authenticationFailures
+  );
+  const timing = failures.filter((f) => /constant-time/.test(f));
+  assert.equal(timing.length, 1);
+  assert.match(timing[0], /x_internal_token/);
+  assert.match(timing[0], /stable across attempts/);
+});
+
+// The bug this check shipped with for one revision: gating on "does the file compare anything in
+// constant time" let a correct signature comparison suppress the report of an incorrect token one.
+// webhook-5 had exactly that pair.
+test("a correct signature comparison does not suppress an incorrect token comparison", () => {
+  const { failures } = run(
+    {
+      "app/main.py":
+        "def verify_signature(payload, signature):\n" +
+        "    expected = hmac.new(k, payload, hashlib.sha256).hexdigest()\n" +
+        "    return hmac.compare_digest(expected, signature)\n\n" +
+        "@app.get('/support/{id}')\n" +
+        "async def get(id: str, x_internal_token: str = Header(None)):\n" +
+        "    if x_internal_token != internal_token:\n" +
+        "        raise HTTPException(status_code=403)\n    return {}\n",
+    },
+    authenticationFailures
+  );
+  assert.equal(failures.filter((f) => /constant-time/.test(f)).length, 1);
+});
+
+test("a credential compared in constant time is clean", () => {
+  const { failures } = run(
+    {
+      "app/main.py":
+        "@app.get('/support/{id}')\n" +
+        "async def get(id: str, x_internal_token: str = Header(None)):\n" +
+        "    if not hmac.compare_digest(x_internal_token, internal_token):\n" +
+        "        raise HTTPException(status_code=403)\n    return {}\n",
+    },
+    authenticationFailures
+  );
+  assert.deepEqual(failures.filter((f) => /constant-time/.test(f)), []);
+});
+
+// One defect must not be reported under two names.
+test("a loosely compared signature is the signature finding, not the credential one", () => {
+  const { failures } = run(
+    {
+      "app/main.py":
+        "@app.post('/webhook')\n" +
+        "async def hook(x_signature: str = Header(None)):\n" +
+        "    expected = hmac.new(k, body, hashlib.sha256).hexdigest()\n" +
+        "    if expected != x_signature:\n" +
+        "        raise HTTPException(status_code=401)\n    return {}\n",
+    },
+    authenticationFailures
+  );
+  const timing = failures.filter((f) => /constant-time/.test(f));
+  assert.equal(timing.length, 1);
+  assert.match(timing[0], /request signature/);
 });

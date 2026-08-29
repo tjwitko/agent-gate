@@ -212,6 +212,33 @@ export function vacuousCredentialChecks(all) {
 }
 
 /** A signature is verified somewhere, but not in constant time. */
+// The same timing leak on a credential that is not a signature. Kept separate from the signature
+// check on purpose, for the reason recorded on CONSTANT_TIME_COMPARE: timingSafeEqual is how ANY
+// secret should be compared, so folding the two together would report a bearer-token check as
+// signature verification. Same verdict, wrong reason given to the reader.
+//
+// Observed in webhook-5, comparing a support token with `x_internal_token != internal_token`. A
+// support token is a better target than a signature, not a worse one: the caller may retry freely,
+// and unlike a per-payload digest the value is stable across every attempt, so a timing oracle
+// recovers one secret that then works forever.
+const LEAKY_CREDENTIAL_COMPARE =
+  /\b(\w*(?:api_?key|token|secret|credential|password)\w*)\s*(?:===?|!==?)|(?:===?|!==?)\s*(\w*(?:api_?key|token|secret|credential|password)\w*)\b/i;
+
+export function leakyCredentialCheck(all) {
+  // Deliberately NOT gated on the file containing a constant-time comparison somewhere. That
+  // file-wide bail-out is what made this check miss the case it was written for: webhook-5 used
+  // hmac.compare_digest for the signature and a bare `!=` for the support token, so one correct
+  // comparison suppressed the report of an incorrect one. A constant-time call uses no equality
+  // operator, so a match here is evidence on its own.
+  const m = LEAKY_CREDENTIAL_COMPARE.exec(all);
+  if (!m) return false;
+  const name = m[1] || m[2] || "";
+  // A signature compared loosely is the OTHER check's finding; reporting it here too would give
+  // one defect two names.
+  if (/signature|digest|hmac/i.test(name)) return false;
+  return name;
+}
+
 export function leakySignatureCheck(all) {
   if (!verifiesSignature(all)) return false;
   if (CONSTANT_TIME_COMPARE.test(all)) return false;
@@ -719,11 +746,14 @@ export function checkAuthentication(projectDir) {
   const routes = [];
   const languages = [];
   let leakySignature = false;
+  let leakyCredential = false;
   const vacuous = new Set();
   for (const [adapter, adapterFiles] of byAdapter) {
     const all = adapterFiles.map((f) => f.text).join("\n");
     const global = adapter.globalAuth(all);
     if (leakySignatureCheck(all)) leakySignature = true;
+    const leakyCred = leakyCredentialCheck(all);
+    if (leakyCred) leakyCredential = leakyCred;
     for (const n of vacuousCredentialChecks(all)) vacuous.add(n);
     let found = 0;
     for (const file of adapterFiles) {
@@ -753,7 +783,7 @@ export function checkAuthentication(projectDir) {
         "they are declared in a form this check does not recognise",
     };
   }
-  return { ran: true, routes, languages, leakySignature, vacuousCredentials: [...vacuous], unknown: null };
+  return { ran: true, routes, languages, leakySignature, leakyCredential, vacuousCredentials: [...vacuous], unknown: null };
 }
 
 /** Blocking failures for the gate. */
@@ -776,6 +806,17 @@ export function authenticationFailures(projectDir) {
           `digests rather than their hex strings where the language offers it.`,
       ]
     : [];
+
+  if (report.leakyCredential) {
+    timing.push(
+      `authentication: the credential \`${report.leakyCredential}\` is compared with an ordinary ` +
+        `equality operator rather than a constant-time one. The leak is the same as for a signature, ` +
+        `and the payoff is larger: a bearer credential is stable across attempts, so timing that ` +
+        `recovers it once yields a value that keeps working, where a per-payload digest does not. ` +
+        `The caller can also retry as often as it likes. Use hmac.compare_digest (Python), ` +
+        `crypto.timingSafeEqual (Node), hmac.Equal (Go) or the equivalent.`
+    );
+  }
 
   const vacuousNames = report.vacuousCredentials || [];
   if (vacuousNames.length) {

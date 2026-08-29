@@ -24,6 +24,8 @@ import { chatAnthropic, DEFAULT_MODEL as ANTHROPIC_DEFAULT_MODEL } from "./anthr
 import { immutabilityFailures, taskRequiresImmutability } from "./immutability.mjs";
 import { authenticationFailures } from "./authentication.mjs";
 import { manifestContractFailures } from "./manifest-contract.mjs";
+import { k8sManifestFailures } from "./k8s-manifest.mjs";
+import { secretRotationFailures } from "./secret-rotation.mjs";
 import { SKIP_DIRS } from "./skip-dirs.mjs";
 import { ensureGitignore, isArtifact, ensureRepo } from "./commit-gate.mjs";
 // Shared with bench/, not duplicated: one definition of how this repo talks to Langfuse means the
@@ -1116,6 +1118,25 @@ async function validateProject(projectDir, toolRegistry, taskText = "") {
   ran.push("manifest_contract");
   failures.push(...contract.failures);
   advisories.push(...contract.advisories);
+
+  // Manifests that parse as YAML but are not valid Kubernetes. Blocking because the failure is
+  // total rather than partial: a container field on a PodSpec means the API server rejects the
+  // object, so the workload does not deploy at all. Also catches ${...} interpolation, which
+  // Kubernetes never expands, and a health endpoint with no probe wired to it -- graded once as a
+  // receiver answering /health with 200 while every real request failed.
+  const k8s = k8sManifestFailures(projectDir);
+  ran.push("k8s_manifest");
+  failures.push(...k8s.failures);
+  advisories.push(...k8s.advisories);
+
+  // Gated on the task stating that a secret rotates, the same way immutability is gated on the task
+  // stating immutability: caching a secret is ordinary and correct when nothing rotates it. When the
+  // task does say so, an unbounded cache fails in both directions at once -- the new secret is
+  // rejected and the retired one keeps working until every replica restarts.
+  const rotation = secretRotationFailures(projectDir, taskText);
+  ran.push("secret_rotation");
+  failures.push(...rotation.failures);
+  advisories.push(...rotation.advisories);
 
   for (const dir of tfDirs) {
     const ckv = checkovAdvisory(dir, projectDir);

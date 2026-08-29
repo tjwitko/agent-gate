@@ -890,3 +890,66 @@ test("a loosely compared signature is the signature finding, not the credential 
   assert.equal(timing.length, 1);
   assert.match(timing[0], /request signature/);
 });
+
+// Handler resolution was shared between the signature and credential checks only after the fact.
+// The signature path learned to read inline arrow bodies; the credential path still resolved
+// handlers by identifier, and an inline arrow has none — so identical guarded logic passed in a
+// named middleware and flagged inline. Same defect as the one fixed a commit earlier, one path
+// over, and in the same direction: a false positive, which is what gets a gate switched off.
+test("a credential guard is judged the same inline as in a named middleware", () => {
+  const body =
+    "  const supportKey = req.headers['x-support-key'];\n" +
+    "  const expectedKey = process.env.SUPPORT_TEAM_KEY;\n" +
+    "  if (!expectedKey || !supportKey) return res.status(403).send();\n" +
+    "  if (supportKey !== expectedKey) return res.status(403).send();\n";
+
+  const named = run(
+    {
+      "src/index.ts": "app.get('/lookup', requireSupportAuth, lookup);\n",
+      "src/middleware.ts": "export const requireSupportAuth = (req, res, next) => {\n" + body + "  next();\n};\n",
+    },
+    authenticationFailures
+  );
+  assert.deepEqual(named.failures, []);
+
+  const inline = run(
+    { "src/index.ts": "app.get('/lookup', (req, res) => {\n" + body + "});\n" },
+    authenticationFailures
+  );
+  assert.deepEqual(inline.failures, [], "the same guard inline must reach the same verdict");
+});
+
+// The corroboration that keeps the wider resolution from inventing protection. Reading a header is
+// not checking one — the `Depends(get_db)` mistake in another language.
+test("a handler that reads a credential header but never refuses is still open", () => {
+  const { failures } = run(
+    {
+      "src/index.ts":
+        "app.get('/lookup', (req, res) => {\n" +
+        "  const supportKey = req.headers['x-support-key'];\n" +
+        "  res.json(store.all());\n});\n",
+    },
+    authenticationFailures
+  );
+  assert.equal(failures.length, 1);
+  assert.match(failures[0], /GET \/lookup/);
+});
+
+// Per route, as everywhere else here: resolving more handler shapes must not let one guarded route
+// vouch for the next one.
+test("an inline credential guard does not protect a following route", () => {
+  const { failures } = run(
+    {
+      "src/index.ts":
+        "app.get('/lookup', (req, res) => {\n" +
+        "  const expectedKey = process.env.SUPPORT_TEAM_KEY;\n" +
+        "  if (!expectedKey) return res.status(403).send();\n" +
+        "  if (req.headers['x-support-key'] !== expectedKey) return res.status(403).send();\n});\n" +
+        "app.get('/open', (req, res) => { res.json(store.all()); });\n",
+    },
+    authenticationFailures
+  );
+  assert.equal(failures.length, 1);
+  assert.match(failures[0], /GET \/open/);
+  assert.doesNotMatch(failures[0], /GET \/lookup/);
+});

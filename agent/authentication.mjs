@@ -416,20 +416,52 @@ function inlineHandlerBodies(text, startOfCall) {
   return bodies;
 }
 
-/** Does the handler this route names actually verify a signature? */
-function handlerVerifiesSignature(route, all) {
-  if (!verifiesSignature(all)) return false;              // nothing in the project verifies anything
-  const names = routeHandlerNames(route.context);
+/**
+ * Every handler body this route actually runs: the inline functions passed to the route call, plus
+ * the body of each handler it names.
+ *
+ * Shared by the signature and credential checks on purpose. They were written separately, and the
+ * credential one resolved handlers by identifier only -- so an inline arrow, which has no
+ * identifier, was judged unauthenticated while the identical guard in a named middleware passed.
+ * That is the same defect the signature check had fixed one commit earlier, one path over, and
+ * keeping one resolver is what stops it being fixed twice and regressed once.
+ */
+function routeHandlerBodies(route, all) {
   const bodies = [...(route.inlineBodies || [])];
-  if (names.length === 0 && bodies.length === 0) return false;
-  // Read each named handler's own body, not the whole corpus: a project that verifies a signature
+  // Each named handler's own body, not the whole corpus: a project that verifies a signature
   // somewhere must not thereby mark every route protected. A first attempt did exactly that and
   // reported an unauthenticated support endpoint as safe, which is worse than missing one.
-  for (const name of names) {
+  for (const name of routeHandlerNames(route.context)) {
     const def = new RegExp(`(?:export\\s+)?(?:const|let|var|function|async\\s+function)\\s+${name}\\b`).exec(all);
     if (!def) continue;
     bodies.push(functionBodyAt(all, def.index));
   }
+  return bodies;
+}
+
+// A credential arriving in a header, read from the request inside the handler.
+const JS_CREDENTIAL_HEADER_READ =
+  /req\.headers\s*\[\s*['"`][^'"`]*(?:key|token|secret|auth)[^'"`]*['"`]\s*\]|req\.headers\.(?:authorization|apikey|api_?key)|req\.get\s*\(\s*['"`][^'"`]*(?:key|token|secret|auth)[^'"`]*['"`]\s*\)/i;
+
+// The handler refusing the request. Without this a handler that merely reads the header would count,
+// which is the `Depends(get_db)` mistake in another language: a value is not a control until
+// something acts on it.
+const JS_AUTH_REJECTION =
+  /\.status\s*\(\s*(?:401|403)\b|\.sendStatus\s*\(\s*(?:401|403)\b|\bUnauthorized\b|\bForbidden\b|\bthrow\b/;
+
+/** Does the handler this route runs read a credential from the request and refuse without it? */
+function handlerChecksCredential(route, all) {
+  for (const body of routeHandlerBodies(route, all)) {
+    if (JS_CREDENTIAL_HEADER_READ.test(body) && JS_AUTH_REJECTION.test(body)) return true;
+  }
+  return false;
+}
+
+/** Does the handler this route names actually verify a signature? */
+function handlerVerifiesSignature(route, all) {
+  if (!verifiesSignature(all)) return false;              // nothing in the project verifies anything
+  const bodies = routeHandlerBodies(route, all);
+  if (bodies.length === 0) return false;
   for (const body of bodies) {
     // Constructing an HMAC, not merely comparing in constant time. timingSafeEqual on its own is
     // how any secret should be compared -- a support API key included -- so accepting it as
@@ -556,6 +588,10 @@ const jsAdapter = {
     // is more dangerous than one that misses it. Express handlers are named imports, so the route
     // names its handler and the handler's body is what has to do the verifying.
     if (handlerVerifiesSignature(r, all)) return "a verified request signature";
+    // Resolved through the same bodies as the signature check. Without this an inline arrow that
+    // reads a credential header and refuses without it was reported open, while the identical guard
+    // moved into a named middleware passed -- a false positive decided by handler shape alone.
+    if (handlerChecksCredential(r, all)) return "a credential checked in the handler";
     if (/\b(preHandler|onRequest|preValidation)\s*:/.test(r.declaration) && AUTH_WORD.test(r.declaration)) {
       return "a Fastify hook";
     }

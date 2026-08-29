@@ -22,16 +22,64 @@ import { SKIP_DIRS } from "./skip-dirs.mjs";
 const MAX_FILE_BYTES = 512 * 1024;
 const CODE_EXT = [".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".go", ".rb", ".java"];
 
+// Plural forms matter: "Signing keys expire after 90 days" is the same requirement as "the signing
+// key expires", and the singular-only pattern missed it because \b after "key" fails against "keys".
+const SECRET_WORD = /\b(secrets?|signing\s+keys?|api\s+keys?|credentials?|tokens?|passwords?)\b/i;
+const SECRET_NOUN = /(?:secrets?|signing\s+keys?|api\s+keys?|credentials?|tokens?|passwords?|keys?)/.source;
+
+// Words that mean rotation on their own. In a requirements document these have no other reading,
+// so they need no proximity constraint beyond the SECRET_WORD conjunction below.
 const ROTATION_PHRASES = [
   /\brotat(?:e|es|ed|ing|ion)\b/i,
-  /\bevery\s+(?:quarter|month|week|90\s*days)\b/i,
   /\bre-?issues?\b/i,
+  /\brenew(?:s|ed|al|ing)?\b/i,
 ];
-const SECRET_WORD = /\b(secret|signing\s+key|api\s+key|credential|token|password)\b/i;
 
-/** Does the task state that a secret changes over time? */
+// Verbs that mean rotation only when they act on the secret itself. "Replace", "roll", "cycle" and
+// "expire" are ordinary words -- replace a placeholder, a rolling deployment, a session expires --
+// so each is required within a short span of the secret noun. Written both ways round because
+// English puts them in either order: "we roll the webhook secret" and "the signing secret is
+// replaced quarterly".
+// `roll` is spelled out rather than stemmed: `roll\w*` also matches "rolling deployment", which
+// is a release strategy and not a secret changing.
+const AMBIGUOUS_VERB = /(?:replac\w*|cycl\w*|rolls?|rolled|expir\w*|refresh\w*)/.source;
+const ROTATION_NEAR_SECRET = new RegExp(
+  `\\b${AMBIGUOUS_VERB}\\b[^.;\\n]{0,40}?\\b${SECRET_NOUN}\\b|\\b${SECRET_NOUN}\\b[^.;\\n]{0,40}?\\b${AMBIGUOUS_VERB}\\b`,
+  "i"
+);
+
+// A cadence states rotation only alongside the secret. On its own it is any recurring thing in the
+// task -- "deploys run every month" -- which is why it is not in the unconditional list.
+const CADENCE_NEAR_SECRET = new RegExp(
+  `\\b(?:every|each)\\s+(?:quarter|month|week|year|\\d+\\s*days?)\\b[^.;\\n]{0,40}?\\b${SECRET_NOUN}\\b` +
+    `|\\b${SECRET_NOUN}\\b[^.;\\n]{0,60}?\\b(?:every|each)\\s+(?:quarter|month|week|year|\\d+\\s*days?)\\b` +
+    `|\\b${SECRET_NOUN}\\b[^.;\\n]{0,60}?\\b(?:quarterly|monthly|weekly|annually|periodically)\\b`,
+  "i"
+);
+
+// "issues a new signing key each quarter" states rotation without using a rotation verb at all.
+const NEW_SECRET = new RegExp(`\\bnew\\s+(?:\\w+\\s+){0,2}${SECRET_NOUN}\\b`, "i");
+
+/**
+ * Does the task state that a secret changes over time?
+ *
+ * The first version tested three patterns and scored 2 of 7 against ordinary rephrasings -- it read
+ * "rotates" and missed "replaced quarterly", "cycled every 90 days", "issues a new signing key each
+ * quarter", "expire after 90 days" and "we roll the webhook secret". That is the same failure the
+ * immutability gate had and had already fixed once; a requirement means what it means whether or not
+ * it uses the word the check happens to look for, and the miss is silent.
+ *
+ * Every route still requires a secret noun in the task, which is what keeps "we rotate the on-call
+ * engineer weekly" out.
+ */
 export function taskRequiresRotation(taskText = "") {
-  return ROTATION_PHRASES.some((re) => re.test(taskText)) && SECRET_WORD.test(taskText);
+  if (!SECRET_WORD.test(taskText)) return false;
+  return (
+    ROTATION_PHRASES.some((re) => re.test(taskText)) ||
+    ROTATION_NEAR_SECRET.test(taskText) ||
+    CADENCE_NEAR_SECRET.test(taskText) ||
+    NEW_SECRET.test(taskText)
+  );
 }
 
 // Reading a secret from a managed store. Deliberately not "reads an env var": a secret delivered

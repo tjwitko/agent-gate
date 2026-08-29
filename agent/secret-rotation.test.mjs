@@ -108,3 +108,38 @@ test("no source files is reported as not-checked", () => {
   const { advisories } = run({ "README.md": "hi" }, (d) => secretRotationFailures(d, ROTATES));
   assert.match(advisories[0], /not checked/);
 });
+
+// The first version tested /rotat/, /every quarter|month|week|90 days/ and /re-issue/, and scored
+// 2 of 7 against ordinary rephrasings of the same requirement. That is the failure the immutability
+// gate had already been fixed for once: a requirement means what it means whether or not it uses
+// the word the check looks for, and the miss is silent — the gate downgrades itself to advisory on
+// the task that needed it.
+test("a rotation requirement survives being rephrased", () => {
+  for (const task of [
+    "The provider rotates its signing secret every quarter",
+    "The signing secret is replaced quarterly",
+    "Secrets are cycled every 90 days",
+    "The provider issues a new signing key each quarter",
+    "Signing keys expire after 90 days",
+    "We roll the webhook secret twice a year",
+    "The API key is refreshed monthly",
+    "Credentials are renewed annually",
+  ]) {
+    assert.equal(taskRequiresRotation(task), true, task);
+  }
+});
+
+// Widening the vocabulary widens the surface for inventing a requirement, which is the worse
+// error: it makes an ordinary cached read fail. Each of these contains a secret noun AND a word
+// from the rotation vocabulary, and states no rotation.
+test("a wider vocabulary does not invent a rotation requirement", () => {
+  for (const task of [
+    "We rotate the on-call engineer weekly.",                              // rotation, no secret
+    "Store the API key in Secrets Manager",                                // secret, no rotation
+    "Replace the placeholder text in the README",                          // verb, no secret
+    "Deploys run every month; the api key lives in Secrets Manager",        // cadence, other clause
+    "Use a rolling deployment strategy; the token is in Secrets Manager",   // "rolling" is not "roll"
+  ]) {
+    assert.equal(taskRequiresRotation(task), false, task);
+  }
+});

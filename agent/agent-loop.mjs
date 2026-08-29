@@ -26,6 +26,7 @@ import { authenticationFailures } from "./authentication.mjs";
 import { manifestContractFailures } from "./manifest-contract.mjs";
 import { k8sManifestFailures } from "./k8s-manifest.mjs";
 import { secretRotationFailures } from "./secret-rotation.mjs";
+import { iamContractFailures } from "./iam-contract.mjs";
 import { SKIP_DIRS } from "./skip-dirs.mjs";
 import { ensureGitignore, isArtifact, ensureRepo } from "./commit-gate.mjs";
 // Shared with bench/, not duplicated: one definition of how this repo talks to Langfuse means the
@@ -1137,6 +1138,16 @@ async function validateProject(projectDir, toolRegistry, taskText = "") {
   ran.push("secret_rotation");
   failures.push(...rotation.failures);
   advisories.push(...rotation.advisories);
+
+  // Two IAM defects a clean plan cannot see. Terraform does not resolve managed-policy ARNs at
+  // plan time, so a name that does not exist plans clean and fails at apply; and it has no idea
+  // what a ServiceAccount annotation means, so a role annotated onto a pod with an instance-profile
+  // trust policy looks fine from either artifact alone. Both were graded on deliverables whose
+  // terraform_plan the gate had already approved.
+  const iam = iamContractFailures(projectDir);
+  ran.push("iam_contract");
+  failures.push(...iam.failures);
+  advisories.push(...iam.advisories);
 
   for (const dir of tfDirs) {
     const ckv = checkovAdvisory(dir, projectDir);

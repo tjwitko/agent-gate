@@ -23,6 +23,7 @@ happened to produce, so the next project's ordinary idiom reads as a violation.
 | vacuous credentials | `os.getenv` only | TypeScript `process.env` | false negative |
 | secret rotation (first cut) | `get_secret(` as a fetch | an ordinary helper of that name | false positive |
 | credential timing (first cut) | file-wide "compares in constant time" | one correct comparison beside one wrong one | false negative |
+| IRSA annotation (first cut) | a well-formed ARN as the parse gate | `<ROLE_ARN>` placeholders | false negative |
 
 Three of four are false positives, which is the direction that gets a gate switched off. The fix is
 the same each time: test the shape, not the spelling.
@@ -104,6 +105,47 @@ whenever the file compared *anything* in constant time. webhook-5 used `hmac.com
 signature and a bare `!=` for the support token, so one correct comparison suppressed the report of
 an incorrect one sitting forty lines below it. A constant-time call contains no equality operator,
 so a match is evidence on its own and the file-wide gate was never needed.
+
+### Two IAM defects a clean plan cannot see — `iam-contract.mjs`
+
+Both graded on webhook-6, whose `terraform_plan` the gate had already approved. Neither is a
+security hole; both are total failures, and both are invisible for the same structural reason —
+Terraform does not resolve these values at plan time, so scanning the plan cannot reach them.
+
+- **Managed-policy ARNs that do not exist.** webhook-6 attached
+  `arn:aws:iam::aws:policy/AmazonEBSCSID_Policy` (the real policy is `AmazonEBSCSIDriverPolicy`).
+  Terraform does not resolve managed-policy ARNs at plan time, so the plan is clean and
+  `terraform apply` fails with `NoSuchEntity` **after** creating some resources.
+
+  **Reported in two tiers on purpose.** AWS publishes well over a thousand managed policies and
+  this check carries only the common ones, so an unrecognised name is not evidence of a wrong one.
+  A name that prefix-matches a real policy is a near miss and blocks; a merely unrecognised name is
+  advisory and says outright that the list is incomplete. Note `AmazonEKS_CNI_Policy` is a real
+  policy: "oddly punctuated" is not evidence of anything.
+
+- **An IRSA role no ServiceAccount can assume.** webhook-6's pod role trusted
+  `Service = "ec2.amazonaws.com"` — an EC2 instance-profile trust — while a ServiceAccount
+  annotated it for IRSA. The pod gets no credentials and every AWS call fails. Same shape as the
+  manifest-contract check: the annotation names a real role, the role exists, and the defect is
+  only in the gap.
+
+  Re-running it over the older deliverables found the same class in **webhook-5**, which does name
+  a `Federated` principal but pairs it with `sts:AssumeRole` instead of
+  `sts:AssumeRoleWithWebIdentity` — the right party, the wrong call. That one is why the finding
+  names its specific reason: an early version reported it as "no recognisable principal", which
+  would have sent a reader looking for something already there.
+
+**Two bugs found while building it, both by running over the six preserved deliverables:**
+
+1. An annotation whose value was `<ROLE_ARN>` was *skipped* rather than reported, because the ARN
+   parse was the gate for looking at it at all. webhook-4, whose every annotation is that
+   placeholder, read as clean. Silence is not success — an annotation that cannot resolve is the
+   finding.
+2. Tightening the ARN parse to require a 12-digit account then *lost* webhook-5's trust-policy
+   finding, because its `${...}` ARN failed the parse and was deduplicated away before the trust
+   check ran. The role name is usable even when the account field is a placeholder, so the two
+   judgements are now made independently. A tightening that reports strictly less than before is a
+   regression wearing a fix's clothes.
 
 ---
 

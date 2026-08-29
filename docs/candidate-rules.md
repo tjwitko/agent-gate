@@ -24,6 +24,8 @@ happened to produce, so the next project's ordinary idiom reads as a violation.
 | secret rotation (first cut) | `get_secret(` as a fetch | an ordinary helper of that name | false positive |
 | credential timing (first cut) | file-wide "compares in constant time" | one correct comparison beside one wrong one | false negative |
 | IRSA annotation (first cut) | a well-formed ARN as the parse gate | `<ROLE_ARN>` placeholders | false negative |
+| vacuous credentials | any string default counts as validation | `os.getenv(X, "")` | false negative |
+| credential timing | its own word list, not the header check's | `authorization` | false negative |
 
 Three of four are false positives, which is the direction that gets a gate switched off. The fix is
 the same each time: test the shape, not the spelling.
@@ -146,6 +148,36 @@ Terraform does not resolve these values at plan time, so scanning the plan canno
    check ran. The role name is usable even when the account field is a placeholder, so the two
    judgements are now made independently. A tightening that reports strictly less than before is a
    regression wearing a fix's clothes.
+
+### A remediation that named the settings but not the block
+
+Not a detection defect — a **remediation** defect, and the first of its kind here. The EKS rule
+found webhook-7's open control plane correctly and then told it:
+
+> set `endpoint_public_access = false` and reach the API through the VPC with
+> `endpoint_private_access = true`
+
+which never says those settings live inside `vpc_config`. The run put both at the top level of the
+resource, where neither is a valid argument, and spent its last four turns failing
+`terraform validate` instead of fixing anything. webhook-5 and webhook-6 had guessed the placement
+right; webhook-7 followed the text literally.
+
+The remediation now leads with placement and shows both options as HCL snippets, and a test pins
+that it names the block. **A gate that reports the defect correctly and then misdirects the fix has
+not helped** — worth checking the other rules' remediations for the same omission.
+
+### Two lists in one file disagreeing about what a credential is called
+
+webhook-7's support endpoint was recognised as protected *by* an `authorization` header, and then
+never checked for how it compares one, because `PY_CREDENTIAL_HEADER_PARAM` knew that word and
+`LEAKY_CREDENTIAL_COMPARE` did not. They now share one `CREDENTIAL_WORD` alternation.
+
+Alongside it, `os.getenv("SUPPORT_TEAM_TOKEN", "")` was treated as having a "real default" and
+exempted from the vacuous-credential check — the exact defect that check exists to find, since
+unset the expected value becomes `"Bearer "`. And the credential sat inside an f-string, so the
+"is it compared?" test, which required adjacency to the operator, saw no comparison at all. Three
+independent reasons one finding stayed silent, in a file where two of the three were written the
+same day.
 
 ---
 

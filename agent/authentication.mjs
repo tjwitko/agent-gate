@@ -173,7 +173,11 @@ function validatedAtStartup(all, name) {
     new RegExp(`if\\s*\\(?\\s*not\\s+${name}\\b`),
     new RegExp(`${name}\\s*=\\s*os\\.environ\\[`),            // raises KeyError when absent
     new RegExp(`assert\\s+${name}\\b`),
-    new RegExp(`${name}\\s*=\\s*os\\.(getenv|environ\\.get)[^\\n]*,\\s*['"\`]`), // real default
+    // A default only rescues the check if it is a real value. `os.getenv("X", "")` was accepted
+    // here, which exempted the exact defect this function exists to find: unset, the expected
+    // credential becomes the empty string and the comparison is against `"Bearer "`. Requires at
+    // least one character inside the quotes.
+    new RegExp(`${name}\\s*=\\s*os\\.(getenv|environ\\.get)[^\\n]*,\\s*(?:'[^']|"[^"]|\`[^\`])`),
   ];
   return patterns.some((re) => re.test(all));
 }
@@ -195,7 +199,7 @@ export function vacuousCredentialChecks(all) {
       // is why this check saw nothing in a deliverable that had the defect.
       const names = [envName, local].filter(Boolean);
       const compared = names.some((n) =>
-        new RegExp(`[!=]==?\\s*(process\\.env\\.)?${n}\\b|\\b${n}\\s*[!=]==?`).test(all)
+        new RegExp(`[!=]==?[^\\n]*\\b${n}\\b|\\b${n}\\b[^\\n]*[!=]==?`).test(all)
       );
       if (compared) out.push(envName);
     }
@@ -205,7 +209,10 @@ export function vacuousCredentialChecks(all) {
   while ((m = PY_ENV_CREDENTIAL.exec(all))) {
     const name = m[1];
     if (validatedAtStartup(all, name)) continue;
-    const compared = new RegExp(`[!=]==?\\s*${name}\\b|\\b${name}\\s*[!=]==?`).test(all);
+    // Adjacency to the operator is too strict: `authorization != f"Bearer {SUPPORT_TEAM_TOKEN}"`
+    // hides the name inside an f-string, and the original pattern saw no comparison at all. Same
+    // line as a comparison is the test, which also covers template literals in JS.
+    const compared = new RegExp(`[!=]==?[^\\n]*\\b${name}\\b|\\b${name}\\b[^\\n]*[!=]==?`).test(all);
     if (compared) out.push(name);
   }
   return [...new Set(out)];
@@ -221,8 +228,16 @@ export function vacuousCredentialChecks(all) {
 // support token is a better target than a signature, not a worse one: the caller may retry freely,
 // and unlike a per-payload digest the value is stable across every attempt, so a timing oracle
 // recovers one secret that then works forever.
-const LEAKY_CREDENTIAL_COMPARE =
-  /\b(\w*(?:api_?key|token|secret|credential|password)\w*)\s*(?:===?|!==?)|(?:===?|!==?)\s*(\w*(?:api_?key|token|secret|credential|password)\w*)\b/i;
+// The word list is shared with PY_CREDENTIAL_HEADER_PARAM on purpose. They drifted once: that one
+// learned `authorization` and this one did not, so a route recognised as protected BY an
+// authorization header was never checked for how it compares one. `authorization != f"Bearer ..."`
+// went unreported in a graded deliverable for exactly that reason -- two lists in one file,
+// disagreeing about what a credential is called.
+const CREDENTIAL_WORD = "api_?key|token|secret|credential|password|authorization|bearer";
+const LEAKY_CREDENTIAL_COMPARE = new RegExp(
+  `\\b(\\w*(?:${CREDENTIAL_WORD})\\w*)\\s*(?:===?|!==?)|(?:===?|!==?)\\s*(\\w*(?:${CREDENTIAL_WORD})\\w*)\\b`,
+  "i"
+);
 
 export function leakyCredentialCheck(all) {
   // Deliberately NOT gated on the file containing a constant-time comparison somewhere. That

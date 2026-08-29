@@ -953,3 +953,72 @@ test("an inline credential guard does not protect a following route", () => {
   assert.match(failures[0], /GET \/open/);
   assert.doesNotMatch(failures[0], /GET \/lookup/);
 });
+
+// --- empty defaults and f-string comparisons -----------------------------------------------------
+// From webhook-7, which passed the authentication gate clean while its support token defaulted to
+// "" and was compared with an ordinary !=.
+
+test('os.getenv(X, "") is vacuous — an empty default is not a default', () => {
+  const { failures } = run(
+    {
+      "src/main.py":
+        'SUPPORT_TEAM_TOKEN = os.getenv("SUPPORT_TEAM_TOKEN", "")\n\n' +
+        "@app.get('/support/{id}')\n" +
+        "async def get(id: str, authorization: str = Header(None)):\n" +
+        '    if authorization != f"Bearer {SUPPORT_TEAM_TOKEN}":\n' +
+        "        raise HTTPException(status_code=403)\n    return {}\n",
+    },
+    authenticationFailures
+  );
+  const v = vacuous(failures);
+  assert.equal(v.length, 1);
+  assert.match(v[0], /SUPPORT_TEAM_TOKEN/);
+});
+
+// The credential is inside an f-string, so it is not adjacent to the operator. Requiring adjacency
+// meant the comparison was invisible and the finding never fired.
+test("a credential interpolated into an f-string still counts as compared", () => {
+  const { failures } = run(
+    {
+      "src/main.py":
+        'API_TOKEN = os.getenv("API_TOKEN", "")\n' +
+        "@app.get('/x')\n" +
+        "def x(authorization: str = Header(None)):\n" +
+        '    if authorization != f"Bearer {API_TOKEN}":\n        raise HTTPException(status_code=403)\n',
+    },
+    authenticationFailures
+  );
+  assert.equal(vacuous(failures).length, 1);
+});
+
+test("a real non-empty default is still treated as validated", () => {
+  const { failures } = run(
+    {
+      "src/main.py":
+        'SUPPORT_TEAM_TOKEN = os.getenv("SUPPORT_TEAM_TOKEN", "dev-only-placeholder")\n' +
+        "@app.get('/support/{id}')\n" +
+        "def get(id: str, x_api_key: str = Header(None)):\n" +
+        "    if not compare_digest(x_api_key, SUPPORT_TEAM_TOKEN):\n        raise HTTPException(status_code=403)\n",
+    },
+    authenticationFailures
+  );
+  assert.deepEqual(vacuous(failures), []);
+});
+
+// PY_CREDENTIAL_HEADER_PARAM knew `authorization`; LEAKY_CREDENTIAL_COMPARE did not. Two lists in
+// one file disagreeing about what a credential is called.
+test("an authorization header compared with != is a timing finding", () => {
+  const { failures } = run(
+    {
+      "src/main.py":
+        'TOKEN = os.environ["TOKEN"]\n' +
+        "@app.get('/x')\n" +
+        "def x(authorization: str = Header(None)):\n" +
+        '    if authorization != f"Bearer {TOKEN}":\n        raise HTTPException(status_code=403)\n',
+    },
+    authenticationFailures
+  );
+  const timing = failures.filter((f) => /constant-time/.test(f));
+  assert.equal(timing.length, 1);
+  assert.match(timing[0], /authorization/);
+});

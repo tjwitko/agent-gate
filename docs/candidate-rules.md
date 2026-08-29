@@ -26,6 +26,7 @@ happened to produce, so the next project's ordinary idiom reads as a violation.
 | IRSA annotation (first cut) | a well-formed ARN as the parse gate | `<ROLE_ARN>` placeholders | false negative |
 | vacuous credentials | any string default counts as validation | `os.getenv(X, "")` | false negative |
 | credential timing | its own word list, not the header check's | `authorization` | false negative |
+| immutability (scope) | "any table/bucket" once the task requires it | a Terraform state backend | false positive ×4 |
 
 Three of four are false positives, which is the direction that gets a gate switched off. The fix is
 the same each time: test the shape, not the spelling.
@@ -204,6 +205,42 @@ unset the expected value becomes `"Bearer "`. And the credential sat inside an f
 "is it compared?" test, which required adjacency to the operator, saw no comparison at all. Three
 independent reasons one finding stayed silent, in a file where two of the three were written the
 same day.
+
+### Four immutability findings, none about the store the task describes
+
+A Qwen3.5-9B run built a project shape four Gemma runs never had — ten Terraform roots, an S3 state
+bucket, a DynamoDB lock table, and SQL DDL inside a Python file — and the immutability check
+produced four blocking findings, every one wrong:
+
+| reported | what it actually was |
+|---|---|
+| in-memory store `params = []` | a local variable inside a query builder |
+| s3 bucket `terraform_state` | Terraform's own state bucket |
+| dynamodb table `terraform_locks` | Terraform's state lock table |
+| relational table `"with"` | the comment `# Create table with immutable constraints` |
+
+The real store, `callbacks`, went unmentioned.
+
+**Two of these were worse than noise.** Object Lock on a state bucket, and an
+`attribute_not_exists` condition on every write to a lock table, would each break the system if
+followed — the second one prevents exactly the write that locking depends on. A false positive that
+merely fails a run wastes time; one that instructs a destructive change is a different category.
+
+Three independent causes:
+
+1. The in-memory regex allowed leading whitespace, so it matched indented locals despite its own
+   comment saying "module-level". The corroborating `.append(` test was file-wide, so any append
+   anywhere vouched for any empty collection anywhere. Both now have to concern the same name.
+2. `CREATE TABLE` was matched against text including comments. Prose about a table is not a table.
+3. `inScope = name => AUDIT_NAME.test(name) || required` put **every** table and bucket in scope
+   once the task mentioned immutability, and `exec` took whichever was declared first. Terraform
+   plumbing is now excluded by name, and among survivors a name that says what it holds is
+   preferred over one that merely came first in the file.
+
+**Why four Gemma runs never surfaced it:** all of them used a single Terraform root and no state
+backend, so "any DynamoDB table" was a safe proxy for "the audit store". It stopped being one the
+moment a project had real infrastructure plumbing — the check had been tuned on the vocabulary of
+the deliverables that happened to exist.
 
 ---
 

@@ -260,3 +260,87 @@ test("a DynamoDB condition written as an object literal counts", () => {
   );
   assert.deepEqual(failures, []);
 });
+
+// --- the webhook-8 false-positive cascade ---------------------------------------------------------
+// One Qwen run produced four immutability findings, none about the store the task describes, and
+// two carrying advice that would BREAK the system if followed. Each cause is pinned below.
+
+const REQ = { required: true };
+
+test("an indented local list is not the project's record store", () => {
+  const { stores } = run(
+    {
+      "app/database.py":
+        "def build_query(filters):\n" +
+        "        params = []\n" +
+        "        for f in filters:\n" +
+        "            params.append(f)\n" +
+        "        return params\n",
+    },
+    (d) => checkImmutability(d, REQ)
+  );
+  assert.deepEqual(stores.filter((s) => s.kind === "in-memory"), []);
+});
+
+test("a module-level collection that is appended to is still a store", () => {
+  const { stores } = run(
+    { "app/main.py": "records = []\n\ndef add(r):\n    records.append(r)\n" },
+    (d) => checkImmutability(d, REQ)
+  );
+  assert.equal(stores.filter((s) => s.kind === "in-memory").length, 1);
+});
+
+// The append test was file-wide: any .append() anywhere corroborated any empty collection anywhere.
+test("an unrelated append does not corroborate an unrelated collection", () => {
+  const { stores } = run(
+    { "app/main.py": "cache = {}\n\ndef add(r):\n    other_list.append(r)\n" },
+    (d) => checkImmutability(d, REQ)
+  );
+  assert.deepEqual(stores.filter((s) => s.kind === "in-memory"), []);
+});
+
+test("prose about a table is not a table", () => {
+  const { stores } = run(
+    {
+      "app/database.py":
+        "import psycopg2\n" +
+        "# Create table with immutable constraints\n" +
+        'cursor.execute("""\n    CREATE TABLE IF NOT EXISTS callbacks (\n      id TEXT PRIMARY KEY\n    )\n""")\n',
+    },
+    (d) => checkImmutability(d, REQ)
+  );
+  const rel = stores.find((s) => s.kind === "relational");
+  assert.ok(rel, "the real table should still be found");
+  assert.match(rel.evidence, /callbacks/);
+  assert.doesNotMatch(rel.evidence, /"with"/);
+});
+
+// Terraform's own backend is not the application's record store. Object Lock on a state bucket and
+// attribute_not_exists on a lock table would break Terraform, so this advice was worse than absent.
+test("the Terraform state bucket and lock table are not record stores", () => {
+  const { stores, unknown } = run(
+    {
+      "app/main.py": "import boto3\n",
+      "terraform/backend.tf":
+        'resource "aws_s3_bucket" "terraform_state" {\n  bucket = "tf-state"\n}\n\n' +
+        'resource "aws_dynamodb_table" "terraform_locks" {\n  name = "tf-locks"\n}\n',
+    },
+    (d) => checkImmutability(d, REQ)
+  );
+  assert.deepEqual(stores.filter((s) => /terraform/.test(s.evidence)), []);
+  assert.ok(unknown, "with only plumbing present, it must say it found nothing rather than pass");
+});
+
+test("a real store declared after the plumbing is still the one reported", () => {
+  const { stores } = run(
+    {
+      "app/main.py": "import boto3\n",
+      "terraform/backend.tf": 'resource "aws_s3_bucket" "terraform_state" {\n  bucket = "tf-state"\n}\n',
+      "terraform/s3.tf": 'resource "aws_s3_bucket" "audit_logs" {\n  bucket = "audit"\n}\n',
+    },
+    (d) => checkImmutability(d, REQ)
+  );
+  const s3 = stores.find((s) => s.kind === "s3");
+  assert.ok(s3);
+  assert.match(s3.evidence, /audit_logs/);
+});

@@ -108,8 +108,15 @@ export function checkImmutability(projectDir, { required = false } = {}) {
   // receiver storing rows in `callbacks = []` has exactly the same defect and was reported as "no
   // store could be identified", with advice to rename it. A module-level empty list or dict that
   // something appends to is a process-memory store whatever it is called.
-  const inMemory = /^\s*([A-Za-z_]\w*)\s*(?::\s*[^=]+)?=\s*(\[\]|\{\})\s*$/im.exec(all);
-  if (inMemory && /\.append\(|\.push\(/.test(all)) {
+  // Anchored at column 0: the comment above says "module-level", and the regex did not enforce it,
+  // so an indented `params = []` inside a query builder was reported as the project's record store
+  // — with advice to move the records to a durable store. And the append test was file-wide, so any
+  // .append() anywhere in the project corroborated any empty collection anywhere else. Both now
+  // have to be about the same name.
+  const inMemory = /^([A-Za-z_]\w*)\s*(?::\s*[^=]+)?=\s*(\[\]|\{\})\s*$/m.exec(all);
+  const appendsToIt =
+    inMemory && new RegExp(`\\b${inMemory[1]}\\s*\\.\\s*(append|push)\\s*\\(`).test(all);
+  if (inMemory && appendsToIt) {
     stores.push({
       kind: "in-memory",
       evidence: `${inMemory[1]} = ${inMemory[2]}`,
@@ -121,10 +128,32 @@ export function checkImmutability(projectDir, { required = false } = {}) {
   }
 
   // ---- relational (Postgres / SQLite) ------------------------------------
+  // Comments stripped first. `# Create table with immutable constraints` matched the DDL pattern
+  // and yielded a relational store called "with", complete with advice about triggers and REVOKEs
+  // for a table that does not exist. Prose about a table is not a table.
+  const codeOnly = all
+    .split("\n")
+    .filter((l) => !/^\s*(#|--|\/\/|\*)/.test(l))
+    .join("\n");
   const tableDecl =
-    /__tablename__\s*=\s*["'](\w+)["']/i.exec(all) || /CREATE TABLE(?:\s+IF NOT EXISTS)?\s+["']?(\w+)/i.exec(all);
+    /__tablename__\s*=\s*["'](\w+)["']/i.exec(codeOnly) ||
+    /CREATE TABLE(?:\s+IF NOT EXISTS)?\s+["']?(\w+)/i.exec(codeOnly);
   const usesRelational = /sqlalchemy|psycopg2|sqlite3|aws_db_instance/i.test(all);
-  const inScope = (name) => AUDIT_NAME.test(name) || required;
+  // Terraform's own backend is not the application's record store. A multi-root project with an S3
+  // state bucket and a DynamoDB lock table produced four findings, none of them about the store the
+  // task describes, and two carrying advice that would BREAK the system if followed: Object Lock on
+  // a state bucket, and attribute_not_exists on every write to a lock table, which is exactly the
+  // write locking depends on. Under `required` every table and bucket was in scope, and the first
+  // one found won.
+  const TF_PLUMBING = /terraform|tfstate|\bstate\b|\block(s|ing)?\b|backend|migration/i;
+  const inScope = (name) => !TF_PLUMBING.test(name) && (AUDIT_NAME.test(name) || required);
+
+  // Among the candidates that survive, prefer one whose name says what it holds. Taking the first
+  // match meant the state bucket won simply by being declared earlier in the file.
+  const pickStore = (re, text) => {
+    const names = [...text.matchAll(re)].map((m) => m[1]).filter(inScope);
+    return names.find((n) => AUDIT_NAME.test(n)) ?? names[0] ?? null;
+  };
   if (usesRelational && tableDecl && inScope(tableDecl[1])) {
     const hasTrigger = /CREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER[\s\S]{0,400}?BEFORE\s+(UPDATE|DELETE)/i.test(sqlText);
     const raises = /RAISE\s+(EXCEPTION|ABORT|FAIL)/i.test(sqlText);
@@ -144,9 +173,10 @@ export function checkImmutability(projectDir, { required = false } = {}) {
   }
 
   // ---- DynamoDB ----------------------------------------------------------
-  const ddbTable = /resource\s+"aws_dynamodb_table"\s+"(\w+)"/i.exec(tfText);
+  const ddbName = pickStore(/resource\s+"aws_dynamodb_table"\s+"(\w+)"/gi, tfText);
+  const anyDdbDeclared = /resource\s+"aws_dynamodb_table"/i.test(tfText);
   const usesDdb = /dynamodb/i.test(all);
-  if (usesDdb && (!ddbTable || inScope(ddbTable[1]))) {
+  if (usesDdb && (ddbName || !anyDdbDeclared)) {
     // `=` is Python's assignment; `:` is a JavaScript/TypeScript object literal, which is how the
     // AWS SDK v3 takes it. Requiring `=` cost a whole run: a TypeScript deliverable wrote
     // `ConditionExpression: "attribute_not_exists(eventId)"` in round 1, this check called it
@@ -171,21 +201,21 @@ export function checkImmutability(projectDir, { required = false } = {}) {
     }
     stores.push({
       kind: "dynamodb",
-      evidence: ddbTable ? `table "${ddbTable[1]}"` : "boto3 dynamodb client",
+      evidence: ddbName ? `table "${ddbName}"` : "boto3 dynamodb client",
       protected: missing.length === 0,
       missing: missing.join(", and "),
     });
   }
 
   // ---- S3 ----------------------------------------------------------------
-  const bucket = /resource\s+"aws_s3_bucket"\s+"(\w+)"/i.exec(tfText);
-  if (bucket && inScope(bucket[1])) {
+  const bucketName = pickStore(/resource\s+"aws_s3_bucket"\s+"(\w+)"/gi, tfText);
+  if (bucketName) {
     const locked =
       /object_lock_enabled\s*=\s*true/i.test(tfText) ||
       /resource\s+"aws_s3_bucket_object_lock_configuration"/i.test(tfText);
     stores.push({
       kind: "s3",
-      evidence: `bucket "${bucket[1]}"`,
+      evidence: `bucket "${bucketName}"`,
       protected: locked,
       missing: "Object Lock, enabled on the bucket and configured with a retention mode",
     });

@@ -27,6 +27,8 @@ happened to produce, so the next project's ordinary idiom reads as a violation.
 | vacuous credentials | any string default counts as validation | `os.getenv(X, "")` | false negative |
 | credential timing | its own word list, not the header check's | `authorization` | false negative |
 | immutability (scope) | "any table/bucket" once the task requires it | a Terraform state backend | false positive ×4 |
+| every manifest check | reads content, never asks if there is any | five zero-byte YAML files | false negative ×3 |
+| advisory parser | only lines starting "- " | a review written as prose | silent discard |
 
 Three of four are false positives, which is the direction that gets a gate switched off. The fix is
 the same each time: test the shape, not the spelling.
@@ -271,6 +273,52 @@ Two changes:
 Making that promotion safe required **resolving `${var.x}` from variable defaults**. Without it,
 `name = "${var.project_name}-role"` never matches a literal ARN and every project would look
 mismatched — the promotion would have turned one quiet advisory into a false positive on everything.
+
+### Three checks silenced at once by emptying the files they read
+
+Told to fix findings in its Kubernetes manifests, a run wrote all five of them back as **zero-byte
+files**. Its blocking failures fell from five to two, and `manifest_contract`, `k8s_manifest` and
+`iam_contract` all went quiet. They had not passed — they had been starved. The task requires
+"Kubernetes manifests for the service", and a project containing five empty YAML files satisfied
+every manifest-aware gate in the loop.
+
+This is the purest form of the failure this project keeps finding, and it was hiding under a metric
+that looked like progress: 5 failures → 2.
+
+`artifact-presence.mjs` adds two blocking checks:
+
+- **An empty file is a finding.** Not a smaller version of the work — the absence of the work
+  wearing its filename. `__init__.py`, `.gitkeep` and `.gitignore` are exempt.
+- **A task-named artifact class that the project does not contain is a finding**, judged by content
+  rather than filename: a `.yaml` with no `kind:`, a Dockerfile with no `FROM`, a `.tf` with no
+  resource block. Only for classes the task actually names.
+
+Run over the preserved deliverables it immediately found four more: **webhook-1's `terraform/eks.tf`
+and `vpc.tf` are both empty** — that project was graded B without anyone noticing its EKS and VPC
+configuration were empty files — plus an empty `Dockerfile` in webhook-9 and an empty
+`k8s/secrets.yaml` in audit-adv23.
+
+### An artifact census that is not Terraform-only
+
+The resource census is advisory *by design*: it compares resource addresses, and a rename cannot be
+told from a deletion. It also only ever looked at `.tf` files, which is why five manifests could be
+emptied under it.
+
+The new census compares **files this run produced against what they hold now, within one run**, so
+nothing it reports can be a rename or a reorganisation — and it is therefore blocking. It fires when
+a file loses its content entirely or drops below a fifth of its previous size.
+
+### An unparseable review counted as no findings
+
+Only lines beginning `- ` are read from an advisory. A structured markdown review written for this
+run had its two most substantial findings — both prose under headings — **silently discarded**,
+while the run recorded the review as delivered. A reviewer could write a thousand words and the loop
+would proceed exactly as if they had written `NONE`.
+
+Now: a non-empty review yielding no parseable line returns `inconclusive`, the same as a reviewer
+who never answered. And the request **shows** the expected format with a worked example instead of
+describing it in one line at the bottom of an 11KB document — the same lesson as the remediation
+audit, learned twice in one day.
 
 ---
 

@@ -27,6 +27,7 @@ import { manifestContractFailures } from "./manifest-contract.mjs";
 import { k8sManifestFailures } from "./k8s-manifest.mjs";
 import { secretRotationFailures } from "./secret-rotation.mjs";
 import { iamContractFailures } from "./iam-contract.mjs";
+import { artifactPresenceFailures, artifactInventory, artifactRegressions } from "./artifact-presence.mjs";
 import { SKIP_DIRS } from "./skip-dirs.mjs";
 import { ensureGitignore, isArtifact, ensureRepo } from "./commit-gate.mjs";
 // Shared with bench/, not duplicated: one definition of how this repo talks to Langfuse means the
@@ -614,7 +615,18 @@ async function runExternalAdvisor(projectDir, taskText, basePath, advisories = [
           advisories.map((a) => `- ${a}`).join("\n") + `\n\n`
         : "") +
       `---\n` +
-      `Write findings to ${answerPath}: one per line starting "- ", or the single word NONE.\n`
+      `## How to answer\n\n` +
+      `Write your review to ${answerPath}.\n\n` +
+      `ONLY lines beginning "- " are read. Headings, prose and code blocks are discarded without\n` +
+      `warning, so a finding that is not on such a line does not reach the developer. Put the whole\n` +
+      `finding on the line:\n\n` +
+      "```\n" +
+      `- The get_item check before put_item is a race: two callbacks with the same id can both read\n` +
+      `  absent and both write. Use ConditionExpression="attribute_not_exists(event_id)" instead.\n` +
+      `- SUPPORT_API_KEY is read by the app and set by no manifest, so unset it compares None to\n` +
+      `  None and the endpoint serves anyone.\n` +
+      "```\n\n" +
+      `Or the single word NONE if there is nothing to report.\n`
   );
   console.log(`[advisor] waiting for an external review`);
   console.log(`[advisor]   request: ${requestPath}`);
@@ -635,6 +647,19 @@ async function runExternalAdvisor(projectDir, taskText, basePath, advisories = [
     .split("\n")
     .map((l) => l.trim())
     .filter((l) => l.startsWith("-"));
+  // A review that says something but yields no parseable finding is NOT the same as a review that
+  // says NONE, and treating them alike let a reviewer's substantive findings vanish: a structured
+  // markdown review was written here, only its incidental bullets matched, and the two most
+  // important items -- both prose under headings -- were silently discarded while the run recorded
+  // the review as delivered. Reported as inconclusive, the same as a reviewer who never answered.
+  if (findings.length === 0) {
+    console.warn(
+      `[advisor] the review at ${answerPath} contains no line starting with "- " and is not the ` +
+        `word NONE, so nothing could be read from it — treating this run as UNREVIEWED. Findings ` +
+        `must be one per line starting "- ".`
+    );
+    return { findings: [], usage: null, inconclusive: true };
+  }
   return { findings, usage: null };
 }
 
@@ -931,6 +956,11 @@ async function lockfilePresent(projectDir) {
   }
 }
 
+// Carried across validation rounds within a single run. Module-level rather than threaded through
+// the signature because one run is one process, and the comparison is only meaningful inside a run:
+// across runs a missing file means a different project, not a regression.
+let previousInventory = null;
+
 async function validateProject(projectDir, toolRegistry, taskText = "") {
   const failures = [];
   // Reported to the reviewer, never blocking. See the resource-census block below.
@@ -1148,6 +1178,32 @@ async function validateProject(projectDir, toolRegistry, taskText = "") {
   ran.push("iam_contract");
   failures.push(...iam.failures);
   advisories.push(...iam.advisories);
+
+  // Blocking. An empty file passes every check that reads it, because there is nothing to read --
+  // a run emptied all five of its Kubernetes manifests while fixing findings in them, and three
+  // separate manifest-aware checks went quiet at once. They had not passed; they had been starved.
+  const presence = artifactPresenceFailures(projectDir, taskText);
+  ran.push("artifact_presence");
+  failures.push(...presence.failures);
+  advisories.push(...presence.advisories);
+
+  // The artifact census, across every file type rather than Terraform alone. Unlike the resource
+  // census this is unambiguous and therefore blocking: it compares files THIS run produced against
+  // what they hold now, within one run, so nothing here can be a rename.
+  const inventory = artifactInventory(projectDir);
+  const lost = artifactRegressions(previousInventory, inventory);
+  if (lost.length > 0) {
+    failures.push(
+      `artifact census: ${lost.length} file(s) held content earlier in this run and have lost most ` +
+        `or all of it — ${lost.map((l) => `${l.rel} (${l.was} chars -> ${l.now})`).join(", ")}.\n` +
+        `These are files this run wrote itself, compared against themselves, so this is not a rename ` +
+        `and not a reorganisation. Content that disappears while other findings are being fixed is ` +
+        `the failure mode this exists to catch: the checks that read those files stop reporting, ` +
+        `which looks like progress and is not.`
+    );
+  }
+  previousInventory = inventory;
+  ran.push("artifact_census");
 
   for (const dir of tfDirs) {
     const ckv = checkovAdvisory(dir, projectDir);

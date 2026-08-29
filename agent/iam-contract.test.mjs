@@ -136,3 +136,75 @@ test("no IRSA annotation means the check reports nothing rather than passing sil
   assert.equal(r.ran, false);
   assert.match(r.unknown, /no ServiceAccount declares an IRSA role annotation/);
 });
+
+// --- the webhook-9 findings ----------------------------------------------------------------------
+// The best-engineered deliverable of nine had a correct IRSA trust policy that could never bind,
+// for two independent reasons. Both are name mismatches between artifacts that are each valid alone.
+
+test("a trust policy pinning the wrong ServiceAccount is reported", () => {
+  const { failures } = run(
+    {
+      "k8s/sa.yaml": sa(GOOD_ARN),
+      "terraform/iam.tf":
+        'resource "aws_iam_openid_connect_provider" "eks" { url = "https://oidc.eks.example" }\n' +
+        role(IRSA_TRUST.replace("}", '}\n        Condition = { StringEquals = { "oidc:sub" = "system:serviceaccount:default:wrong-name" } }')),
+    },
+    iamContractFailures
+  );
+  const f = failures.find((x) => /ServiceAccount that does not exist/.test(x));
+  assert.ok(f, "the subject mismatch must be reported");
+  assert.match(f, /pins default:wrong-name/);
+  assert.match(f, /the ServiceAccount is default:app-sa/);
+  assert.match(f, /Correct shape, wrong subject/);
+});
+
+test("a trust policy pinning the right ServiceAccount is clean", () => {
+  const { failures } = run(
+    {
+      "k8s/sa.yaml": sa(GOOD_ARN),
+      "terraform/iam.tf":
+        'resource "aws_iam_openid_connect_provider" "eks" { url = "https://oidc.eks.example" }\n' +
+        role(IRSA_TRUST.replace("}", '}\n        Condition = { StringEquals = { "oidc:sub" = "system:serviceaccount:default:app-sa" } }')),
+    },
+    iamContractFailures
+  );
+  assert.deepEqual(failures, []);
+});
+
+// Interpolated role names must be resolved, or every project looks mismatched.
+test("a role name built from a variable default is matched, not flagged", () => {
+  const { failures } = run(
+    {
+      "k8s/sa.yaml": sa("arn:aws:iam::123456789012:role/proj-app-role"),
+      "terraform/vars.tf": 'variable "project_name" {\n  default = "proj"\n}\n',
+      "terraform/iam.tf":
+        'resource "aws_iam_openid_connect_provider" "eks" { url = "https://oidc.eks.example" }\n' +
+        'resource "aws_iam_role" "pod" {\n  name = "${var.project_name}-app-role"\n\n  assume_role_policy = jsonencode({\n    Statement = [\n      {\n' +
+        IRSA_TRUST +
+        '\n        Condition = { StringEquals = { "oidc:sub" = "system:serviceaccount:default:app-sa" } }\n      }\n    ]\n  })\n}\n',
+    },
+    iamContractFailures
+  );
+  assert.deepEqual(failures, []);
+});
+
+// Promoted from advisory — but only when the project actually defines roles of its own.
+test("an annotation naming an undefined role blocks when the project defines roles", () => {
+  const { failures } = run(
+    { "k8s/sa.yaml": sa("arn:aws:iam::123456789012:role/nowhere-role"), "terraform/iam.tf": role(IRSA_TRUST) },
+    iamContractFailures
+  );
+  const f = failures.find((x) => /does not define/.test(x));
+  assert.ok(f);
+  assert.match(f, /silently gets no credentials/);
+});
+
+test("the same annotation only advises when the project defines no roles at all", () => {
+  const { failures, advisories } = run(
+    { "k8s/sa.yaml": sa("arn:aws:iam::123456789012:role/managed-elsewhere") },
+    iamContractFailures
+  );
+  assert.deepEqual(failures, []);
+  assert.equal(advisories.length, 1);
+  assert.match(advisories[0], /presumably managed\s+elsewhere/);
+});

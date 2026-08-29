@@ -130,7 +130,7 @@ export function irsaAnnotatedRoles(projectDir) {
       } catch {
         continue;
       }
-      const collect = (ann, where) => {
+      const collect = (ann, where, sa = {}) => {
         const arn = ann?.[IRSA_ANNOTATION];
         if (typeof arn !== "string") return;
         const value = arn.trim();
@@ -145,17 +145,59 @@ export function irsaAnnotatedRoles(projectDir) {
           role: name ? name[1].split("/").pop() : null,
           arn: value,
           malformed: !WELL_FORMED_ROLE_ARN.test(value),
+          ...sa,
         });
       };
-      if (obj?.kind === "ServiceAccount") collect(obj.metadata?.annotations, `ServiceAccount/${obj.metadata?.name}`);
+      if (obj?.kind === "ServiceAccount") {
+        collect(obj.metadata?.annotations, `ServiceAccount/${obj.metadata?.name}`, {
+          saName: obj.metadata?.name,
+          saNamespace: obj.metadata?.namespace || "default",
+        });
+      }
       collect(obj?.spec?.template?.metadata?.annotations, `${obj?.kind}/${obj?.metadata?.name} pod template`);
     }
   }
   return out;
 }
 
+// Role names are usually interpolated. Without resolving them, `name = "${var.project_name}-role"`
+// never matches an annotation's literal ARN, and every project would look mismatched. With them
+// resolved, a real mismatch becomes visible -- webhook-9 set project_name = "webhook-receiver" and
+// then built "${var.project_name}-receiver-role", producing webhook-receiver-receiver-role while
+// its ServiceAccount pointed at webhook-receiver-role.
+function variableDefaults(projectDir) {
+  const defaults = new Map();
+  for (const f of walkFiles(projectDir, [".tf"])) {
+    const re = /variable\s+"(\w+)"\s*\{([\s\S]*?)\n\}/g;
+    let m;
+    while ((m = re.exec(f.text))) {
+      const d = /\bdefault\s*=\s*"([^"]*)"/.exec(m[2]);
+      if (d) defaults.set(m[1], d[1]);
+    }
+  }
+  return defaults;
+}
+
+function resolveInterpolation(value, defaults) {
+  if (!value) return value;
+  let out = value;
+  let passes = 0;
+  while (/\$\{var\.\w+\}/.test(out) && passes++ < 5) {
+    out = out.replace(/\$\{var\.(\w+)\}/g, (whole, name) => (defaults.has(name) ? defaults.get(name) : whole));
+  }
+  return out;
+}
+
+// The trust policy names one specific ServiceAccount. `sub` must equal
+// system:serviceaccount:<namespace>:<name> for the pod's projected token, so a role whose condition
+// names a ServiceAccount that does not exist cannot be assumed by anything -- correct shape, wrong
+// subject. Graded on a deliverable whose conditions said "webhook-receiver" while every manifest
+// and every pod used "webhook-receiver-sa".
+const SUB_CONDITION = /system:serviceaccount:([\w.-]+):([\w.-]+)/g;
+
 /** aws_iam_role blocks, with the text of each so its trust policy can be read. */
 function terraformRoles(projectDir) {
+  const defaults = variableDefaults(projectDir);
   const roles = [];
   for (const f of walkFiles(projectDir, [".tf"])) {
     const re = /resource\s+"aws_iam_role"\s+"([\w-]+)"\s*\{/g;
@@ -177,7 +219,13 @@ function terraformRoles(projectDir) {
       }
       const body = f.text.slice(m.index, end);
       const nameMatch = /\bname\s*=\s*"([^"]+)"/.exec(body);
-      roles.push({ file: f.rel, label: m[1], name: nameMatch ? nameMatch[1] : null, body });
+      roles.push({
+        file: f.rel,
+        label: m[1],
+        name: nameMatch ? resolveInterpolation(nameMatch[1], defaults) : null,
+        rawName: nameMatch ? nameMatch[1] : null,
+        body,
+      });
     }
   }
   return roles;
@@ -198,6 +246,7 @@ export function checkIrsa(projectDir) {
 
   const broken = [];
   const unmatched = [];
+  const mismatchedSubject = [];
 
   // A ${...} value is already reported by the k8s manifest check, which owns unexpanded
   // interpolation wherever it appears. Reporting it here too would give one defect two names and
@@ -211,7 +260,21 @@ export function checkIrsa(projectDir) {
     }
     const federated = FEDERATED_PRINCIPAL.test(role.body);
     const webIdentity = WEB_IDENTITY.test(role.body);
-    if (webIdentity && federated) continue;
+    if (webIdentity && federated) {
+      // Right shape, wrong subject. The condition pins one ServiceAccount by name; if that is not
+      // the ServiceAccount carrying the annotation, the projected token's `sub` never matches and
+      // the role cannot be assumed. Only checked when this annotation came from a ServiceAccount
+      // object, since a pod-template annotation does not tell us the account's own name.
+      if (a.saName) {
+        SUB_CONDITION.lastIndex = 0;
+        const subs = [...role.body.matchAll(SUB_CONDITION)].map((x) => `${x[1]}:${x[2]}`);
+        const expected = `${a.saNamespace}:${a.saName}`;
+        if (subs.length > 0 && !subs.includes(expected)) {
+          mismatchedSubject.push({ ...a, roleFile: role.file, expected, found: subs });
+        }
+      }
+      continue;
+    }
 
     // Say which half is wrong. Both halves are required and they fail for different reasons: a
     // Service principal is an instance-profile trust a pod can never use, while a Federated
@@ -226,7 +289,8 @@ export function checkIrsa(projectDir) {
         : "names neither a Federated principal nor sts:AssumeRoleWithWebIdentity";
     broken.push({ ...a, roleFile: role.file, reason, hasOidcProvider });
   }
-  return { ran: true, unknown: null, broken, unmatched, malformed, hasOidcProvider };
+  const definesRoles = roles.length > 0;
+  return { ran: true, unknown: null, broken, unmatched, mismatchedSubject, malformed, definesRoles, hasOidcProvider };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -288,12 +352,43 @@ export function iamContractFailures(projectDir) {
     );
   }
 
-  if (irsa.ran && irsa.unmatched.length > 0) {
-    advisories.push(
-      `iam: ${irsa.unmatched.length} IRSA annotation(s) name a role this project does not define — ` +
-        `${irsa.unmatched.map((u) => `${u.where} -> ${u.role}`).join("; ")}. If the role is managed ` +
-        `elsewhere this is fine; if it was meant to be here, the annotation points at nothing.`
+  if (irsa.ran && irsa.mismatchedSubject.length > 0) {
+    const list = irsa.mismatchedSubject
+      .map((x) => `${x.where} -> role "${x.role}" (${x.roleFile}) pins ${x.found.join(", ")}, but the ServiceAccount is ${x.expected}`)
+      .join("; ");
+    failures.push(
+      `iam: ${irsa.mismatchedSubject.length} IRSA trust ${irsa.mismatchedSubject.length === 1 ? "policy names" : "policies name"} ` +
+        `a ServiceAccount that does not exist — ${list}.\n` +
+        `The trust policy has the right shape, which is what makes this one hard to see: it allows ` +
+        `sts:AssumeRoleWithWebIdentity from the cluster's OIDC provider, and then pins the wrong ` +
+        `subject. The projected token carries sub=system:serviceaccount:<namespace>:<name> for the ` +
+        `ServiceAccount the pod actually runs as, STS compares it literally, and no pod can ever ` +
+        `satisfy a condition naming an account that does not exist. Correct shape, wrong subject.`
     );
+  }
+
+  // Promoted from advisory. "The role is managed elsewhere" is a real case, so it still only
+  // advises when the project defines no IAM roles at all. When it defines roles but not this one,
+  // the annotation points at nothing and that is never correct -- and on this project's own
+  // repeated measurement, a finding that only advises does not get acted on.
+  if (irsa.ran && irsa.unmatched.length > 0) {
+    const list = irsa.unmatched.map((u) => `${u.where} -> ${u.role}`).join("; ");
+    if (irsa.definesRoles) {
+      failures.push(
+        `iam: ${irsa.unmatched.length} IRSA annotation(s) name a role this project does not define — ` +
+          `${list}.\n` +
+          `This configuration does define IAM roles, so the annotation is not deferring to one ` +
+          `managed elsewhere — the names simply do not line up, usually because the role's name is ` +
+          `built from a variable and the annotation was written by hand. Nothing fails at apply: ` +
+          `the manifest is valid, the roles are created, and the pod silently gets no credentials.`
+      );
+    } else {
+      advisories.push(
+        `iam: ${irsa.unmatched.length} IRSA annotation(s) name a role this project does not define — ` +
+          `${list}. This configuration defines no IAM roles at all, so the role is presumably managed ` +
+          `elsewhere; confirm it exists and that its trust policy names these ServiceAccounts.`
+      );
+    }
   }
 
   return { failures, advisories };

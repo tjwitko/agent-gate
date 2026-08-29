@@ -242,6 +242,36 @@ backend, so "any DynamoDB table" was a safe proxy for "the audit store". It stop
 moment a project had real infrastructure plumbing — the check had been tuned on the vocabulary of
 the deliverables that happened to exist.
 
+### An IRSA trust policy with the right shape and the wrong subject
+
+webhook-9 wrote the first genuinely correct IRSA trust policy of any run —
+`sts:AssumeRoleWithWebIdentity`, a `Federated` principal referencing the OIDC provider *resource*,
+and a `:sub` condition — and it still could not bind, for two independent reasons:
+
+| the configuration says | reality |
+|---|---|
+| condition pins `system:serviceaccount:default:webhook-receiver` | the ServiceAccount is `webhook-receiver-sa` |
+| annotation points at `webhook-receiver-role` | `project_name` defaults to `webhook-receiver`, so Terraform builds `webhook-receiver-receiver-role` |
+
+Every artifact is valid on its own. Nothing fails at apply. The roles are created, the manifests
+apply, and the pods silently get no credentials.
+
+Two changes:
+
+1. **The `:sub` condition is now compared against the ServiceAccount carrying the annotation.** The
+   check previously verified the trust policy's *shape* and stopped — which is why it passed a
+   policy that no pod on earth could satisfy. Only applied to annotations on ServiceAccount objects,
+   since a pod-template annotation does not name the account.
+2. **"Names a role this project does not define" was promoted from advisory to blocking** — but only
+   when the project defines IAM roles of its own. "Managed elsewhere" is a real case and still only
+   advises when the configuration declares no roles at all. On this project's own repeated
+   measurement, a finding that merely advises does not get acted on, and an annotation pointing at a
+   role the same configuration fails to create is never correct.
+
+Making that promotion safe required **resolving `${var.x}` from variable defaults**. Without it,
+`name = "${var.project_name}-role"` never matches a literal ARN and every project would look
+mismatched — the promotion would have turned one quiet advisory into a false positive on everything.
+
 ---
 
 ## Open

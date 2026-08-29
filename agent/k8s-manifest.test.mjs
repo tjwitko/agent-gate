@@ -135,3 +135,15 @@ test("a CronJob's nested pod spec is still read for misplaced fields", () => {
   assert.equal(misplaced.length, 1);
   assert.equal(misplaced[0].field, "image");
 });
+
+// A probe is a container field, and CONTAINER_ONLY_FIELDS in this same module flags container
+// fields found on the pod spec. A remediation that said "add a readinessProbe" without saying where
+// could induce the very defect its sibling check catches.
+test("the probe remediation shows the probe inside the container", () => {
+  const { failures } = run(
+    { "k8s/deployment.yaml": deployment({ probe: false }), "app/main.py": APP_WITH_HEALTH },
+    k8sManifestFailures
+  );
+  assert.match(failures[0], /CONTAINER field, not a pod-spec one/);
+  assert.match(failures[0], /containers:[\s\S]*readinessProbe:[\s\S]*httpGet:/);
+});

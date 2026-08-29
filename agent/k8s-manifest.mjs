@@ -195,8 +195,17 @@ export function k8sManifestFailures(projectDir) {
         `An unwired health endpoint is worse than none: the load balancer has nothing to ask, so it ` +
         `keeps routing to a pod that cannot serve. Observed exactly that way — a receiver answered ` +
         `/health with 200 while every real request failed, because the health path tested nothing ` +
-        `the requests depended on. Add a readinessProbe httpGet on that path, and make it check the ` +
-        `dependencies a request actually needs.`
+        `the requests depended on.\n` +
+        `A probe is a CONTAINER field, not a pod-spec one — the misplaced-field check above fires ` +
+        `on exactly that mistake, so this remediation shows the placement rather than describing it:\n` +
+        `  containers:\n` +
+        `  - name: ${r.unprobed[0].container}\n` +
+        `    readinessProbe:\n` +
+        `      httpGet:\n` +
+        `        path: ${r.unprobed[0].health}\n` +
+        `        port: <containerPort>\n` +
+        `Make it check the dependencies a request actually needs: a probe that only proves the ` +
+        `process is listening tells the load balancer nothing it did not already know.`
     );
   }
 

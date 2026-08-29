@@ -164,7 +164,33 @@ right; webhook-7 followed the text literally.
 
 The remediation now leads with placement and shows both options as HCL snippets, and a test pins
 that it names the block. **A gate that reports the defect correctly and then misdirects the fix has
-not helped** — worth checking the other rules' remediations for the same omission.
+not helped.**
+
+**The audit of the rest of the pack found two more, one of which had already cost a run.**
+
+| rule | attribute | lives in | was it said? |
+|---|---|---|---|
+| `sg-open-ingress-sensitive-port` (inline form) | `cidr_blocks` | `ingress { }` | no — fixed |
+| `s3-object-lock-retention-mode-missing` | `mode` | `rule { default_retention { } }` | no — fixed |
+| `k8s_manifest` unwired probe | `readinessProbe` | a container entry | no — fixed |
+| `imdsv1-allowed` | `http_tokens` | `metadata_options { }` | **yes**, already showed the block |
+| `sg-open-ingress` (rule form) | `cidr_ipv4` | top level | correct as written |
+| rds, kms, public-access-block, object-lock-enabled | all | top level | correct as written |
+
+The object-lock one is the instructive case: webhook-5 wrote `mode = "COMPLIANCE"` directly under
+`aws_s3_bucket_object_lock_configuration` and took three turns to recover. That was recorded at the
+time as the model's own nesting mistake. It was the message's.
+
+The probe one is worse in kind — `readinessProbe` is a container field, and `CONTAINER_ONLY_FIELDS`
+in the *same module* flags container fields found on a pod spec, so that remediation could have
+induced the exact defect its sibling check catches.
+
+`lib/source-scan.mjs` is clean for this failure mode: every one of its remediations acts on a value
+already present in place rather than telling the reader to add an attribute somewhere.
+
+A standing test now walks the pack and fails if any rule names a known nested-block attribute
+without naming its block, so a new rule that forgets this fails in CI rather than in a benchmark run
+four hours later.
 
 ### Two lists in one file disagreeing about what a credential is called
 

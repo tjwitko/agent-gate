@@ -368,7 +368,46 @@ reason, which means the line gets attention, but nothing states the real defect.
 closed to everyone. Being wrong in the reassuring direction and wrong in the alarming direction are
 both wrong, but only one of them sends someone to read the code.
 
-### 2. Retention is never verified against the stated period
+### 2. A trust-policy condition under a key IAM does not recognise
+
+webhook-10's IRSA trust policy reads:
+
+```hcl
+Conditions = {                                    # IAM's element is Condition, singular
+  StringEquals = {
+    "oidc.eks.region.amazonaws.com:sub" = "system:serviceaccount:default:webhook-receiver-sa"
+  }
+}
+```
+
+The subject is correct — it names the ServiceAccount the project actually declares — and the
+`:sub` check introduced in `a70927d` compares it and reports it satisfied. But `Conditions` is not
+an element of the IAM policy grammar, whose statement keys are `Sid`, `Effect`, `Principal`,
+`NotPrincipal`, `Action`, `NotAction`, `Resource`, `NotResource` and `Condition`.
+
+**The check therefore certifies a restriction that may not be in force**, which is worse than not
+looking: a false assurance on the one control that decides which pod may assume the role.
+
+**Both possible outcomes are bad, and which one applies is not yet established:**
+
+- if IAM rejects the unknown key, `terraform apply` fails with `MalformedPolicyDocument` — visible,
+  but the gate will have passed a configuration that cannot deploy;
+- if IAM ignores it, the trust policy carries **no subject restriction at all**, and any identity
+  the cluster's OIDC provider can issue a token for may assume the role. That is a serious hole
+  wearing the appearance of a correctly scoped trust.
+
+Resolving it needs a real account: create the role with `Conditions` and see whether the API
+rejects it. That has not been done, and the entry should not be acted on until it has — writing
+the check against the wrong assumption would produce either a false positive on a working
+configuration or a message that describes the wrong failure.
+
+The same policy also writes `oidc-providers/` where the ARN path is `oidc-provider/`, and the
+literal string `region` where the region belongs. Neither is currently checked either.
+
+**Shape to test, not spelling:** a statement key that is not in the IAM grammar, and a condition
+key that no statement in the document actually uses. Both are cheap once the semantics are known.
+
+### 3. Retention is never verified against the stated period
 
 The task says "records are retained for seven years". Nothing checks that a configured retention
 matches the requirement. webhook-5 got this right (Object Lock COMPLIANCE, 2555 days) and so did
@@ -379,7 +418,7 @@ needs the requirement parsed out and compared against a plan value, which is a d
 check from everything else here. A version that assumed seven years universally would be
 benchmark-hardcoding of exactly the kind this file exists to catch.
 
-### 3. Client errors surfacing as 500
+### 4. Client errors surfacing as 500
 
 webhook-5 wraps its handler body in `except Exception`, which catches the `HTTPException(400)` it
 raises itself and re-raises it as a 500 carrying `"400: Missing event ID"` — leaking the intended

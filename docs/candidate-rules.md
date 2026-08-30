@@ -320,6 +320,35 @@ who never answered. And the request **shows** the expected format with a worked 
 describing it in one line at the bottom of an 11KB document — the same lesson as the remediation
 audit, learned twice in one day.
 
+### Kubernetes managed through Terraform, seen at last
+
+`k8s-manifest.mjs` and `iam-contract.mjs` found Kubernetes objects by walking `.yaml`/`.yml`, so a
+project declaring `kubernetes_deployment` and `kubernetes_service_account` through Terraform's
+provider was invisible to both. webhook-10 did exactly that, and both checks reported "nothing to
+inspect" on a project whose Kubernetes configuration was complete.
+
+`hcl-blocks.mjs` factors out the structure both now share — brace-matched, because HCL nests
+`resource > spec > template > spec > container > liveness_probe` and a fixed window would read one
+container's settings into another's verdict. `manifest-contract.mjs` had already solved the same
+problem with `TF_KUBERNETES_WORKLOAD`; this is that idea made common.
+
+**Two findings were deliberately NOT ported, and the reasoning matters more than the code:**
+
+- The **`${...}` finding must not apply to `.tf`.** In HCL that is Terraform interpolation, which
+  Terraform expands. Porting it wholesale would have turned every correct Terraform-managed manifest
+  into a blocking failure — the exact false-positive shape this file exists to record.
+- The **misplaced-container-field finding is already covered for this shape** by `terraform
+  validate`, which reports an argument in the wrong block as a schema error. That is precisely how
+  webhook-10's `kubernetes_ingress` defect was caught. Duplicating it would give one defect two
+  names.
+
+So the gap is closed where nothing else looks, and left alone where something already does.
+
+A related subtlety in the IRSA path: the annotation value in Terraform is normally a reference —
+`aws_iam_role.app.arn` — not a literal ARN. That is the *correct* way to write it and resolves by
+resource label, so it is explicitly not treated as the placeholder a hand-written `<ROLE_ARN>` is.
+Getting that backwards would have punished the projects doing it properly.
+
 ---
 
 ## Open
@@ -339,32 +368,7 @@ reason, which means the line gets attention, but nothing states the real defect.
 closed to everyone. Being wrong in the reassuring direction and wrong in the alarming direction are
 both wrong, but only one of them sends someone to read the code.
 
-### 2. Kubernetes managed through Terraform is invisible to two checks
-
-`k8s-manifest.mjs` and `iam-contract.mjs` both find Kubernetes objects by walking `.yaml`/`.yml`.
-webhook-10 moved its entire Kubernetes configuration into `terraform/main.tf` as
-`kubernetes_deployment`, `kubernetes_service`, `kubernetes_ingress`, `kubernetes_config_map` and
-`kubernetes_service_account` — a legitimate and fairly common way to run EKS — and both checks
-found nothing to inspect.
-
-Unchecked in that shape: liveness/readiness probes, container fields misplaced onto the pod spec,
-`${...}` interpolation, IRSA role annotations, and the `:sub` condition matching. Every finding
-those two modules produce.
-
-**Neither passes silently**, which is the mitigating detail — `k8s_manifest` reports "no Kubernetes
-manifests found" and `iam_contract` reports "no ServiceAccount declares an IRSA role annotation".
-They are advisories saying *not checked*, so the failure is a blind spot rather than a false clean.
-
-**`manifest-contract.mjs` already solved this**, and is the model to copy rather than a fourth
-casualty: it carries `TF_KUBERNETES_WORKLOAD`, `TF_ENV_BLOCK` and `TF_ENV_FROM`, reads `.tf`
-alongside YAML, and correctly reported webhook-10's four environment variables as supplied by the
-Terraform-managed Deployment. The precedent, and the regexes, are in the same repository.
-
-Worth doing because the alternative is a class of project where three quarters of the Kubernetes
-checks quietly do not apply — and because a project sophisticated enough to manage its cluster from
-Terraform is not the one whose manifests need the least review.
-
-### 3. Retention is never verified against the stated period
+### 2. Retention is never verified against the stated period
 
 The task says "records are retained for seven years". Nothing checks that a configured retention
 matches the requirement. webhook-5 got this right (Object Lock COMPLIANCE, 2555 days) and so did
@@ -375,7 +379,7 @@ needs the requirement parsed out and compared against a plan value, which is a d
 check from everything else here. A version that assumed seven years universally would be
 benchmark-hardcoding of exactly the kind this file exists to catch.
 
-### 4. Client errors surfacing as 500
+### 3. Client errors surfacing as 500
 
 webhook-5 wraps its handler body in `except Exception`, which catches the `HTTPException(400)` it
 raises itself and re-raises it as a 500 carrying `"400: Missing event ID"` — leaking the intended

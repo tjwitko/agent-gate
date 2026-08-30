@@ -147,3 +147,48 @@ test("the probe remediation shows the probe inside the container", () => {
   assert.match(failures[0], /CONTAINER field, not a pod-spec one/);
   assert.match(failures[0], /containers:[\s\S]*readinessProbe:[\s\S]*httpGet:/);
 });
+
+// --- Kubernetes managed through Terraform ---------------------------------------------------------
+// A project declaring kubernetes_deployment instead of a YAML manifest was invisible to this check.
+
+const TF_DEPLOYMENT = (probe) =>
+  'resource "kubernetes_deployment" "app" {\n  metadata {\n    name = "webhook-receiver"\n  }\n' +
+  "  spec {\n    template {\n      spec {\n" +
+  '        container {\n          name  = "receiver"\n          image = "app:latest"\n' +
+  (probe ? "          readiness_probe {\n            http_get {\n              path = \"/health\"\n            }\n          }\n" : "") +
+  "        }\n      }\n    }\n  }\n}\n";
+
+test("a Terraform-managed workload with no probe is flagged", () => {
+  const { failures } = run(
+    { "terraform/k8s.tf": TF_DEPLOYMENT(false), "app/main.py": APP_WITH_HEALTH },
+    k8sManifestFailures
+  );
+  assert.equal(failures.length, 1);
+  assert.match(failures[0], /no liveness, readiness or startup probe/);
+  assert.match(failures[0], /receiver/);
+});
+
+test("a Terraform-managed workload with a probe is clean", () => {
+  const { failures } = run(
+    { "terraform/k8s.tf": TF_DEPLOYMENT(true), "app/main.py": APP_WITH_HEALTH },
+    k8sManifestFailures
+  );
+  assert.deepEqual(failures, []);
+});
+
+// ${...} is Terraform interpolation, which Terraform expands. Flagging it here would convert a
+// correct configuration into a blocking failure — the finding is for YAML only.
+test("${...} in Terraform is not the unexpanded-interpolation finding", () => {
+  const tf =
+    'resource "kubernetes_deployment" "app" {\n  metadata {\n    name = "${var.project}-receiver"\n  }\n' +
+    '  spec {\n    template {\n      spec {\n        container {\n          name = "c"\n' +
+    "          readiness_probe {\n            http_get {\n              path = \"/health\"\n            }\n          }\n" +
+    "        }\n      }\n    }\n  }\n}\n";
+  const { failures } = run({ "terraform/k8s.tf": tf, "app/main.py": APP_WITH_HEALTH }, k8sManifestFailures);
+  assert.deepEqual(failures, []);
+});
+
+test("neither YAML nor Terraform workloads means not-checked, not a pass", () => {
+  const { advisories } = run({ "app/main.py": APP_WITH_HEALTH }, k8sManifestFailures);
+  assert.match(advisories[0], /in YAML or in Terraform/);
+});

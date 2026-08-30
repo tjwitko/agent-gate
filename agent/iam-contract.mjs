@@ -8,6 +8,7 @@ import { readdirSync, readFileSync, statSync } from "fs";
 import path from "path";
 import { parseAllDocuments } from "yaml";
 import { SKIP_DIRS } from "./skip-dirs.mjs";
+import { hclResources, hclBlocks, hclAttr, TF_SERVICE_ACCOUNT } from "./hcl-blocks.mjs";
 
 const MAX_FILE_BYTES = 512 * 1024;
 
@@ -235,9 +236,47 @@ const WEB_IDENTITY = /sts:AssumeRoleWithWebIdentity/;
 const FEDERATED_PRINCIPAL = /\bFederated\b/;
 const SERVICE_PRINCIPAL = /\bService\s*=\s*"([^"]+)"|"Service"\s*:\s*"([^"]+)"/;
 
+// ServiceAccounts declared through Terraform rather than as YAML. A project managing its cluster
+// from Terraform had no IRSA annotation this check could see, so neither the trust-policy verdict
+// nor the :sub comparison ran at all.
+//
+// The annotation value there is usually a reference — `aws_iam_role.app.arn` — not a literal ARN.
+// That is the CORRECT way to write it, and it resolves by resource label, so it must not be treated
+// as the placeholder a literal `<ROLE_ARN>` is. Getting that backwards would punish the projects
+// doing it properly.
+const TF_ROLE_REFERENCE = /aws_iam_role\.([\w-]+)\.arn/;
+const TF_IRSA_ANNOTATION = /["']eks\.amazonaws\.com\/role-arn["']\s*=\s*("([^"]*)"|[^\n,}]+)/;
+
+function terraformIrsaAnnotations(projectDir) {
+  const out = [];
+  for (const f of walkFiles(projectDir, [".tf"])) {
+    for (const r of hclResources(f.text, TF_SERVICE_ACCOUNT)) {
+      const meta = hclBlocks(r.body, "metadata")[0] ?? r.body;
+      const m = TF_IRSA_ANNOTATION.exec(meta);
+      if (!m) continue;
+      const raw = (m[2] ?? m[1]).trim();
+      const ref = TF_ROLE_REFERENCE.exec(raw);
+      const literal = ROLE_NAME_FROM_ARN.exec(raw);
+      out.push({
+        file: f.rel,
+        where: `kubernetes_service_account.${r.label}`,
+        saName: hclAttr(meta, "name") ?? r.label,
+        saNamespace: hclAttr(meta, "namespace") ?? "default",
+        arn: raw,
+        // A resource reference names the role by label and is resolvable; only a hand-written
+        // string can be malformed.
+        role: ref ? ref[1] : literal ? literal[1].split("/").pop() : null,
+        malformed: ref ? false : !WELL_FORMED_ROLE_ARN.test(raw),
+      });
+    }
+  }
+  return out;
+}
+
 export function checkIrsa(projectDir) {
-  const annotated = irsaAnnotatedRoles(projectDir);
-  if (annotated.length === 0) return { ran: false, unknown: "no ServiceAccount declares an IRSA role annotation", broken: [], unmatched: [] };
+  const annotated = [...irsaAnnotatedRoles(projectDir), ...terraformIrsaAnnotations(projectDir)];
+  if (annotated.length === 0)
+    return { ran: false, unknown: "no ServiceAccount declares an IRSA role annotation, in YAML or in Terraform", broken: [], unmatched: [], mismatchedSubject: [], malformed: [] };
 
   const roles = terraformRoles(projectDir);
   const hasOidcProvider = walkFiles(projectDir, [".tf"]).some((f) =>

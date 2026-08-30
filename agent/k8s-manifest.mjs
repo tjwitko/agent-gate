@@ -14,6 +14,7 @@ import { readdirSync, readFileSync, statSync } from "fs";
 import path from "path";
 import { parseAllDocuments } from "yaml";
 import { SKIP_DIRS } from "./skip-dirs.mjs";
+import { hclResources, hclBlocks, hclAttr, TF_SERVER_WORKLOAD } from "./hcl-blocks.mjs";
 
 const MAX_FILE_BYTES = 512 * 1024;
 
@@ -105,10 +106,39 @@ export function healthRoutes(projectDir) {
   return found;
 }
 
+// Workloads declared through Terraform's kubernetes provider rather than as YAML. Only the probe
+// finding is ported, deliberately:
+//
+//   - the ${...} finding must NOT apply here. In HCL that is Terraform interpolation, which
+//     Terraform expands; flagging it would turn a correct configuration into a blocking failure.
+//   - the misplaced-container-field finding is already covered for this shape by `terraform
+//     validate`, which reports an argument in the wrong block as a schema error. That is exactly
+//     how the kubernetes_ingress defect in the run that prompted this was caught.
+//
+// So this closes the gap where nothing else looks, and leaves alone the two where something does.
+function terraformWorkloadContainers(projectDir) {
+  const out = [];
+  for (const f of walkFiles(projectDir, [".tf"])) {
+    for (const r of hclResources(f.text, TF_SERVER_WORKLOAD)) {
+      for (const c of hclBlocks(r.body, "container")) {
+        out.push({
+          file: f.rel,
+          kind: r.type,
+          name: hclAttr(r.body, "name") ?? r.label,
+          container: hclAttr(c, "name") ?? "(unnamed)",
+          hasProbe: /\b(liveness_probe|readiness_probe|startup_probe)\s*\{/.test(c),
+        });
+      }
+    }
+  }
+  return out;
+}
+
 export function checkK8sManifests(projectDir) {
   const docs = manifestDocs(projectDir);
-  if (docs.length === 0) {
-    return { ran: false, unknown: "no Kubernetes manifests found", misplaced: [], unexpanded: [], unprobed: [] };
+  const tfContainers = terraformWorkloadContainers(projectDir);
+  if (docs.length === 0 && tfContainers.length === 0) {
+    return { ran: false, unknown: "no Kubernetes manifests found, in YAML or in Terraform", misplaced: [], unexpanded: [], unprobed: [] };
   }
 
   const misplaced = [];
@@ -150,6 +180,14 @@ export function checkK8sManifests(projectDir) {
         if (probes.length === 0) {
           unprobed.push({ file, kind: doc.kind, name: doc.metadata?.name ?? "(unnamed)", container: c.name, health: health[0].path });
         }
+      }
+    }
+  }
+
+  if (health.length > 0) {
+    for (const c of tfContainers) {
+      if (!c.hasProbe) {
+        unprobed.push({ file: c.file, kind: c.kind, name: c.name, container: c.container, health: health[0].path });
       }
     }
   }

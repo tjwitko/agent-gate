@@ -208,3 +208,56 @@ test("the same annotation only advises when the project defines no roles at all"
   assert.equal(advisories.length, 1);
   assert.match(advisories[0], /presumably managed\s+elsewhere/);
 });
+
+// --- IRSA declared through Terraform --------------------------------------------------------------
+
+const TF_SA = (annotation) =>
+  'resource "kubernetes_service_account" "app" {\n  metadata {\n    name = "app-sa"\n' +
+  `    annotations = {\n      "eks.amazonaws.com/role-arn" = ${annotation}\n    }\n  }\n}\n`;
+
+const TF_ROLE_OK =
+  'resource "aws_iam_openid_connect_provider" "eks" { url = "https://oidc.eks.example" }\n' +
+  'resource "aws_iam_role" "pod" {\n  name = "app-role"\n  assume_role_policy = jsonencode({\n    Statement = [{\n' +
+  '      Action = "sts:AssumeRoleWithWebIdentity"\n      Principal = { Federated = aws_iam_openid_connect_provider.eks.arn }\n' +
+  '      Condition = { StringEquals = { "oidc:sub" = "system:serviceaccount:default:app-sa" } }\n    }]\n  })\n}\n';
+
+// A resource reference is the CORRECT way to write the annotation and resolves by label. Treating
+// it as a placeholder would punish exactly the projects doing this properly.
+test("an annotation referencing the role resource is resolved, not called malformed", () => {
+  const { failures } = run(
+    { "terraform/k8s.tf": TF_SA("aws_iam_role.pod.arn"), "terraform/iam.tf": TF_ROLE_OK },
+    iamContractFailures
+  );
+  assert.deepEqual(failures, []);
+});
+
+test("a Terraform ServiceAccount still gets its trust policy judged", () => {
+  const badTrust = TF_ROLE_OK.replace('"sts:AssumeRoleWithWebIdentity"', '"sts:AssumeRole"').replace(
+    "Federated = aws_iam_openid_connect_provider.eks.arn",
+    'Service = "ec2.amazonaws.com"'
+  );
+  const { failures } = run(
+    { "terraform/k8s.tf": TF_SA("aws_iam_role.pod.arn"), "terraform/iam.tf": badTrust },
+    iamContractFailures
+  );
+  assert.ok(failures.find((f) => /instance-profile trust/.test(f)));
+});
+
+test("a Terraform ServiceAccount gets its :sub compared too", () => {
+  const wrongSub = TF_ROLE_OK.replace("default:app-sa", "default:app");
+  const { failures } = run(
+    { "terraform/k8s.tf": TF_SA("aws_iam_role.pod.arn"), "terraform/iam.tf": wrongSub },
+    iamContractFailures
+  );
+  const f = failures.find((x) => /ServiceAccount that does not exist/.test(x));
+  assert.ok(f);
+  assert.match(f, /pins default:app,/);
+});
+
+test("a hand-written placeholder in Terraform is still a finding", () => {
+  const { failures } = run(
+    { "terraform/k8s.tf": TF_SA('"<ROLE_ARN>"'), "terraform/iam.tf": TF_ROLE_OK },
+    iamContractFailures
+  );
+  assert.ok(failures.find((f) => /are not a role ARN/.test(f)));
+});

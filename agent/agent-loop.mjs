@@ -28,6 +28,7 @@ import { k8sManifestFailures } from "./k8s-manifest.mjs";
 import { secretRotationFailures } from "./secret-rotation.mjs";
 import { iamContractFailures } from "./iam-contract.mjs";
 import { artifactPresenceFailures, artifactInventory, artifactRegressions } from "./artifact-presence.mjs";
+import { codeQualityFailures } from "./code-quality.mjs";
 import { SKIP_DIRS } from "./skip-dirs.mjs";
 import { ensureGitignore, isArtifact, ensureRepo } from "./commit-gate.mjs";
 // Shared with bench/, not duplicated: one definition of how this repo talks to Langfuse means the
@@ -1265,6 +1266,15 @@ export async function validateProject(projectDir, toolRegistry, taskText = "") {
   // a run emptied all five of its Kubernetes manifests while fixing findings in them, and three
   // separate manifest-aware checks went quiet at once. They had not passed; they had been starved.
   const presence = guarded("artifact_presence", () => artifactPresenceFailures(projectDir, taskText));
+
+  // The only check here that is not security-shaped. A three-run series with an unchanged gate
+  // produced a deliverable with clearly the best architecture and the WORST gate score: nothing
+  // measured structure, tests or error handling, so gate score and code quality were uncorrelated
+  // and no amount of adding security rules would have changed that. Gated on the task asking for
+  // the property, like immutability — a project nobody asked to test is not defective untested.
+  const quality = guarded("code_quality", () => codeQualityFailures(projectDir, taskText));
+  failures.push(...quality.failures);
+  advisories.push(...quality.advisories);
   failures.push(...presence.failures);
   advisories.push(...presence.advisories);
 

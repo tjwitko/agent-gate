@@ -30,7 +30,14 @@ import path from "path";
 
 import { SKIP_DIRS } from "./skip-dirs.mjs";
 
-const READ_EXT = new Set([".py", ".sql", ".tf", ".tfvars", ".js", ".mjs", ".ts", ".yaml", ".yml"]);
+// .go, .rb and .java were absent, so this check could not read a Go deliverable's source at all —
+// it reported a project that HAD its immutability control as having none, and no amount of fixing
+// the pattern would have helped because the file was never opened. The language list must track the
+// languages the loop can actually build, which build_check already detects at runtime.
+const READ_EXT = new Set([
+  ".py", ".sql", ".tf", ".tfvars", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".go", ".rb", ".java",
+  ".yaml", ".yml",
+]);
 
 // The store is in scope only if it names itself after an audit trail. Deliberately narrow: firing
 // on every table would make this noise, and noise is how a blocking check gets switched off.
@@ -183,7 +190,13 @@ export function checkImmutability(projectDir, { required = false } = {}) {
     // missing in all five validation rounds, and the model rewrote that file six times trying to
     // satisfy a condition it had already met, then failed on the fourth round. A false positive in
     // a blocking gate does not merely fail to catch something -- it actively destroys the work.
-    const conditional = /ConditionExpression\s*[:=]\s*["'`][^"'`]*attribute_not_exists/i.test(all);
+    // The value may be wrapped before the string. Go's SDK writes
+    // `ConditionExpression: aws.String("attribute_not_exists(id)")`, and requiring a quote directly
+    // after the separator reported that as missing — a Go deliverable that HAD the control was told
+    // it did not. Exactly the defect that cost a run when this pattern required `=` and TypeScript
+    // wrote `:`; a third language, the same assumption about spelling.
+    const conditional =
+      /condition_?expression\s*[:=]\s*(?:[\w.]+\s*\(\s*)?["'`][^"'`]*attribute_not_exists/i.test(all);
     // Only judge the IAM policy if one actually grants DynamoDB actions here.
     const grants = [...tfText.matchAll(/"dynamodb:(\w+)"/g)].map((m) => m[1]);
     const mutating = grants.filter((a) => /^(DeleteItem|UpdateItem|BatchWriteItem)$/i.test(a));

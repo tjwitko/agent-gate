@@ -16,6 +16,13 @@ REQUIREMENTS
 - The provider rotates its signing secret every quarter.
 - Records are retained for seven years.
 
+HOW WE WILL JUDGE IT
+- Automated tests that someone else can run, covering at least the signature
+  check accepting a genuine callback and rejecting a forged one, and a repeated
+  callback not overwriting what was already recorded.
+- Errors distinguished from faults: a bad request from the provider is not the
+  same as our service failing, and must not be reported as one.
+
 DEPLOYMENT
 - AWS, single region.
 - Terraform for all infrastructure.

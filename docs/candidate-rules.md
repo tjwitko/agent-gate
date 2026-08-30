@@ -31,6 +31,7 @@ happened to produce, so the next project's ordinary idiom reads as a violation.
 | advisory parser | only lines starting "- " | a review written as prose | silent discard |
 | manifest contract | `env:` is always a list | a Helm template | crash, taking all 14 checks with it |
 | artifact presence | "delete the file" | there was no delete tool | impossible remediation |
+| immutability (walk) | `.go` absent from READ_EXT | a Go deliverable | false positive — file never opened |
 
 Three of four are false positives, which is the direction that gets a gate switched off. The fix is
 the same each time: test the shape, not the spelling.
@@ -403,6 +404,43 @@ including path escape.
 run produced against what they hold now, so a deletion that loses work is caught and blocks. The
 capability arrives with the guardrail rather than ahead of it — the reverse order would have handed
 a model the ability to quietly delete its way to a clean gate.
+
+### What a frozen three-run series showed, and the four changes it prompted
+
+Three runs, same model, same 60 turns, same task, no advisor, gate pinned at six unchanged SHAs.
+Blocking failures came out **4, 9 and 3** — a threefold spread with no gate change between them.
+The D → D+ → C → B− arc read from single samples does not survive that: the spread contains the
+whole arc. Language choice was variance too — one run wrote Go, which had been attributed to a
+different model entirely.
+
+Four changes followed, aimed at the three things actually being measured:
+
+**1. The security rules were unreachable.** Two of three runs never produced a scannable plan, so
+the entire terraform pack — the EKS rule included — never evaluated them, and one shipped an
+internet-facing control plane unchecked. `terraform_validate` (terraform-guard `8cea08e`) gives a
+plan-free, credential-free, backend-free check in 0.1–2.0s, and states on every call that it reports
+nothing about security.
+
+**2. Nothing asked for tests and none were produced** — zero across all three runs, and across every
+earlier deliverable. The task now asks for them and `code-quality.mjs` checks. Test files must
+contain an assertion: a file named `test_x.py` holding a TODO is not a test, and rewarding it would
+teach the wrong thing.
+
+**3. The immutability check could not read Go at all.** `.go` was absent from `READ_EXT`, so a Go
+deliverable that *had* `ConditionExpression: aws.String("attribute_not_exists(...)")` was reported
+as having no control. Two separate defects: the walk never opened the file, and the pattern required
+a quote directly after the separator where Go interposes `aws.String(`. Fixing only the pattern
+would have changed nothing.
+
+**4. Nothing measured quality, so nothing improved it.** The run with clearly the best architecture
+— proper `cmd/` and `internal/{handler,repository,service}` separation — scored *worst* on the gate.
+Gate score and code quality were uncorrelated, and there was no mechanism by which they would be.
+`code_quality` adds the first non-security check: tests, and errors reported as faults — a broad
+`except Exception` re-raising a caller's mistake as 5xx, seen in four deliverables and leaking the
+intended status into the response body in three.
+
+Both quality checks are gated on the task asking for the property, as immutability is. A project
+nobody asked to test is not defective for having no tests.
 
 ---
 

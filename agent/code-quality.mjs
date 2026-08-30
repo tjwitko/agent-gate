@@ -1,0 +1,137 @@
+// Robustness, not security. Every other check in this loop is security-shaped, and a three-run
+// series showed why that is not enough: the run with by far the best architecture — proper cmd/
+// and internal/{handler,repository,service} separation — scored the WORST on the gate, because
+// nothing in the gate measures structure, tests or error handling. Gate score and code quality were
+// uncorrelated, and there was no mechanism by which they would be.
+//
+// Both checks below are gated on the task asking for the property, in the same way the immutability
+// check is. A project nobody asked to test is not defective for having no tests.
+
+import { readdirSync, readFileSync, statSync } from "fs";
+import path from "path";
+import { SKIP_DIRS } from "./skip-dirs.mjs";
+
+const MAX_FILE_BYTES = 512 * 1024;
+const CODE_EXT = [".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".go", ".rb", ".java"];
+
+const TASK_WANTS_TESTS = /\b(automated )?tests?\b|\btest suite\b|\bunit test/i;
+const TASK_WANTS_ERROR_DISTINCTION =
+  /\berrors? (?:distinguished|separated) from faults?\b|\bbad request\b[^.]{0,80}\bnot\b|\bdistinguish\w*\b[^.]{0,40}\bfaults?\b/i;
+
+// A file is a test if it is named like one AND asserts something. Naming alone was not enough: a
+// file called test_main.py containing a TODO is not a test, and rewarding it would teach exactly
+// the wrong thing.
+const TEST_FILENAME = /(^|[\/._-])(tests?|spec)([._-]|$)|_test\.(go|py|rb)$|\.(test|spec)\.(js|mjs|ts|tsx)$/i;
+const ASSERTION = /\bassert\w*\s*[(\s]|\bexpect\s*\(|\brequire\.\w+\s*\(|\bt\.(Error|Fatal)f?\s*\(|\bshould\b|\.to(Be|Equal|Throw)\b/;
+
+// A handler that catches broadly and re-raises as a server fault. Observed in four separate
+// deliverables: `except Exception` swallows the HTTPException(400) raised a few lines above and
+// re-raises it as a 500, so a malformed request from the caller is reported as our own failure —
+// and in three of the four, the intended status leaked into the message as "400: Missing event id".
+const PY_BROAD_CATCH = /except\s+Exception[^\n]*:\s*\n([\s\S]{0,400}?)(?=\n\S|\n\s*except|\n\s*$)/g;
+const RAISES_SERVER_FAULT = /status_code\s*=\s*5\d\d|HTTPException\s*\(\s*5\d\d|abort\s*\(\s*5\d\d/;
+const RERAISES_DETAIL = /detail\s*=\s*(?:str\s*\(\s*e\s*\)|f?["'`][^"'`]*\{e\})/;
+
+function walk(dir, exts, acc = [], root = dir) {
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return acc;
+  }
+  for (const e of entries) {
+    const full = path.join(dir, e.name);
+    if (e.isDirectory()) {
+      if (!SKIP_DIRS.has(e.name)) walk(full, exts, acc, root);
+      continue;
+    }
+    if (!exts.includes(path.extname(e.name))) continue;
+    try {
+      if (statSync(full).size <= MAX_FILE_BYTES) {
+        acc.push({ rel: path.relative(root, full), text: readFileSync(full, "utf8") });
+      }
+    } catch {
+      /* unreadable is not this check's problem to report */
+    }
+  }
+  return acc;
+}
+
+export function taskWantsTests(taskText = "") {
+  return TASK_WANTS_TESTS.test(taskText);
+}
+export function taskWantsErrorDistinction(taskText = "") {
+  return TASK_WANTS_ERROR_DISTINCTION.test(taskText);
+}
+
+export function checkCodeQuality(projectDir, taskText = "") {
+  const files = walk(projectDir, CODE_EXT);
+  if (files.length === 0) return { ran: false, unknown: "no source files to read", tests: [], swallowing: [] };
+
+  const tests = files.filter((f) => TEST_FILENAME.test(f.rel) && ASSERTION.test(f.text));
+  const namedOnly = files.filter((f) => TEST_FILENAME.test(f.rel) && !ASSERTION.test(f.text));
+
+  const swallowing = [];
+  for (const f of files) {
+    if (!f.rel.endsWith(".py")) continue;
+    PY_BROAD_CATCH.lastIndex = 0;
+    let m;
+    while ((m = PY_BROAD_CATCH.exec(f.text))) {
+      const body = m[1] || "";
+      if (RAISES_SERVER_FAULT.test(body)) {
+        const line = f.text.slice(0, m.index).split("\n").length;
+        swallowing.push({ file: f.rel, line, leaksDetail: RERAISES_DETAIL.test(body) });
+      }
+    }
+  }
+
+  return { ran: true, unknown: null, tests, namedOnly, swallowing };
+}
+
+/** Blocking when the task asks for the property; silent otherwise. */
+export function codeQualityFailures(projectDir, taskText = "") {
+  const r = checkCodeQuality(projectDir, taskText);
+  if (!r.ran) return { failures: [], advisories: [`code quality: not checked — ${r.unknown}`] };
+
+  const failures = [];
+  const advisories = [];
+
+  if (taskWantsTests(taskText)) {
+    if (r.tests.length === 0) {
+      const named = (r.namedOnly || []).length;
+      failures.push(
+        `code quality: the task asks for automated tests and the project contains none.\n` +
+          (named
+            ? `${named} file(s) are named like tests but contain no assertion, which is not a test — ` +
+              `a file that runs code without checking anything passes whatever the code does.\n`
+            : "") +
+          `Write tests someone else can run: at minimum that a genuine signature is accepted and a ` +
+          `forged one rejected, and that a repeated delivery does not overwrite what was already ` +
+          `recorded. Those two are the requirements most easily broken by a later change, and the ` +
+          `ones no reviewer can confirm by reading.`
+      );
+    }
+  } else if (r.tests.length === 0) {
+    advisories.push(`code quality: no tests found. The task did not ask for any, so this is not a failure.`);
+  }
+
+  if (taskWantsErrorDistinction(taskText) && r.swallowing.length > 0) {
+    const list = r.swallowing.map((s) => `${s.file}:${s.line}`).join(", ");
+    const leaks = r.swallowing.filter((s) => s.leaksDetail).length;
+    failures.push(
+      `code quality: ${r.swallowing.length} broad exception handler(s) turn a caller's mistake into ` +
+        `a server fault — ${list}.\n` +
+        `\`except Exception\` catches the HTTPException your own code raised a few lines earlier, so ` +
+        `a malformed request comes back as 5xx instead of 4xx. The caller is told the service is ` +
+        `broken when the request was; a payment provider seeing 5xx will retry a request that can ` +
+        `never succeed.` +
+        (leaks
+          ? ` ${leaks} of them also pass the original exception into the response body, leaking the ` +
+            `intended status and internal detail to the caller.`
+          : "") +
+        ` Re-raise HTTPException untouched and catch only what you can actually handle.`
+    );
+  }
+
+  return { failures, advisories };
+}

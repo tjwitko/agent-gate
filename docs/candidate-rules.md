@@ -29,6 +29,7 @@ happened to produce, so the next project's ordinary idiom reads as a violation.
 | immutability (scope) | "any table/bucket" once the task requires it | a Terraform state backend | false positive ×4 |
 | every manifest check | reads content, never asks if there is any | five zero-byte YAML files | false negative ×3 |
 | advisory parser | only lines starting "- " | a review written as prose | silent discard |
+| manifest contract | `env:` is always a list | a Helm template | crash, taking all 14 checks with it |
 
 Three of four are false positives, which is the direction that gets a gate switched off. The fix is
 the same each time: test the shape, not the spelling.
@@ -348,6 +349,33 @@ A related subtlety in the IRSA path: the annotation value in Terraform is normal
 `aws_iam_role.app.arn` — not a literal ARN. That is the *correct* way to write it and resolves by
 resource label, so it is explicitly not treated as the placeholder a hand-written `<ROLE_ARN>` is.
 Getting that backwards would have punished the projects doing it properly.
+
+### A Helm chart crashed the entire validation phase
+
+A Qwen run produced the first Helm chart of any deliverable. `env:` followed by
+`{{- range .Values.environment }}` parses as YAML into something that is not a list, iterating it
+threw a `TypeError`, the exception escaped `checkManifestContract`, and `validateProject` aborted.
+**Zero of the fourteen validators ran.** The gate reported nothing at all about that project.
+
+Two fixes, and the second is the one that matters:
+
+1. `visitContainers` no longer assumes any shape — not that `containers` is an array, not that each
+   entry is an object, not that `env` is a list. A Helm chart parses as YAML but is not Kubernetes.
+2. **Every check now runs behind a guard.** Fourteen checks in sequence with no isolation is one
+   point of failure, not fourteen — every gate built this session shared it, and it took a project
+   shape none of them had seen to reveal it.
+
+A crashed check is reported, never skipped quietly and never treated as a pass: it appears in the
+run summary as `immutability(CRASHED)` rather than silently absent. Verified by injecting a real
+throw — eight other checks still ran and the crash surfaced as an advisory, where before all nine
+were lost.
+
+It is an **advisory rather than a failure** on purpose. The defect is in this repository, not in the
+deliverable, and blocking a run over a harness bug would make the model thrash on something it
+cannot possibly fix — the most expensive mistake this project knows how to make.
+
+`validateProject` is now exported and `main()` only runs when the file is invoked directly, which is
+what makes the isolation testable at all.
 
 ---
 

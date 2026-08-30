@@ -961,7 +961,36 @@ async function lockfilePresent(projectDir) {
 // across runs a missing file means a different project, not a regression.
 let previousInventory = null;
 
-async function validateProject(projectDir, toolRegistry, taskText = "") {
+export async function validateProject(projectDir, toolRegistry, taskText = "") {
+  // Every check runs behind this. A Helm chart made one check throw on a shape it assumed, the
+  // exception escaped checkManifestContract, and validateProject aborted — so ZERO of the fourteen
+  // validators ran and the gate reported nothing at all. Fourteen checks in sequence with no
+  // isolation is one point of failure, not fourteen.
+  //
+  // A crashed check is reported, never skipped quietly, and never treated as a pass: it appears in
+  // `ran` as CRASHED so the run summary cannot be mistaken for a clean sweep. It is an advisory
+  // rather than a failure on purpose — the defect is in this repository, not in the deliverable, and
+  // blocking a run over a harness bug would make the model thrash on something it cannot fix, which
+  // is the most expensive mistake this project knows how to make.
+  const guarded = (name, fn) => {
+    try {
+      const out = fn();
+      ran.push(name);
+      return { failures: out?.failures ?? [], advisories: out?.advisories ?? [] };
+    } catch (err) {
+      ran.push(`${name}(CRASHED)`);
+      return {
+        failures: [],
+        advisories: [
+          `${name}: the check itself crashed and did not run — ${err && err.message}. This is a ` +
+            `defect in the checking tool, not in the project, so nothing here is a finding about ` +
+            `your code — but it also means this project is UNVERIFIED for whatever ${name} covers. ` +
+            `Do not read its silence as a pass.`,
+        ],
+      };
+    }
+  };
+
   const failures = [];
   // Reported to the reviewer, never blocking. See the resource-census block below.
   const advisories = [];
@@ -1126,10 +1155,9 @@ async function validateProject(projectDir, toolRegistry, taskText = "") {
   // undetermined answer is reported as an advisory rather than passed silently.
   // The task text is the only evidence of what was actually asked for. Without it this check
   // cannot tell "no audit store in this project" from "the audit store is named `records`".
-  const immutability = immutabilityFailures(projectDir, {
+  const immutability = guarded("immutability", () => immutabilityFailures(projectDir, {
     taskRequiresImmutability: taskRequiresImmutability(taskText),
-  });
-  ran.push("immutability");
+  }));
   failures.push(...immutability.failures);
   advisories.push(...immutability.advisories);
 
@@ -1137,16 +1165,14 @@ async function validateProject(projectDir, toolRegistry, taskText = "") {
   // immutable store filled by anonymous writers is a tamper-proof record of unattributable claims,
   // so closing Tampering while leaving Spoofing open buys very little. "No endpoint authenticates"
   // appeared in 5 of 5 preserved reviews and was still unfixed six runs later.
-  const authentication = authenticationFailures(projectDir);
-  ran.push("authentication");
+  const authentication = guarded("authentication", () => authenticationFailures(projectDir));
   failures.push(...authentication.failures);
   advisories.push(...authentication.advisories);
 
   // Blocking, and it is the only check that looks at two artifacts at once. Each is correct on its
   // own terms -- the code reads a variable, the manifests set some variables -- so nothing else
   // here can see the gap between them, which is where a whole class of deployment failures lives.
-  const contract = manifestContractFailures(projectDir);
-  ran.push("manifest_contract");
+  const contract = guarded("manifest_contract", () => manifestContractFailures(projectDir));
   failures.push(...contract.failures);
   advisories.push(...contract.advisories);
 
@@ -1155,8 +1181,7 @@ async function validateProject(projectDir, toolRegistry, taskText = "") {
   // object, so the workload does not deploy at all. Also catches ${...} interpolation, which
   // Kubernetes never expands, and a health endpoint with no probe wired to it -- graded once as a
   // receiver answering /health with 200 while every real request failed.
-  const k8s = k8sManifestFailures(projectDir);
-  ran.push("k8s_manifest");
+  const k8s = guarded("k8s_manifest", () => k8sManifestFailures(projectDir));
   failures.push(...k8s.failures);
   advisories.push(...k8s.advisories);
 
@@ -1164,8 +1189,7 @@ async function validateProject(projectDir, toolRegistry, taskText = "") {
   // stating immutability: caching a secret is ordinary and correct when nothing rotates it. When the
   // task does say so, an unbounded cache fails in both directions at once -- the new secret is
   // rejected and the retired one keeps working until every replica restarts.
-  const rotation = secretRotationFailures(projectDir, taskText);
-  ran.push("secret_rotation");
+  const rotation = guarded("secret_rotation", () => secretRotationFailures(projectDir, taskText));
   failures.push(...rotation.failures);
   advisories.push(...rotation.advisories);
 
@@ -1174,16 +1198,14 @@ async function validateProject(projectDir, toolRegistry, taskText = "") {
   // what a ServiceAccount annotation means, so a role annotated onto a pod with an instance-profile
   // trust policy looks fine from either artifact alone. Both were graded on deliverables whose
   // terraform_plan the gate had already approved.
-  const iam = iamContractFailures(projectDir);
-  ran.push("iam_contract");
+  const iam = guarded("iam_contract", () => iamContractFailures(projectDir));
   failures.push(...iam.failures);
   advisories.push(...iam.advisories);
 
   // Blocking. An empty file passes every check that reads it, because there is nothing to read --
   // a run emptied all five of its Kubernetes manifests while fixing findings in them, and three
   // separate manifest-aware checks went quiet at once. They had not passed; they had been starved.
-  const presence = artifactPresenceFailures(projectDir, taskText);
-  ran.push("artifact_presence");
+  const presence = guarded("artifact_presence", () => artifactPresenceFailures(projectDir, taskText));
   failures.push(...presence.failures);
   advisories.push(...presence.advisories);
 
@@ -1852,7 +1874,10 @@ async function main() {
   process.exit(0);
 }
 
-main().catch(async (e) => {
+// Only when run as a script. Exporting validateProject is what makes the per-check isolation
+// testable at all, and an unguarded main() would start a whole agent run on import.
+const INVOKED_DIRECTLY = process.argv[1] && process.argv[1].endsWith("agent-loop.mjs");
+if (INVOKED_DIRECTLY) main().catch(async (e) => {
   console.error(e);
   // A crashed run is the one most worth having a trace of.
   await shutdownTracing();

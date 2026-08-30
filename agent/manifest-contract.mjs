@@ -111,10 +111,16 @@ export function providedEnv(files) {
   let opaque = null;
   let sawWorkload = false;
 
+  // Every one of these shapes is assumed rather than guaranteed. A Helm chart parses as YAML but
+  // not as Kubernetes: `env:` followed by `{{- range .Values.environment }}` yields something that
+  // is not a list, and iterating it threw — which took the WHOLE validation phase down, because a
+  // check that throws was not isolated from the others. Nothing here may assume a shape.
   const visitContainers = (containers) => {
-    for (const c of containers || []) {
+    if (!Array.isArray(containers)) return;
+    for (const c of containers) {
+      if (!c || typeof c !== "object") continue;
       sawWorkload = true;
-      for (const e of c.env || []) if (e && e.name) provided.add(e.name);
+      if (Array.isArray(c.env)) for (const e of c.env) if (e && e.name) provided.add(e.name);
       if (Array.isArray(c.envFrom) && c.envFrom.length > 0) {
         const src = c.envFrom
           .map((r) => (r.configMapRef ? `ConfigMap/${r.configMapRef.name}` : r.secretRef ? `Secret/${r.secretRef.name}` : "a source"))

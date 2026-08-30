@@ -132,3 +132,52 @@ test("platform-provided variables are not reported as missing", () => {
   );
   assert.deepEqual(failures, []);
 });
+
+// --- Helm templates ------------------------------------------------------------------------------
+// A Helm chart parses as YAML but is not Kubernetes. `env:` followed by `{{- range ... }}` yields
+// something that is not a list, and iterating it threw — which took the whole validation phase down
+// with it, because a check that throws was not isolated from the others. Nothing may assume a shape.
+
+const HELM_DEPLOYMENT =
+  "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: {{ include \"app.fullname\" . }}\n" +
+  "spec:\n  template:\n    spec:\n      containers:\n        - name: app\n" +
+  "          env:\n            {{- range .Values.environment }}\n" +
+  "            - name: {{ .name }}\n              value: {{ .value | quote }}\n" +
+  "            {{- end }}\n";
+
+test("a Helm template does not crash the check", () => {
+  const { failures, advisories } = run(
+    { "helm/templates/deployment.yaml": HELM_DEPLOYMENT, "src/main.py": 'K = os.getenv("SUPPORT_API_KEY")\n' },
+    manifestContractFailures
+  );
+  assert.ok(Array.isArray(failures) && Array.isArray(advisories));
+});
+
+test("a container whose env is a scalar is skipped, not iterated", () => {
+  const yaml =
+    "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: d\n" +
+    "spec:\n  template:\n    spec:\n      containers:\n        - name: app\n          env: {{ .Values.env }}\n";
+  const { failures } = run({ "k8s/d.yaml": yaml, "src/main.py": 'K = os.getenv("KEY_X")\n' }, manifestContractFailures);
+  assert.ok(Array.isArray(failures));
+});
+
+test("a containers list that is not a list is skipped", () => {
+  const yaml =
+    "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: d\n" +
+    "spec:\n  template:\n    spec:\n      containers: {{ toYaml .Values.containers }}\n";
+  const { failures } = run({ "k8s/d.yaml": yaml, "src/main.py": 'K = os.getenv("KEY_X")\n' }, manifestContractFailures);
+  assert.ok(Array.isArray(failures));
+});
+
+// A real manifest alongside a Helm chart must still be read correctly.
+test("a real manifest is still parsed when a Helm chart sits beside it", () => {
+  const real =
+    "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: d\n" +
+    "spec:\n  template:\n    spec:\n      containers:\n        - name: app\n" +
+    "          env:\n            - name: KEY_X\n              value: v\n";
+  const { failures } = run(
+    { "helm/templates/deployment.yaml": HELM_DEPLOYMENT, "k8s/d.yaml": real, "src/main.py": 'K = os.getenv("KEY_X")\n' },
+    manifestContractFailures
+  );
+  assert.deepEqual(failures, [], "KEY_X is supplied by the real manifest");
+});

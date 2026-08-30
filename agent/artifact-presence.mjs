@@ -105,8 +105,10 @@ export function artifactPresenceFailures(projectDir, taskText = "") {
         `An empty file is not a smaller version of the work; it is the absence of the work wearing ` +
         `its filename. Every check that reads these passes, because there is nothing to read — ` +
         `which is why this is reported here rather than by any of them. If a file's content was ` +
-        `removed while fixing something else, restore it; if it was never needed, delete the file ` +
-        `rather than leaving an empty one behind.`
+        `removed while fixing something else, restore it. If it was never needed, remove it with ` +
+        `delete_file — do not leave an empty one behind. (That advice previously said "delete the ` +
+        `file" when the tool set had no way to do so, which is why two runs overwrote files with ` +
+        `empty or placeholder content instead: it was the only move available to them.)`
     );
   }
 

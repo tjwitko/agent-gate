@@ -12,7 +12,7 @@
 import { spawn, spawnSync } from "child_process";
 import { createHash } from "crypto";
 import http from "http";
-import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync } from "fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync, unlinkSync } from "fs";
 import path from "path";
 import { fileURLToPath, pathToFileURL } from "url";
 
@@ -241,7 +241,7 @@ const GUARD_CONFIG_FILES = [
   ".identity-exception",
 ];
 
-function localTools(projectDir, secretScanner) {
+export function localTools(projectDir, secretScanner) {
   // A rejected commit returns the hook's full report, which is what makes it actionable the first
   // time and a context sink every time after. One run burned its entire window on 13 consecutive
   // rejections of the same failure: the uncommitted-work gate says commit, the hook refuses
@@ -329,6 +329,65 @@ function localTools(projectDir, secretScanner) {
         const target = containedPath(projectDir, rel);
         if (!existsSync(target)) return `No such file: ${rel}`;
         return readFileSync(target, "utf8").slice(0, 6000);
+      },
+    },
+    // Added because its absence was causing real damage. The tool set could create and overwrite
+    // files but never remove one, so a model that needed a file gone had exactly one move:
+    // overwrite it with something inert. Two runs did precisely that — one wrote all five of its
+    // Kubernetes manifests back as empty files, which silenced three checks at once and looked
+    // like progress; another left `removed_provider.tf` containing nothing but a comment saying
+    // the content had moved. Both were read at the time as the model mishandling its work. It was
+    // the tool set offering no way to do the thing it needed.
+    //
+    // The artifact-presence check then told it to "delete the file rather than leaving an empty
+    // one behind" — advice it could not act on. A remediation that asks for an impossible action
+    // is the same defect as one that names a setting without naming its block, and it cost a run
+    // when that happened.
+    //
+    // Safe to add now, and not before: the artifact census added alongside it compares files this
+    // run produced against what they hold now, so a deletion that loses work is caught and blocks.
+    // The capability arrives with the guardrail rather than ahead of it.
+    delete_file: {
+      schema: {
+        type: "function",
+        function: {
+          name: "delete_file",
+          description:
+            "Remove a file from the project. Use this when a file should no longer exist — do NOT " +
+            "overwrite it with empty or placeholder content, which leaves a broken artifact behind " +
+            "and hides the fact that it is gone.",
+          parameters: {
+            type: "object",
+            properties: { path: { type: "string", description: "Path relative to the project root" } },
+            required: ["path"],
+          },
+        },
+      },
+      run: ({ path: rel }) => {
+        const target = containedPath(projectDir, rel);
+        if (!existsSync(target)) return `No such file: ${rel} — nothing to delete.`;
+        // A guard the model can remove is not a guard, for the same reason it may not write one.
+        if (GUARD_CONFIG_FILES.includes(path.basename(rel))) {
+          return (
+            `REFUSED: ${rel} was NOT deleted. That file governs a security check, and removing it ` +
+            `is not fixing a finding.`
+          );
+        }
+        // Deleting the repository, its history or its ignore rules is never the fix for anything
+        // this loop asks for.
+        const first = rel.split(/[\\/]/)[0];
+        if (first === ".git" || path.basename(rel) === ".gitignore") {
+          return `REFUSED: ${rel} was NOT deleted. That is repository infrastructure, not project work.`;
+        }
+        try {
+          if (statSync(target).isDirectory()) {
+            return `REFUSED: ${rel} is a directory. Delete the files inside it individually.`;
+          }
+          unlinkSync(target);
+          return `Deleted ${rel}.`;
+        } catch (err) {
+          return `Could not delete ${rel}: ${err.message}`;
+        }
       },
     },
     // Added after a run shipped code that did not compile: the tool set covered Terraform,

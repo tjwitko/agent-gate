@@ -30,6 +30,7 @@ happened to produce, so the next project's ordinary idiom reads as a violation.
 | every manifest check | reads content, never asks if there is any | five zero-byte YAML files | false negative ×3 |
 | advisory parser | only lines starting "- " | a review written as prose | silent discard |
 | manifest contract | `env:` is always a list | a Helm template | crash, taking all 14 checks with it |
+| artifact presence | "delete the file" | there was no delete tool | impossible remediation |
 
 Three of four are false positives, which is the direction that gets a gate switched off. The fix is
 the same each time: test the shape, not the spelling.
@@ -376,6 +377,32 @@ cannot possibly fix — the most expensive mistake this project knows how to mak
 
 `validateProject` is now exported and `main()` only runs when the file is invoked directly, which is
 what makes the isolation testable at all.
+
+### A remediation asking for an action the tool set could not perform
+
+The empty-file finding told the model to *"delete the file rather than leaving an empty one
+behind"*. The loop offered `write_file`, `read_file`, `list_files`, `build_check` and `git_commit`
+— and no way to delete anything.
+
+This is the same defect class as naming a setting without naming the block it lives in, which cost
+a run when the EKS remediation did it. The earlier audit asked of every message *"does it say
+where?"* and never asked *"can the model actually do this?"*
+
+It also reframes two episodes read wrongly at the time. webhook-10 wrote all five Kubernetes
+manifests back as **empty files**, silencing three checks at once; webhook-11 left
+`removed_provider.tf` containing nothing but a comment saying the content had moved. Both were
+recorded as the model mishandling its work. Both were a model needing a file gone, with exactly one
+move available to it.
+
+`delete_file` closes it. Refuses guard-config files for the same reason `write_file` does — a guard
+the model can remove is not a guard — refuses `.git`, `.gitignore` and directories, and is bounded
+by the same `containedPath` check as every other file tool. Verified against all six guards
+including path escape.
+
+**Safe to add now, and not before.** The artifact census committed alongside it compares files a
+run produced against what they hold now, so a deletion that loses work is caught and blocks. The
+capability arrives with the guardrail rather than ahead of it — the reverse order would have handed
+a model the ability to quietly delete its way to a clean gate.
 
 ---
 

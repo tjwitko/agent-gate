@@ -119,3 +119,14 @@ test("the inventory excludes empty files", () => {
   const inv = run({ "a.tf": REAL_TF, "b.tf": "" }, artifactInventory);
   assert.deepEqual([...inv.keys()], ["a.tf"]);
 });
+
+// The remediation must name an action the model can actually perform. It previously said "delete
+// the file" when the tool set had no delete_file, which is a remediation asking for an impossible
+// action — the same defect class as naming a setting without naming the block it lives in.
+test("the empty-file remediation names a tool that exists", () => {
+  const { failures } = run(
+    { "k8s/deployment.yaml": "", "Dockerfile": REAL_DOCKERFILE, "main.tf": REAL_TF },
+    (d) => artifactPresenceFailures(d, TASK)
+  );
+  assert.match(failures[0], /delete_file/);
+});

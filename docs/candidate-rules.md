@@ -32,6 +32,7 @@ happened to produce, so the next project's ordinary idiom reads as a violation.
 | manifest contract | `env:` is always a list | a Helm template | crash, taking all 14 checks with it |
 | artifact presence | "delete the file" | there was no delete tool | impossible remediation |
 | immutability (walk) | `.go` absent from READ_EXT | a Go deliverable | false positive — file never opened |
+| code quality (tests) | "has assertions" as a proxy for "passes" | three suites that all failed | presence reported as correctness |
 
 Three of four are false positives, which is the direction that gets a gate switched off. The fix is
 the same each time: test the shape, not the spelling.
@@ -441,6 +442,36 @@ intended status into the response body in three.
 
 Both quality checks are gated on the task asking for the property, as immutability is. A project
 nobody asked to test is not defective for having no tests.
+
+### Reporting that tests exist as though it meant they pass
+
+The task change asking for tests worked on its face: 3 of 3 runs produced test files with real
+assertions, against 0 across six earlier deliverables. That was reported as the unambiguous win of
+the series. Then the tests were run:
+
+| run | result |
+|---|---|
+| Go | **cannot compile** — `go.mod` reads `module {`, three packages share one directory, and the test imports `internal/handler`, which does not exist |
+| Python | **3 passed, 3 failed** — imports `main` on line 7, sets the environment that module reads on line 13 |
+| Python | **1 passed, 4 failed** — patches `app.main.SECRET_KEY`, an attribute the module does not define |
+
+**0 of 3 had a passing suite.** The honest claim is that the model went from writing no tests to
+writing *plausible-looking* tests — real, but far less than reported.
+
+The defect was in this check: it verified a file existed and contained an assertion, and never ran
+anything. Presence measured, correctness claimed. Exactly the silence-as-success shape this file
+records in other checks, committed here the same morning.
+
+Two changes. The finding now states on every call that the tests were **not executed** and that this
+is not evidence they pass. And one failure mode is statically catchable, so it is now caught: a
+`patch("module.ATTR")` target where the resolved module defines no such attribute raises
+`AttributeError` the moment it runs while reading as thorough coverage. Narrow on purpose — an
+unresolvable path may legitimately live in a dependency, and a nested attribute on a binding that
+does exist is not this check's business.
+
+**Still open:** actually executing the tests. That needs per-language dependency installation, which
+`build_check` already does for compilation, so there is a precedent and a place to put it. Until
+then the check says what it verified and no more.
 
 ---
 

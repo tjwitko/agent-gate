@@ -108,3 +108,67 @@ test("no source files is reported as not-checked", () => {
   const { advisories } = run({ "README.md": "hi" }, (d) => codeQualityFailures(d, WANTS));
   assert.match(advisories[0], /not checked/);
 });
+
+// --- tests are read, never run --------------------------------------------------------------------
+// Three runs each produced a test file with real assertions, and all three suites failed when
+// finally executed — one could not compile at all. "Tests exist" was reported as though it meant
+// "tests pass", which it never did.
+
+test("finding tests always states they were not executed", () => {
+  const { advisories } = run(
+    { "app/main.py": APP, "tests/test_sig.py": "def test_x():\n    assert verify(b'x', 'bad') is False\n" },
+    (d) => codeQualityFailures(d, WANTS)
+  );
+  const a = advisories.find((x) => /NOT executed/.test(x));
+  assert.ok(a, "the presence finding must disclaim correctness");
+  assert.match(a, /not evidence that they pass/);
+});
+
+test("a patch target the module does not define is reported", () => {
+  const { failures } = run(
+    {
+      "app/main.py": "SIGNING = os.environ['S']\n" + APP,
+      "tests/test_sig.py": 'from unittest.mock import patch\ndef test_x():\n    with patch("app.main.SECRET_KEY", "s"):\n        assert True\n',
+    },
+    (d) => codeQualityFailures(d, WANTS)
+  );
+  const f = failures.find((x) => /patch target/.test(x));
+  assert.ok(f);
+  assert.match(f, /app\/main\.py defines no SECRET_KEY/);
+  assert.match(f, /AttributeError at run time/);
+});
+
+test("a patch target that does exist is clean", () => {
+  const { failures } = run(
+    {
+      "app/main.py": "SECRET_KEY = os.environ['S']\n" + APP,
+      "tests/test_sig.py": 'from unittest.mock import patch\ndef test_x():\n    with patch("app.main.SECRET_KEY", "s"):\n        assert True\n',
+    },
+    (d) => codeQualityFailures(d, WANTS)
+  );
+  assert.deepEqual(failures.filter((f) => /patch target/.test(f)), []);
+});
+
+// An attribute reached through one that exists — patch("main.table.put_item") where main defines
+// `table` — is not this check's business, and neither is a target in a dependency.
+test("a nested attribute on an existing binding is not reported", () => {
+  const { failures } = run(
+    {
+      "main.py": "table = boto3.resource('dynamodb').Table('t')\n" + APP,
+      "tests/test_x.py": 'from unittest.mock import patch\ndef test_x():\n    with patch("main.table.put_item"):\n        assert True\n',
+    },
+    (d) => codeQualityFailures(d, WANTS)
+  );
+  assert.deepEqual(failures.filter((f) => /patch target/.test(f)), []);
+});
+
+test("a patch target outside the project is left alone", () => {
+  const { failures } = run(
+    {
+      "app/main.py": APP,
+      "tests/test_x.py": 'from unittest.mock import patch\ndef test_x():\n    with patch("boto3.client"):\n        assert True\n',
+    },
+    (d) => codeQualityFailures(d, WANTS)
+  );
+  assert.deepEqual(failures.filter((f) => /patch target/.test(f)), []);
+});

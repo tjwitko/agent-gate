@@ -32,6 +32,27 @@ const PY_BROAD_CATCH = /except\s+Exception[^\n]*:\s*\n([\s\S]{0,400}?)(?=\n\S|\n
 const RAISES_SERVER_FAULT = /status_code\s*=\s*5\d\d|HTTPException\s*\(\s*5\d\d|abort\s*\(\s*5\d\d/;
 const RERAISES_DETAIL = /detail\s*=\s*(?:str\s*\(\s*e\s*\)|f?["'`][^"'`]*\{e\})/;
 
+// A test that patches something the module does not have fails the moment it runs, and looks
+// entirely reasonable until then. One deliverable patched `app.main.SECRET_KEY` against a module
+// with no such attribute: four of its five tests died with AttributeError, while a check that only
+// looked for assertions called the file a test.
+//
+// This is deliberately narrow — it resolves the dotted path to a file in this project and looks for
+// a top-level binding of that name. An unresolvable path is not reported, because the target may
+// legitimately live in a dependency.
+const PY_PATCH_TARGET = /\bpatch(?:\.object)?\s*\(\s*["']([\w.]+)["']/g;
+
+function resolveModuleFile(files, dotted) {
+  const parts = dotted.split(".");
+  // Try progressively shorter prefixes: app.main.SECRET_KEY -> app/main.py holding SECRET_KEY.
+  for (let take = parts.length - 1; take >= 1; take--) {
+    const rel = parts.slice(0, take).join("/") + ".py";
+    const f = files.find((x) => x.rel === rel || x.rel.endsWith("/" + rel));
+    if (f) return { file: f, attr: parts[take] };
+  }
+  return null;
+}
+
 function walk(dir, exts, acc = [], root = dir) {
   let entries;
   try {
@@ -85,7 +106,26 @@ export function checkCodeQuality(projectDir, taskText = "") {
     }
   }
 
-  return { ran: true, unknown: null, tests, namedOnly, swallowing };
+  // Patch targets that name an attribute the module does not define.
+  const badPatches = [];
+  for (const t of tests) {
+    if (!t.rel.endsWith(".py")) continue;
+    PY_PATCH_TARGET.lastIndex = 0;
+    let m;
+    while ((m = PY_PATCH_TARGET.exec(t.text))) {
+      const resolved = resolveModuleFile(files, m[1]);
+      if (!resolved) continue; // target is outside this project; not ours to judge
+      const bound = new RegExp(
+        `^\\s*(?:${resolved.attr}\\s*[:=]|def\\s+${resolved.attr}\\b|class\\s+${resolved.attr}\\b|async\\s+def\\s+${resolved.attr}\\b)`,
+        "m"
+      );
+      if (!bound.test(resolved.file.text)) {
+        badPatches.push({ test: t.rel, target: m[1], module: resolved.file.rel, attr: resolved.attr });
+      }
+    }
+  }
+
+  return { ran: true, unknown: null, tests, namedOnly, swallowing, badPatches };
 }
 
 /** Blocking when the task asks for the property; silent otherwise. */
@@ -113,6 +153,30 @@ export function codeQualityFailures(projectDir, taskText = "") {
     }
   } else if (r.tests.length === 0) {
     advisories.push(`code quality: no tests found. The task did not ask for any, so this is not a failure.`);
+  }
+
+  // Never let the presence of tests read as evidence they pass. This check finds files and reads
+  // them; it does not run anything. Reporting "3 of 3 runs produced tests" as a result once made a
+  // presence measurement sound like a correctness one, and all three test suites turned out to fail
+  // when finally executed — one of them could not even compile.
+  if (r.tests.length > 0) {
+    advisories.push(
+      `code quality: ${r.tests.length} test file(s) found and read — ${r.tests.map((t) => t.rel).join(", ")}. ` +
+        `They were NOT executed here, so this is not evidence that they pass. Run them yourself ` +
+        `before treating the suite as working: a test that imports a module before setting the ` +
+        `environment that module reads, or patches an attribute it does not have, looks entirely ` +
+        `reasonable in the file and fails the moment it runs.`
+    );
+  }
+
+  if ((r.badPatches || []).length > 0) {
+    const list = r.badPatches.map((b) => `${b.test} patches ${b.target}, but ${b.module} defines no ${b.attr}`).join("; ");
+    failures.push(
+      `code quality: ${r.badPatches.length} test patch target(s) do not exist — ${list}.\n` +
+        `unittest.mock.patch raises AttributeError at run time when the attribute is absent, so ` +
+        `these tests fail the moment anyone runs them while reading as thorough coverage. Either ` +
+        `the name is wrong, or the test was written against an interface the module never had.`
+    );
   }
 
   if (taskWantsErrorDistinction(taskText) && r.swallowing.length > 0) {

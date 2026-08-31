@@ -27,7 +27,14 @@ const MAX_FILE_BYTES = 512 * 1024;
 // Read with no fallback: the code expects the environment to provide it. `os.getenv("X", "default")`
 // is excluded because a default means the variable is optional by construction.
 const PY_ENV_REQUIRED = [
-  /\bos\.environ\s*\[\s*["'`]([A-Z_][A-Z0-9_]*)["'`]\s*\]/g,
+  // Not followed by `=`, or a test that SETS a variable is counted as the application requiring it.
+  // Tests only began appearing once the task asked for them, and the first suite to do so wrote
+  // `os.environ["WEBHOOK_SECRET"] = ...`, which this reported as two environment variables the
+  // manifests failed to supply. `==` is still a read, so the exclusion is a single `=` only.
+  // The whitespace belongs INSIDE the lookahead: written as `\s*(?!=[^=])` the star backtracks to
+  // zero, the assertion then looks at a space rather than the `=`, and every assignment matches
+  // anyway. `==` is still a read, so only a single `=` is excluded.
+  /\bos\.environ\s*\[\s*["'`]([A-Z_][A-Z0-9_]*)["'`]\s*\](?!\s*=[^=])/g,
   /\bos\.getenv\s*\(\s*["'`]([A-Z_][A-Z0-9_]*)["'`]\s*\)/g,
   /\bos\.environ\.get\s*\(\s*["'`]([A-Z_][A-Z0-9_]*)["'`]\s*\)/g,
 ];

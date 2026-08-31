@@ -181,3 +181,36 @@ test("a real manifest is still parsed when a Helm chart sits beside it", () => {
   );
   assert.deepEqual(failures, [], "KEY_X is supplied by the real manifest");
 });
+
+// A test that SETS an environment variable is not the application requiring it. Tests only began
+// appearing once the task asked for them, and the first suite to do so wrote
+// `os.environ["WEBHOOK_SECRET"] = ...`, which was reported as two variables the manifests failed to
+// supply — a false positive created by the deliverable improving.
+test("os.environ[X] = v is an assignment, not a requirement", () => {
+  const { failures } = run(
+    {
+      "tests/test_main.py": 'import os\nos.environ["WEBHOOK_SECRET"] = "s"\ndef test_x():\n    assert 1\n',
+      "k8s/deployment.yaml":
+        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: d\nspec:\n  template:\n    spec:\n" +
+        "      containers:\n        - name: c\n          env:\n            - name: OTHER\n              value: v\n",
+    },
+    manifestContractFailures
+  );
+  assert.deepEqual(failures, []);
+});
+
+test("a genuine read is still required, and a comparison is a read", () => {
+  for (const src of ['S = os.environ["WEBHOOK_SECRET"]\n', 'if os.environ["WEBHOOK_SECRET"] == "x":\n    pass\n']) {
+    const { failures } = run(
+      {
+        "app/main.py": src,
+        "k8s/deployment.yaml":
+          "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: d\nspec:\n  template:\n    spec:\n" +
+          "      containers:\n        - name: c\n          env:\n            - name: OTHER\n              value: v\n",
+      },
+      manifestContractFailures
+    );
+    assert.equal(failures.length, 1, src);
+    assert.match(failures[0], /WEBHOOK_SECRET/);
+  }
+});

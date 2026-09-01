@@ -87,9 +87,12 @@ function parseArgs() {
 // in this scratchpad use: initialize -> notifications/initialized -> tools/list / tools/call.
 // ---------------------------------------------------------------------------
 export class McpClient {
-  constructor(name, command, args, env) {
+  constructor(name, command, args, env, cwd) {
     this.name = name;
-    this.proc = spawn(command, args, { env: { ...process.env, ...env }, stdio: ["pipe", "pipe", "pipe"] });
+    // cwd matters: each control server resolves its scan root from an env var *or its startup cwd*,
+    // and tools are called with relative targets. Left undefined it inherits ours, which is only
+    // correct by accident.
+    this.proc = spawn(command, args, { env: { ...process.env, ...env }, cwd, stdio: ["pipe", "pipe", "pipe"] });
     this.buffer = "";
     this.pending = new Map();
     this.nextId = 1;
@@ -930,14 +933,19 @@ async function chat(model, messages, tools, maxTokens, provider = "local") {
 //  2. WITH that flag it reports findings inside the downloaded modules — 9 of 11 on one real
 //     config. Those are not the caller's to fix, and this project has already watched a model
 //     rewrite its own working files ten times chasing errors that lived in vendored code.
-//  3. A file that fails to parse is skipped without comment, so a broken config yields few
-//     findings and reads as a clean one.
+//  3. A file that fails to parse is skipped, and unless parsing_errors is read back the result of
+//     a broken config is few findings, which reads as a clean one.
 //
-// So: the flag is on, vendored findings are dropped (and counted, never silently), and coverage is
-// reported against the .tf files actually present.
+// So: the flag is on, vendored findings are dropped (and counted, never silently), coverage is
+// reported against the .tf files actually present, and parsing errors are named.
 const CHECKOV_TIMEOUT_MS = 180_000;
 const VENDORED_PATH_RE = /external_modules|\.terraform/;
 
+// --quiet is deliberately NOT passed. It suppresses passed_checks, skipped_checks and
+// parsing_errors from the JSON, leaving only failures — which made the coverage figure below
+// structurally incapable of exceeding the number of files that had findings. A clean
+// configuration reported "evaluated 0 of 13 .tf files", i.e. it read as unscanned when it had in
+// fact been scanned completely. Coverage derived from a field the flag removes is not coverage.
 function checkovAdvisory(dir, projectDir) {
   const probe = spawnSync("checkov", ["--version"], { encoding: "utf8" });
   if (probe.status !== 0) return null; // not installed — absence is the non-blocking direction
@@ -950,37 +958,57 @@ function checkovAdvisory(dir, projectDir) {
   }
   if (present.length === 0) return null;
 
+  const rel = path.relative(projectDir, dir) || ".";
   const run = spawnSync(
     "checkov",
     ["-d", dir, "--framework", "terraform", "--download-external-modules", "true",
-     "--compact", "--quiet", "-o", "json"],
+     "--compact", "-o", "json"],
     { encoding: "utf8", timeout: CHECKOV_TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024 }
   );
-  if (!run.stdout) return null;
+
+  // A tool that could not run must say so. Returning null here would drop checkov out of the run
+  // summary entirely, which is indistinguishable from it having been clean.
+  if (run.error || run.signal) {
+    return `checkov (${rel}): did NOT run to completion (${run.signal ? `killed by ${run.signal}, likely the ${CHECKOV_TIMEOUT_MS / 1000}s timeout` : run.error.message}). Nothing here was scanned by checkov — this is unknown, not clean.`;
+  }
+  if (!run.stdout) {
+    return `checkov (${rel}): produced no output (exit ${run.status}). ${(run.stderr || "").trim().slice(0, 300) || "No stderr."} Nothing here was scanned by checkov — this is unknown, not clean.`;
+  }
 
   let report;
   try {
     const parsed = JSON.parse(run.stdout);
     report = Array.isArray(parsed) ? parsed[0] : parsed;
   } catch {
-    return null;
+    return `checkov (${rel}): output could not be parsed as JSON, so its findings are unavailable. This is unknown, not clean.`;
   }
 
   const failed = report?.results?.failed_checks || [];
   const passed = report?.results?.passed_checks || [];
+  const skipped = report?.results?.skipped_checks || [];
   const own = failed.filter((c) => !VENDORED_PATH_RE.test(c.file_path || ""));
   const vendored = failed.length - own.length;
 
-  // Which of the caller's own .tf files Checkov actually looked at. A file with no checkable
-  // resources legitimately appears in neither list, so this is a floor, not a precise figure —
-  // but an empty result on a file that exists is the signal worth surfacing.
+  // Which of the caller's own .tf files checkov actually looked at. A file with no resources, or
+  // only resource types checkov ships no policy for, legitimately appears in none of the three
+  // lists — so this remains a floor. The difference from before is that it is now computed from
+  // every list checkov populates rather than from failures alone.
   const evaluated = new Set(
-    [...own, ...passed]
+    [...own, ...passed, ...skipped]
       .map((c) => (c.file_path || "").replace(/^\//, ""))
       .filter((p) => p && !VENDORED_PATH_RE.test(p))
   );
 
-  const rel = path.relative(projectDir, dir) || ".";
+  // The direct signal, rather than inferring unscanned files from silence.
+  const parseErrors = report?.results?.parsing_errors || [];
+  const parseErrorCount = Number(report?.summary?.parsing_errors ?? parseErrors.length) || 0;
+  const parseNote = parseErrorCount
+    ? ` ${parseErrorCount} file(s) FAILED TO PARSE and were skipped${parseErrors.length ? `: ${parseErrors.slice(0, 5).join(", ")}` : ""} — whatever is in them is unscanned.`
+    : " No files failed to parse.";
+
+  const checksRun = passed.length + failed.length;
+  const resources = report?.summary?.resource_count ?? "unknown";
+
   const lines = own.slice(0, 12).map((c) => `    ${c.check_id} ${c.resource} — ${c.check_name}`);
   const more = own.length > 12 ? `\n    (+${own.length - 12} more)` : "";
 
@@ -988,8 +1016,9 @@ function checkovAdvisory(dir, projectDir) {
     `checkov (${rel}): ${own.length} finding(s) in your own configuration — advisory, not blocking. ` +
     `${vendored ? `${vendored} further finding(s) inside downloaded modules were suppressed: they are ` +
       `not yours to fix and rewriting your files will not clear them. ` : ""}` +
-    `Checkov evaluated ${evaluated.size} of ${present.length} .tf file(s) here — it skips files it ` +
-    `cannot parse without saying so, so treat a small result as unproven rather than clean.` +
+    `${checksRun} check(s) ran against ${resources} resource(s), covering ${evaluated.size} of ` +
+    `${present.length} .tf file(s) here; a file declaring no resources checkov has a policy for is ` +
+    `not a gap.${parseNote}` +
     (lines.length ? `\n${lines.join("\n")}${more}` : "")
   );
 }
@@ -1365,7 +1394,19 @@ export async function validateProject(projectDir, toolRegistry, taskText = "") {
     ran.push("scan_path");
     try {
       const parsed = JSON.parse(result);
-      if (!parsed.clean) {
+      // A scan pointed somewhere else is not a result about this project in either direction: its
+      // findings are someone else's and its silence proves nothing here. This has happened -- the
+      // server fell back to the caller's cwd and scanned a whole monorepo -- and it presented as
+      // sixteen blocking credentials in a project that had none.
+      const scanned = parsed.target ? path.resolve(parsed.target) : null;
+      const root = path.resolve(projectDir);
+      if (scanned && scanned !== root && !scanned.startsWith(root + path.sep)) {
+        failures.push(
+          `scan_path scanned ${scanned}, which is not this project (${root}). Its findings are not ` +
+            `about these files and its silence is not evidence about them either. The secret scan ` +
+            `did NOT run against this project — treat the credential check as unperformed.`
+        );
+      } else if (!parsed.clean) {
         failures.push(
           `scan_path: ${parsed.summary.total} hardcoded credential(s):\n${result.slice(0, 1200)}`
         );

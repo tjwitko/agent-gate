@@ -34,8 +34,13 @@ const taskText = taskFile ? readFileSync(taskFile, "utf8") : "";
 const siblings = path.resolve(__dirname, "..", "..");
 const CONTROLS = [
   { name: "terraform-guard", entry: process.env.TFGUARD_SERVER || path.join(siblings, "terraform-guard-mcp", "index.mjs"), provides: ["terraform_plan"], env: { TF_WORKING_ROOT: projectDir } },
-  { name: "dep-audit", entry: process.env.DEPAUDIT_SERVER || path.join(siblings, "dep-audit-mcp", "index.mjs"), provides: ["check_dependencies"], env: { DEPAUDIT_WORKING_ROOT: projectDir } },
-  { name: "secret-guard", entry: process.env.SECRETGUARD_SERVER || path.join(siblings, "secret-guard-mcp", "index.mjs"), provides: ["scan_path"], env: { SECRETGUARD_WORKING_ROOT: projectDir } },
+  // Both of these read SCAN_ROOT, not a name of their own. Earlier this script invented
+  // DEPAUDIT_WORKING_ROOT / SECRETGUARD_WORKING_ROOT; an unrecognised env var is not an error, so
+  // both servers silently fell back to this process's cwd and scanned the whole monorepo --
+  // scan_path then reported 16 credentials that belong to sibling repos and blocked a clean
+  // project. Confirmed against secret-guard-mcp/index.mjs:29 and dep-audit-mcp/index.mjs:24.
+  { name: "dep-audit", entry: process.env.DEPAUDIT_SERVER || path.join(siblings, "dep-audit-mcp", "index.mjs"), provides: ["check_dependencies"], env: { SCAN_ROOT: projectDir } },
+  { name: "secret-guard", entry: process.env.SECRETGUARD_SERVER || path.join(siblings, "secret-guard-mcp", "index.mjs"), provides: ["scan_path"], env: { SCAN_ROOT: projectDir } },
 ];
 
 const registry = new Map();
@@ -53,7 +58,9 @@ for (const c of CONTROLS) {
     continue;
   }
   try {
-    const client = new McpClient(c.name, "node", [c.entry], c.env);
+    // cwd as well as env: every one of these servers falls back to its startup cwd when its root
+    // variable is unset, and callers pass relative targets like ".".
+    const client = new McpClient(c.name, "node", [c.entry], c.env, projectDir);
     const tools = await client.init();
     clients.push(client);
     for (const t of tools) {

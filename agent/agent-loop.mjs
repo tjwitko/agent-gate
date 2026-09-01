@@ -86,7 +86,7 @@ function parseArgs() {
 // Minimal MCP stdio client. Speaks the same JSON-RPC handshake the probe scripts
 // in this scratchpad use: initialize -> notifications/initialized -> tools/list / tools/call.
 // ---------------------------------------------------------------------------
-class McpClient {
+export class McpClient {
   constructor(name, command, args, env) {
     this.name = name;
     this.proc = spawn(command, args, { env: { ...process.env, ...env }, stdio: ["pipe", "pipe", "pipe"] });

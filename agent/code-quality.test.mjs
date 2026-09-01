@@ -114,14 +114,18 @@ test("no source files is reported as not-checked", () => {
 // finally executed — one could not compile at all. "Tests exist" was reported as though it meant
 // "tests pass", which it never did.
 
-test("finding tests always states they were not executed", () => {
+// The property, not the wording: finding test files must never read as the tests passing. Execution
+// moved to its own check, so this advisory no longer claims the tests "were NOT executed" -- that
+// would now be false -- but it still must not imply they work.
+test("finding tests never reads as the tests passing", () => {
   const { advisories } = run(
     { "app/main.py": APP, "tests/test_sig.py": "def test_x():\n    assert verify(b'x', 'bad') is False\n" },
     (d) => codeQualityFailures(d, WANTS)
   );
-  const a = advisories.find((x) => /NOT executed/.test(x));
+  const a = advisories.find((x) => /test file\(s\) found and read/.test(x));
   assert.ok(a, "the presence finding must disclaim correctness");
-  assert.match(a, /not evidence that they pass/);
+  assert.match(a, /not what happens when they run/);
+  assert.doesNotMatch(a, /\bpass(es|ing)?\b(?![^.]*not)/i);
 });
 
 test("a patch target the module does not define is reported", () => {

@@ -162,10 +162,10 @@ export function codeQualityFailures(projectDir, taskText = "") {
   if (r.tests.length > 0) {
     advisories.push(
       `code quality: ${r.tests.length} test file(s) found and read — ${r.tests.map((t) => t.rel).join(", ")}. ` +
-        `They were NOT executed here, so this is not evidence that they pass. Run them yourself ` +
-        `before treating the suite as working: a test that imports a module before setting the ` +
-        `environment that module reads, or patches an attribute it does not have, looks entirely ` +
-        `reasonable in the file and fails the moment it runs.`
+        `This is what is in the files, not what happens when they run; the tests check reports that ` +
+        `separately, and its verdict is the one that counts. A test that imports a module before ` +
+        `setting the environment that module reads, or patches an attribute it does not have, looks ` +
+        `entirely reasonable in the file and fails the moment it runs.`
     );
   }
 

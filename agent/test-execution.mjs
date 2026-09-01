@@ -1,0 +1,232 @@
+// Run the project's test suite and report what happened, instead of reporting that test files exist.
+//
+// code_quality already reads the tests and says plainly that it did not run them. That honesty was
+// correct and it was not enough. A Haiku deliverable shipped a jest config, a test file with
+// thirteen cases, and no installed toolchain: `npm test` failed outright with `jest: command not
+// found`, and the model's closing report claimed "Comprehensive test coverage". Once the
+// dependencies were installed the suite ran 12 tests, and the 3 that failed were exactly the three
+// the task names as its judging criteria -- forged signature rejected, repeated delivery not
+// overwriting, payload retained as received. Nine passing tests around them read as a working
+// suite. Nothing in the pipeline could tell the difference, because nothing ever ran it.
+//
+// Two deliberate limits on how this executes:
+//
+//  1. **The runner is invoked directly, never `npm test`.** A package.json `scripts.test` is a
+//     model-authored shell string and would run whatever it contains. build_check's precedent is
+//     the right one: it calls node --check, py_compile and ruff by name and never runs a script the
+//     project defined. Test code is model-authored either way -- that is unavoidable and is the
+//     point -- but the command that starts it does not have to be.
+//  2. **Dependencies are never installed.** `npm install` on a generated manifest executes
+//     arbitrary postinstall hooks, which is a larger step than running the tests themselves. A
+//     missing toolchain is reported as what it is: a suite nobody can run, which is a finding
+//     against a task that asked for tests someone else can run.
+import { existsSync, readFileSync } from "fs";
+import path from "path";
+import { spawnSync } from "child_process";
+
+import { walk } from "./source-files.mjs";
+
+const TIMEOUT_MS = 120_000;
+const TEST_FILE = /(^|\/|\.)(test|tests|spec|__tests__)(\/|\.|_|$)|_test\.(py|go|js|mjs|ts)$/i;
+
+/**
+ * Which runner can start this project's tests, as { label, cmd, args, cwd }, or
+ * { unavailable } naming what is missing. Never returns a command the project itself authored.
+ */
+export function detectSuite(projectDir) {
+  const files = walk(projectDir);
+  const testFiles = files.filter((f) => TEST_FILE.test(f.rel));
+  if (testFiles.length === 0) return { unavailable: "no test files were found" };
+
+  const bin = (name) => path.join(projectDir, "node_modules", ".bin", name);
+  const pkgPath = path.join(projectDir, "package.json");
+
+  if (existsSync(pkgPath)) {
+    let pkg = {};
+    try {
+      pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
+    } catch {
+      return { unavailable: "package.json could not be parsed, so no runner could be identified" };
+    }
+    const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+    const declared = ["jest", "vitest", "mocha", "tap", "ava"].find((r) => deps[r]);
+
+    if (declared) {
+      if (!existsSync(bin(declared))) {
+        return {
+          unavailable:
+            `the suite is written for ${declared}, which is not installed — node_modules/.bin/${declared} ` +
+            `does not exist. Dependencies are deliberately not installed here, so run \`npm install\` ` +
+            `and try again. Until then nobody can run these tests, including whoever receives this project`,
+        };
+      }
+      return { label: declared, cmd: bin(declared), args: declared === "jest" ? ["--ci"] : [], cwd: projectDir };
+    }
+
+    // No declared runner: node's own, which needs nothing installed. Note the narrower pattern --
+    // TEST_FILE matches anything under a test/ directory, which is right for "does this project
+    // have tests" and wrong for "what should I execute". Handing node --test a helper module like
+    // test/fakes.mjs runs it as a test file: harmless when it only exports fakes, and not something
+    // to rely on when the helper has side effects.
+    const nodeTests = testFiles.filter((f) => /\.(test|spec)\.(m|c)?js$|_test\.(m|c)?js$/.test(f.rel));
+    if (nodeTests.length) {
+      return {
+        label: "node --test",
+        cmd: process.execPath,
+        args: ["--test", ...nodeTests.map((f) => f.rel)],
+        cwd: projectDir,
+      };
+    }
+    return { unavailable: "package.json declares no test runner and no runnable JavaScript tests were found" };
+  }
+
+  if (testFiles.some((f) => f.rel.endsWith(".py"))) {
+    const probe = spawnSync("python3", ["-m", "pytest", "--version"], { cwd: projectDir, encoding: "utf8" });
+    if (probe.status !== 0) return { unavailable: "the tests are Python and pytest is not installed here" };
+    return { label: "pytest", cmd: "python3", args: ["-m", "pytest", "-q"], cwd: projectDir };
+  }
+
+  if (existsSync(path.join(projectDir, "go.mod"))) {
+    return { label: "go test", cmd: "go", args: ["test", "./..."], cwd: projectDir };
+  }
+
+  return { unavailable: "no runner could be identified for the test files present" };
+}
+
+// Each runner's own summary line. Falling back to the exit code alone would report "the suite
+// failed" without saying how much of it did, which is the difference between one broken assertion
+// and a suite that never started.
+const COUNTERS = [
+  // jest / vitest: "Tests:  3 failed, 9 passed, 12 total"
+  { re: /Tests:?\s+(?:(\d+) failed[,|\s]+)?(?:(\d+) skipped[,|\s]+)?(\d+) passed[,|\s]+(\d+) total/i,
+    map: (m) => ({ failed: +(m[1] || 0), passed: +m[3], total: +m[4] }) },
+  // vitest alternative: "Tests  2 failed | 10 passed (12)"
+  { re: /Tests\s+(\d+) failed\s*\|\s*(\d+) passed\s*\((\d+)\)/i,
+    map: (m) => ({ failed: +m[1], passed: +m[2], total: +m[3] }) },
+  // node --test: "# pass 21" / "# fail 0", or the ℹ-prefixed form
+  { re: /[#ℹ]\s*pass\s+(\d+)[\s\S]*?[#ℹ]\s*fail\s+(\d+)/i,
+    map: (m) => ({ passed: +m[1], failed: +m[2], total: +m[1] + +m[2] }) },
+  // pytest: "3 failed, 9 passed" or "9 passed"
+  { re: /(?:(\d+) failed,\s*)?(\d+) passed/i,
+    map: (m) => ({ failed: +(m[1] || 0), passed: +m[2], total: +(m[1] || 0) + +m[2] }) },
+];
+
+function parseCounts(output) {
+  for (const c of COUNTERS) {
+    const m = c.re.exec(output);
+    if (m) return c.map(m);
+  }
+  return null;
+}
+
+// The names matter more than the count. Three failures that are all "could not connect" is an
+// environment problem; three failures that name the task's own acceptance criteria is a broken
+// deliverable, and only the reader can tell those apart.
+function failingNames(output) {
+  const names = new Set();
+  for (const re of [
+    /^\s*[✕✖x×]\s+(.+?)(?:\s+\(\d+(?:\.\d+)?\s*m?s\))?$/gim, // node --test, vitest
+    /^\s*●\s+(.+)$/gm, // jest
+    /^---\s+FAIL:\s+(\S+)/gm, // go
+    /^FAILED\s+(\S+)/gm, // pytest
+  ]) {
+    for (const m of output.matchAll(re)) {
+      const n = m[1].trim();
+      if (n && !/^failing tests|^tests?:/i.test(n)) names.add(n);
+    }
+  }
+  // jest prints each failure twice -- once as `✕ short name` in the run list and again as
+  // `● Suite › nested › short name` in the detail. Keeping both padded a three-failure suite out to
+  // six lines and made it read as worse than it was. The qualified form is the one to keep: it says
+  // which suite the failure came from.
+  const all = [...names];
+  const deduped = all.filter((n) => !all.some((o) => o !== n && o.endsWith(`\u203a ${n}`)));
+  return deduped.slice(0, 12);
+}
+
+/** Runs the suite. Returns { ran, unavailable, timedOut, counts, failing, exitCode }. */
+export function runTests(projectDir, { timeoutMs = TIMEOUT_MS } = {}) {
+  const suite = detectSuite(projectDir);
+  if (suite.unavailable) return { ran: false, unavailable: suite.unavailable };
+
+  const r = spawnSync(suite.cmd, suite.args, {
+    cwd: suite.cwd,
+    encoding: "utf8",
+    timeout: timeoutMs,
+    maxBuffer: 16 * 1024 * 1024,
+    // NODE_TEST_CONTEXT is deleted, not merely overridden. When this check itself runs under
+    // `node --test`, the child inherits it, switches to the TAP reporter for a parent that is not
+    // listening, and its summary comes back in a shape the counters do not read -- so a suite that
+    // passed was reported as "the summary could not be parsed". The same would happen to anyone
+    // running the validator from inside a test harness, which is exactly where a gate gets used.
+    env: (() => {
+      const env = { ...process.env, CI: "1", NODE_ENV: process.env.NODE_ENV || "test" };
+      delete env.NODE_TEST_CONTEXT;
+      delete env.NODE_OPTIONS;
+      return env;
+    })(),
+  });
+
+  const output = `${r.stdout || ""}\n${r.stderr || ""}`;
+  if (r.error && r.error.code === "ENOENT") {
+    return { ran: false, unavailable: `${suite.label} could not be started (${r.error.message})` };
+  }
+  if (r.signal || (r.error && /timed? ?out/i.test(r.error.message || ""))) {
+    return { ran: false, timedOut: true, label: suite.label, unavailable: `${suite.label} did not finish within ${timeoutMs / 1000}s and was killed` };
+  }
+
+  return {
+    ran: true,
+    label: suite.label,
+    exitCode: r.status,
+    counts: parseCounts(output),
+    failing: failingNames(output),
+    output: output.slice(-4000),
+  };
+}
+
+/**
+ * Blocking when the suite ran and reported failures — the project's own tests contradicting its own
+ * code needs no interpretation. Advisory when it could not run, timed out, or its outcome cannot be
+ * read: those are environment facts, and blocking on them would fail work that may be correct.
+ */
+export function testExecutionReport(projectDir, { wanted = false } = {}) {
+  if (!wanted) return { failures: [], advisories: [] };
+
+  const r = runTests(projectDir);
+
+  if (!r.ran) {
+    return {
+      failures: [],
+      advisories: [
+        `tests: NOT EXECUTED — ${r.unavailable}. Test files existing is not evidence that they pass, ` +
+          `and the task asks for tests someone else can run.`,
+      ],
+    };
+  }
+
+  const c = r.counts;
+  const failedCount = c ? c.failed : null;
+  const suiteFailed = failedCount !== null ? failedCount > 0 : r.exitCode !== 0;
+
+  if (!suiteFailed) {
+    const detail = c ? `${c.passed} of ${c.total} passed` : `exit 0, though the summary could not be parsed`;
+    return { failures: [], advisories: [`tests: ran under ${r.label} — ${detail}.`] };
+  }
+
+  const named = r.failing.length ? `\n  ${r.failing.join("\n  ")}` : "";
+  const headline = c
+    ? `${c.failed} of ${c.total} test(s) FAILED`
+    : `the suite exited ${r.exitCode} and its summary could not be parsed`;
+
+  return {
+    failures: [
+      `tests: ${headline} under ${r.label}.${named}\n` +
+        `These are this project's own tests failing against this project's own code. Check the names ` +
+        `above before changing anything: failures that all say the same thing about a connection are ` +
+        `an environment this suite needs and does not have, while failures that name the task's ` +
+        `acceptance criteria are the deliverable being wrong.`,
+    ],
+    advisories: [],
+  };
+}

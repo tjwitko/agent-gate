@@ -23,13 +23,14 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import { chatAnthropic, DEFAULT_MODEL as ANTHROPIC_DEFAULT_MODEL } from "./anthropic-adapter.mjs";
 import { immutabilityFailures, taskRequiresImmutability } from "./immutability.mjs";
 import { retentionFailures, taskRetentionRequirement } from "./retention.mjs";
+import { testExecutionReport } from "./test-execution.mjs";
 import { authenticationFailures } from "./authentication.mjs";
 import { manifestContractFailures } from "./manifest-contract.mjs";
 import { k8sManifestFailures } from "./k8s-manifest.mjs";
 import { secretRotationFailures } from "./secret-rotation.mjs";
 import { iamContractFailures } from "./iam-contract.mjs";
 import { artifactPresenceFailures, artifactInventory, artifactRegressions } from "./artifact-presence.mjs";
-import { codeQualityFailures } from "./code-quality.mjs";
+import { codeQualityFailures, taskWantsTests } from "./code-quality.mjs";
 import { SKIP_DIRS } from "./skip-dirs.mjs";
 import { ensureGitignore, isArtifact, ensureRepo } from "./commit-gate.mjs";
 // Shared with bench/, not duplicated: one definition of how this repo talks to Langfuse means the
@@ -1293,6 +1294,21 @@ export async function validateProject(projectDir, toolRegistry, taskText = "") {
   );
   failures.push(...retention.failures);
   advisories.push(...retention.advisories);
+
+  // Reading the tests was never the same as running them. code_quality said so honestly and it was
+  // not enough: a deliverable shipped a jest config, thirteen cases and no installed toolchain, and
+  // reported "comprehensive test coverage". Installed, its suite failed 3 of 12 -- and those three
+  // were exactly the acceptance criteria the task names, sitting among nine that passed.
+  //
+  // Blocking only when the suite RAN and reported failures, because that needs no interpretation:
+  // the project's own tests contradict its own code. A missing toolchain, a timeout or an
+  // unreadable summary stays advisory -- those are facts about this machine, and blocking on them
+  // would fail work that may be correct, which is how a gate gets switched off.
+  const tests = guarded("tests", () =>
+    testExecutionReport(projectDir, { wanted: taskWantsTests(taskText) })
+  );
+  failures.push(...tests.failures);
+  advisories.push(...tests.advisories);
 
   // Two IAM defects a clean plan cannot see. Terraform does not resolve managed-policy ARNs at
   // plan time, so a name that does not exist plans clean and fails at apply; and it has no idea

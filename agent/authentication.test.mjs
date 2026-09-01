@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
 
-import { checkAuthentication, authenticationFailures } from "./authentication.mjs";
+import { checkAuthentication, authenticationFailures, leakyCredentialCheck } from "./authentication.mjs";
 
 // These fixtures often carry more than one real defect -- a credential compared with `!=` against
 // an unset env var is BOTH vacuous and timing-unsafe. Asserting on totals would make every test
@@ -1021,4 +1021,46 @@ test("an authorization header compared with != is a timing finding", () => {
   const timing = failures.filter((f) => /constant-time/.test(f));
   assert.equal(timing.length, 1);
   assert.match(timing[0], /authorization/);
+});
+
+// --- a credential word beside `===` is not a credential comparison ---------
+// `typeof apiKey !== "string"` is a type guard. Reporting it as a timing leak blocked a deliverable
+// whose credential comparison used crypto.timingSafeEqual in another file, and four of that run's
+// ten validation rounds went into a finding that was never real.
+test("a typeof guard on a credential is not a leaky comparison", () => {
+  assert.equal(
+    leakyCredentialCheck(`
+      const apiKey = req.headers['x-api-key'];
+      if (!apiKey || typeof apiKey !== 'string') return res.status(401).end();
+      const ok = crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
+    `),
+    false
+  );
+});
+
+test("presence checks against null, undefined and numbers are not leaky comparisons", () => {
+  for (const src of [
+    "if (token === undefined) return;",
+    "if (apiKey === null) return;",
+    "if (secret == None): return",
+    "if (credential !== false) {}",
+  ]) {
+    assert.equal(leakyCredentialCheck(src), false, src);
+  }
+});
+
+test("a genuine credential comparison is still reported", () => {
+  assert.equal(leakyCredentialCheck("if x_internal_token != internal_token: abort(403)"), "x_internal_token");
+});
+
+// The scan must not stop at the first match. A benign comparison earlier in the file standing in
+// for the rest is the same short-circuit as the file-wide constant-time bail-out that this check
+// already had removed, one scope down.
+test("a benign comparison earlier does not mask a real one later", () => {
+  const src = `
+    if (typeof apiKey !== 'string') return;
+    if (token === undefined) return;
+    if (supplied_token != stored_token) { deny(); }
+  `;
+  assert.equal(leakyCredentialCheck(src), "supplied_token");
 });

@@ -66,6 +66,27 @@ export function taskRequiresImmutability(taskText = "") {
   return IMMUTABILITY_PHRASES.some((re) => re.test(taskText));
 }
 
+// Evidence that DynamoDB is actually reached, in any of the SDKs a deliverable has used here.
+// A bare `dynamodb` substring is not on this list on purpose: it appears in terraform state-lock
+// configuration, in comments, and in prose, none of which is a data store.
+const DDB_CLIENT =
+  /(?:DynamoDBDocumentClient|DynamoDBClient|@aws-sdk\/(?:client|lib)-dynamodb|aws-sdk\/clients\/dynamodb|boto3\s*\.\s*(?:client|resource)\s*\(\s*["']dynamodb["']|new\s+(?:AWS\.)?DynamoDB(?:\.DocumentClient)?\b|dynamodb\.NewFromConfig|dynamodb\.New\b|DynamoDbClient)/i;
+
+function firstMatch(re, text) {
+  const m = re.exec(text);
+  return m ? m[0] : null;
+}
+
+// Drops whole-line comments only. A line-anywhere stripper would cut at the `//` inside a URL and
+// could remove real code sitting after it; the case this exists for -- a commented-out terraform
+// setting -- is always a leading marker.
+function uncommented(text) {
+  return text
+    .split("\n")
+    .filter((l) => !/^\s*(?:#|\/\/|\*|--)/.test(l))
+    .join("\n");
+}
+
 function walk(dir, acc = [], root = dir) {
   let entries;
   try {
@@ -138,14 +159,22 @@ export function checkImmutability(projectDir, { required = false } = {}) {
   // Comments stripped first. `# Create table with immutable constraints` matched the DDL pattern
   // and yielded a relational store called "with", complete with advice about triggers and REVOKEs
   // for a table that does not exist. Prose about a table is not a table.
-  const codeOnly = all
-    .split("\n")
-    .filter((l) => !/^\s*(#|--|\/\/|\*)/.test(l))
-    .join("\n");
+  // Shares uncommented() with the DynamoDB gate rather than repeating the filter. Two copies of
+  // "what counts as a comment" in one file is how the credential word lists drifted apart above.
+  const codeOnly = uncommented(all);
   const tableDecl =
     /__tablename__\s*=\s*["'](\w+)["']/i.exec(codeOnly) ||
     /CREATE TABLE(?:\s+IF NOT EXISTS)?\s+["']?(\w+)/i.exec(codeOnly);
-  const usesRelational = /sqlalchemy|psycopg2|sqlite3|aws_db_instance/i.test(all);
+  // Another list of spellings standing in for a test of shape, and it cost the same way the
+  // DynamoDB mention did. The list was Python's three drivers plus one Terraform resource name, so
+  // a TypeScript deliverable using node-postgres against an Aurora cluster had no recognised store
+  // at all: its CREATE TABLE, its BEFORE UPDATE OR DELETE trigger and its missing REVOKE were all
+  // invisible, and the requirement this check exists to verify went unevaluated while the check
+  // reported on a DynamoDB table that did not exist.
+  const usesRelational =
+    /sqlalchemy|psycopg2|sqlite3|\bpg\b|node-postgres|["'`]pg["'`]|pg-promise|postgres\.js|mysql2?\b|better-sqlite3|knex|typeorm|prisma|sequelize|database\/sql|aws_db_instance|aws_rds_cluster|aws_rds_cluster_instance/i.test(
+      all
+    );
   // Terraform's own backend is not the application's record store. A multi-root project with an S3
   // state bucket and a DynamoDB lock table produced four findings, none of them about the store the
   // task describes, and two carrying advice that would BREAK the system if followed: Object Lock on
@@ -182,7 +211,15 @@ export function checkImmutability(projectDir, { required = false } = {}) {
   // ---- DynamoDB ----------------------------------------------------------
   const ddbName = pickStore(/resource\s+"aws_dynamodb_table"\s+"(\w+)"/gi, tfText);
   const anyDdbDeclared = /resource\s+"aws_dynamodb_table"/i.test(tfText);
-  const usesDdb = /dynamodb/i.test(all);
+  // A mention is not a use. `/dynamodb/i` over all source matched a COMMENTED-OUT `dynamodb_table`
+  // line in a terraform backend block -- state locking, not a data store -- and on that alone this
+  // check reported a "boto3 dynamodb client" in a TypeScript project containing no Python and no
+  // DynamoDB, then blocked on a missing ConditionExpression for a table that does not exist. That
+  // is worse than a false positive: having locked onto a phantom store it never looked at the real
+  // one, so a Postgres table with an UPDATE/DELETE trigger went unexamined and the requirement it
+  // was meant to verify was never actually checked. Require a client or a declared table.
+  const ddbEvidence = firstMatch(DDB_CLIENT, uncommented(all));
+  const usesDdb = anyDdbDeclared || Boolean(ddbEvidence);
   if (usesDdb && (ddbName || !anyDdbDeclared)) {
     // `=` is Python's assignment; `:` is a JavaScript/TypeScript object literal, which is how the
     // AWS SDK v3 takes it. Requiring `=` cost a whole run: a TypeScript deliverable wrote
@@ -214,7 +251,10 @@ export function checkImmutability(projectDir, { required = false } = {}) {
     }
     stores.push({
       kind: "dynamodb",
-      evidence: ddbName ? `table "${ddbName}"` : "boto3 dynamodb client",
+      // Say what was actually found. "boto3 dynamodb client" was hardcoded, so a JavaScript project
+      // was told about a Python client it does not have -- which makes a real finding read as a
+      // bug in the checker and invites the reader to dismiss it.
+      evidence: ddbName ? `table "${ddbName}"` : `${ddbEvidence} in the source`,
       protected: missing.length === 0,
       missing: missing.join(", and "),
     });

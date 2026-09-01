@@ -344,3 +344,73 @@ test("a real store declared after the plumbing is still the one reported", () =>
   assert.ok(s3);
   assert.match(s3.evidence, /audit_logs/);
 });
+
+// --- a mention of dynamodb is not a use of dynamodb ------------------------
+// A commented-out `dynamodb_table` in a terraform backend block -- state locking, not a data store
+// -- made this check report a "boto3 dynamodb client" in a TypeScript project with no Python and
+// no DynamoDB, and block on a ConditionExpression for a table that does not exist. It then never
+// looked at the store the project actually had.
+const TS_POSTGRES_STORE = {
+  "src/db/database.ts": `
+    import { Pool } from 'pg';
+    export class Database {
+      async initialize() {
+        await this.pool.query(\`
+          CREATE TABLE IF NOT EXISTS webhooks (
+            id UUID PRIMARY KEY,
+            event_id VARCHAR(255) NOT NULL,
+            UNIQUE(event_id, provider_id)
+          );
+        \`);
+        await this.pool.query(\`
+          CREATE OR REPLACE FUNCTION prevent_webhook_modification() RETURNS TRIGGER AS $$
+          BEGIN RAISE EXCEPTION 'Webhooks are immutable'; END;
+          $$ LANGUAGE plpgsql;
+          CREATE TRIGGER no_modify BEFORE UPDATE OR DELETE ON webhooks
+            FOR EACH ROW EXECUTE FUNCTION prevent_webhook_modification();
+        \`);
+      }
+    }`,
+  "terraform/backend.tf": `
+    terraform {
+      # backend "s3" {
+      #   bucket         = "webhook-receiver-terraform-state"
+      #   dynamodb_table = "webhook-receiver-terraform-locks"
+      # }
+    }`,
+  "terraform/main.tf": `resource "aws_rds_cluster" "main" { engine = "aurora-postgresql" }`,
+};
+
+test("a commented-out terraform lock table is not a DynamoDB store", () => {
+  run(TS_POSTGRES_STORE, (dir) => {
+    const r = checkImmutability(dir, { required: true });
+    assert.equal(r.stores.filter((s) => s.kind === "dynamodb").length, 0);
+  });
+});
+
+test("a node-postgres store behind an Aurora cluster is found and judged", () => {
+  run(TS_POSTGRES_STORE, (dir) => {
+    const r = checkImmutability(dir, { required: true });
+    const rel = r.stores.find((s) => s.kind === "relational");
+    assert.ok(rel, "the relational store was not identified at all");
+    assert.match(rel.evidence, /webhooks/);
+    // The trigger is present and must be credited; the REVOKE is genuinely absent.
+    assert.match(rel.missing, /REVOKE/);
+    assert.doesNotMatch(rel.missing, /BEFORE UPDATE and BEFORE DELETE trigger/);
+  });
+});
+
+test("a real DynamoDB client is still detected", () => {
+  run(
+    {
+      "src/store.ts":
+        'import { DynamoDBClient } from "@aws-sdk/client-dynamodb";\n' +
+        'await client.send(new PutItemCommand({ TableName: "audit_log", Item: item }));',
+      "main.tf": 'resource "aws_dynamodb_table" "audit_log" { name = "audit_log" }',
+    },
+    (dir) => {
+      const r = checkImmutability(dir, { required: true });
+      assert.ok(r.stores.some((s) => s.kind === "dynamodb"), "a declared table went undetected");
+    }
+  );
+});

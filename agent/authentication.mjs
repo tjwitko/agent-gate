@@ -234,10 +234,22 @@ export function vacuousCredentialChecks(all) {
 // went unreported in a graded deliverable for exactly that reason -- two lists in one file,
 // disagreeing about what a credential is called.
 const CREDENTIAL_WORD = "api_?key|token|secret|credential|password|authorization|bearer";
+// Both operands are captured, because the credential word next to an equality operator is not on
+// its own evidence of anything. `typeof apiKey !== "string"` is a type guard, and reporting it as a
+// timing leak blocked a deliverable whose credential comparison used crypto.timingSafeEqual two
+// files away. Four of that run's ten validation rounds went into a finding that was never real.
+// What matters is what the credential is being compared TO: another value leaks it a byte at a
+// time, whereas null, a type name or a number tells an attacker only whether the header was sent.
 const LEAKY_CREDENTIAL_COMPARE = new RegExp(
-  `\\b(\\w*(?:${CREDENTIAL_WORD})\\w*)\\s*(?:===?|!==?)|(?:===?|!==?)\\s*(\\w*(?:${CREDENTIAL_WORD})\\w*)\\b`,
-  "i"
+  `(typeof\\s+)?\\b(\\w*(?:${CREDENTIAL_WORD})\\w*)\\s*(?:===?|!==?)\\s*([^\\s;,)]+)` +
+    `|([^\\s;,(]+)\\s*(?:===?|!==?)\\s*(typeof\\s+)?\\b(\\w*(?:${CREDENTIAL_WORD})\\w*)\\b`,
+  "gi"
 );
+
+// Operands that carry no secret. Comparing against any of these is a presence or type check: it
+// reveals whether a header arrived, not what it contained.
+const NON_SECRET_OPERAND =
+  /^(?:null|undefined|true|false|none|nil|-?\d+(?:\.\d+)?|["'`](?:|string|object|number|boolean|undefined|function|symbol|bigint)["'`])[;,)\]}]*$/i;
 
 export function leakyCredentialCheck(all) {
   // Deliberately NOT gated on the file containing a constant-time comparison somewhere. That
@@ -245,13 +257,23 @@ export function leakyCredentialCheck(all) {
   // hmac.compare_digest for the signature and a bare `!=` for the support token, so one correct
   // comparison suppressed the report of an incorrect one. A constant-time call uses no equality
   // operator, so a match here is evidence on its own.
-  const m = LEAKY_CREDENTIAL_COMPARE.exec(all);
-  if (!m) return false;
-  const name = m[1] || m[2] || "";
-  // A signature compared loosely is the OTHER check's finding; reporting it here too would give
-  // one defect two names.
-  if (/signature|digest|hmac/i.test(name)) return false;
-  return name;
+  //
+  // Every match is examined rather than only the first. A single benign comparison appearing
+  // earlier in the file must not stand in for the rest -- that is the same short-circuit as the
+  // file-wide bail-out, one scope down.
+  for (const m of all.matchAll(LEAKY_CREDENTIAL_COMPARE)) {
+    const typeofPrefix = m[1] || m[5];
+    const name = m[2] || m[6] || "";
+    const other = (m[3] || m[4] || "").trim();
+    // `typeof cred === ...` asks what kind of thing arrived, never what it is.
+    if (typeofPrefix) continue;
+    if (NON_SECRET_OPERAND.test(other)) continue;
+    // A signature compared loosely is the OTHER check's finding; reporting it here too would give
+    // one defect two names.
+    if (/signature|digest|hmac/i.test(name)) continue;
+    return name;
+  }
+  return false;
 }
 
 export function leakySignatureCheck(all) {

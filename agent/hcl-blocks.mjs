@@ -60,6 +60,19 @@ export function hclAttr(text, attr) {
   return m ? m[1] : null;
 }
 
+/** `name = <number>` at any depth of `text`, unquoted or quoted. Returns null when absent. */
+export function hclNumber(text, attr) {
+  const m = new RegExp(`\\b${attr}\\s*=\\s*"?(-?\\d+(?:\\.\\d+)?)"?`).exec(text);
+  return m ? Number(m[1]) : null;
+}
+
+/** `name = true|false` at any depth of `text`. Returns null when absent, so "absent" and "false"
+ *  stay distinguishable — a setting that defaults to on must not read as off merely by omission. */
+export function hclBool(text, attr) {
+  const m = new RegExp(`\\b${attr}\\s*=\\s*"?(true|false)"?`, "i").exec(text);
+  return m ? m[1].toLowerCase() === "true" : null;
+}
+
 // Long-lived workloads only. A Job or CronJob legitimately has no readiness probe, exactly as in
 // the YAML path.
 export const TF_SERVER_WORKLOAD = /^kubernetes_(deployment|stateful_set|daemon_set|replication_controller)(_v1)?$/;

@@ -25,19 +25,9 @@
 //     `users` table is not in scope. Intent is read from the store's name, which is the only
 //     evidence available without asking the model what it meant.
 
-import { readdirSync, readFileSync, statSync } from "fs";
 import path from "path";
 
-import { SKIP_DIRS } from "./skip-dirs.mjs";
-
-// .go, .rb and .java were absent, so this check could not read a Go deliverable's source at all —
-// it reported a project that HAD its immutability control as having none, and no amount of fixing
-// the pattern would have helped because the file was never opened. The language list must track the
-// languages the loop can actually build, which build_check already detects at runtime.
-const READ_EXT = new Set([
-  ".py", ".sql", ".tf", ".tfvars", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".go", ".rb", ".java",
-  ".yaml", ".yml",
-]);
+import { READ_EXT, walk, uncommented, firstMatch } from "./source-files.mjs";
 
 // The store is in scope only if it names itself after an audit trail. Deliberately narrow: firing
 // on every table would make this noise, and noise is how a blocking check gets switched off.
@@ -71,43 +61,6 @@ export function taskRequiresImmutability(taskText = "") {
 // configuration, in comments, and in prose, none of which is a data store.
 const DDB_CLIENT =
   /(?:DynamoDBDocumentClient|DynamoDBClient|@aws-sdk\/(?:client|lib)-dynamodb|aws-sdk\/clients\/dynamodb|boto3\s*\.\s*(?:client|resource)\s*\(\s*["']dynamodb["']|new\s+(?:AWS\.)?DynamoDB(?:\.DocumentClient)?\b|dynamodb\.NewFromConfig|dynamodb\.New\b|DynamoDbClient)/i;
-
-function firstMatch(re, text) {
-  const m = re.exec(text);
-  return m ? m[0] : null;
-}
-
-// Drops whole-line comments only. A line-anywhere stripper would cut at the `//` inside a URL and
-// could remove real code sitting after it; the case this exists for -- a commented-out terraform
-// setting -- is always a leading marker.
-function uncommented(text) {
-  return text
-    .split("\n")
-    .filter((l) => !/^\s*(?:#|\/\/|\*|--)/.test(l))
-    .join("\n");
-}
-
-function walk(dir, acc = [], root = dir) {
-  let entries;
-  try {
-    entries = readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return acc;
-  }
-  for (const e of entries) {
-    const full = path.join(dir, e.name);
-    if (e.isDirectory()) {
-      if (!SKIP_DIRS.has(e.name)) walk(full, acc, root);
-    } else if (READ_EXT.has(path.extname(e.name))) {
-      try {
-        if (statSync(full).size <= 512 * 1024) acc.push({ rel: path.relative(root, full), text: readFileSync(full, "utf8") });
-      } catch {
-        /* unreadable is not this check's problem to report */
-      }
-    }
-  }
-  return acc;
-}
 
 /**
  * Which append-only stores this project appears to use, and whether each is actually protected.

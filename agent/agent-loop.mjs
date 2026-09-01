@@ -22,6 +22,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // so a local run never needs ANTHROPIC_API_KEY to be set.
 import { chatAnthropic, DEFAULT_MODEL as ANTHROPIC_DEFAULT_MODEL } from "./anthropic-adapter.mjs";
 import { immutabilityFailures, taskRequiresImmutability } from "./immutability.mjs";
+import { retentionFailures, taskRetentionRequirement } from "./retention.mjs";
 import { authenticationFailures } from "./authentication.mjs";
 import { manifestContractFailures } from "./manifest-contract.mjs";
 import { k8sManifestFailures } from "./k8s-manifest.mjs";
@@ -1281,6 +1282,17 @@ export async function validateProject(projectDir, toolRegistry, taskText = "") {
   const rotation = guarded("secret_rotation", () => secretRotationFailures(projectDir, taskText));
   failures.push(...rotation.failures);
   advisories.push(...rotation.advisories);
+
+  // Retention had been stated in every run of this task and checked in none of them -- roughly
+  // sixteen deliverables, no coverage at all. Gated on the task like its two neighbours, and it
+  // blocks only on a mechanism that actually deletes the records early: never deleting them
+  // satisfies a seven-year requirement outright, so "no expiry configured" is compliance and must
+  // not be reported as a defect.
+  const retention = guarded("retention", () =>
+    retentionFailures(projectDir, { requiredDays: taskRetentionRequirement(taskText)?.days })
+  );
+  failures.push(...retention.failures);
+  advisories.push(...retention.advisories);
 
   // Two IAM defects a clean plan cannot see. Terraform does not resolve managed-policy ARNs at
   // plan time, so a name that does not exist plans clean and fails at apply; and it has no idea

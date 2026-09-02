@@ -24,9 +24,14 @@ import { walk, uncommented } from "./source-files.mjs";
 import { hclResources, hclBlocks, hclAttr, hclNumber, hclBool, hclVariableDefaults } from "./hcl-blocks.mjs";
 
 const UNIT_DAYS = { day: 1, week: 7, month: 30, year: 365 };
+// Written from one phrasing of one task, so it stopped at twelve: "90 days" was read and "ninety
+// days" was not. The tens matter most -- a retention period is far more often thirty, ninety or a
+// hundred and eighty days than eleven of anything.
 const WORD_NUMBERS = {
-  one: 1, two: 2, three: 3, four: 4, five: 5, six: 6,
-  seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12,
+  one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
+  eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17,
+  eighteen: 18, nineteen: 19, twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60,
+  seventy: 70, eighty: 80, ninety: 90,
 };
 
 // Months and years are approximated at 30 and 365 days. The comparison this feeds is "is the
@@ -36,13 +41,25 @@ function toDays(count, unit) {
   return count * (UNIT_DAYS[unit.toLowerCase().replace(/s$/, "")] ?? 0);
 }
 
-const AMOUNT = `(\\d+|${Object.keys(WORD_NUMBERS).join("|")})`;
+// Longest first, so "seventeen" is not read as "seven" with a stray "teen".
+const AMOUNT = `(\\d+|${Object.keys(WORD_NUMBERS).sort((a, b) => b.length - a.length).join("|")})`;
 const UNIT = "(day|week|month|year)s?";
+// [^.;\n], not [^.]. With [^.] the span ran through a semicolon and read a deployment cadence as a
+// retention requirement -- "Keep the log short; rotate it every 7 days" produced a 7-day
+// requirement, "Keep it lean; deploys go out every 2 weeks" a 14-day one. Fabricating a requirement
+// is worse than missing one: it switches this check on and has it report against a period the task
+// never stated.
+const NEAR = (n) => `[^.;\\n]{0,${n}}?`;
+// Keeping a record is said in more ways than "retain": it must remain available, we must be able to
+// produce it, nothing may be deleted before, records live for. The verbs of destruction belong here
+// too -- a sentence about when something may be deleted states the same requirement from the other
+// side.
+const KEEP =
+  "retain|retention|kept|keep|stored?|storage|preserv|archiv|hold|held|available|access\\w*|" +
+  "produce|reproduce|live|lives|survive|remain|deleted?|delete|purge[ds]?|remove[ds]?|destroy\\w*|expire[ds]?";
 const RETENTION_PHRASES = [
-  // "Records are retained for seven years", "kept for 90 days", "store callbacks for 3 months"
-  new RegExp(`\\b(?:retain|retention|kept|keep|stored?|preserv|archiv|hold)\\w*\\b[^.]{0,40}?\\b${AMOUNT}[- ]?${UNIT}\\b`, "i"),
-  // "a seven-year retention period", "7 year retention"
-  new RegExp(`\\b${AMOUNT}[- ]?${UNIT}\\b[^.]{0,25}\\bretention\\b`, "i"),
+  new RegExp(`\\b(?:${KEEP})\\w*\\b${NEAR(45)}\\b${AMOUNT}[- ]?${UNIT}\\b`, "i"),
+  new RegExp(`\\b${AMOUNT}[- ]?${UNIT}\\b${NEAR(30)}\\b(?:retention|retained|retain)\\b`, "i"),
 ];
 
 /**

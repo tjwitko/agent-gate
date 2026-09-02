@@ -323,3 +323,52 @@ test("a vault lock minimum is credited", () => {
     }
   );
 });
+
+// --- the period, however the task words it --------------------------------
+// Measured before this change: 5 of 10 rephrasings recognised. Worse, [^.] let a proximity span run
+// through a semicolon and FABRICATE a period from a deployment cadence -- "Keep the log short;
+// rotate it every 7 days" produced a 7-day requirement. Inventing one is worse than missing one: it
+// switches this check on and has it report against a period the task never stated.
+const STATES_A_PERIOD = [
+  ["Records are retained for seven years.", SEVEN_YEARS],
+  ["Callbacks must be kept for 90 days.", 90],
+  ["The system has a 7-year retention period.", SEVEN_YEARS],
+  ["Records must remain available for seven years.", SEVEN_YEARS],
+  ["We are required to produce any callback for up to seven years.", SEVEN_YEARS],
+  ["Nothing may be deleted for at least seven years.", SEVEN_YEARS],
+  ["Store every event for six months.", 180],
+  ["Keep the audit trail for ninety days.", 90],
+  ["Records live for seven years before they may be purged.", SEVEN_YEARS],
+  ["Regulatory hold: seven years.", SEVEN_YEARS],
+];
+for (const [task, days] of STATES_A_PERIOD) {
+  test(`a retention period survives being rephrased: ${task.slice(0, 40)}`, () => {
+    assert.equal(taskRetentionRequirement(task)?.days, days, task);
+  });
+}
+
+const STATES_NO_PERIOD = [
+  "Accept HTTP callbacks and verify signatures.",
+  "The provider rotates its signing secret every quarter.",
+  "Respond within 200 milliseconds.",
+  "Deploy every two weeks.",
+  "Remove the feature flag after the launch.",
+  // The three that were fabricated before the clause bound was fixed.
+  "Keep the log short; rotate it every 7 days.",
+  "Keep it lean; deploys go out every 2 weeks.",
+  "Store the config in git; review it every 6 months.",
+];
+for (const task of STATES_NO_PERIOD) {
+  test(`no period is invented from: ${task.slice(0, 40)}`, () => {
+    assert.equal(taskRetentionRequirement(task), null, task);
+  });
+}
+
+// The word list was written from one task and stopped at twelve, so "90 days" was read and "ninety
+// days" was not. Longest-first alternation keeps "seventeen" from being read as "seven".
+test("number words above twelve are read, and longer words win", () => {
+  assert.equal(taskRetentionRequirement("Keep it for thirty days")?.days, 30);
+  assert.equal(taskRetentionRequirement("Keep it for ninety days")?.days, 90);
+  assert.equal(taskRetentionRequirement("Keep it for seventeen days")?.days, 17);
+  assert.equal(taskRetentionRequirement("Keep it for seven days")?.days, 7);
+});

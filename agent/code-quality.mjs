@@ -9,14 +9,51 @@
 
 import { readdirSync, readFileSync, statSync } from "fs";
 import path from "path";
+
+import { taskMatcher } from "./task-phrases.mjs";
 import { SKIP_DIRS } from "./skip-dirs.mjs";
 
 const MAX_FILE_BYTES = 512 * 1024;
 const CODE_EXT = [".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".go", ".rb", ".java"];
 
-const TASK_WANTS_TESTS = /\b(automated )?tests?\b|\btest suite\b|\bunit test/i;
-const TASK_WANTS_ERROR_DISTINCTION =
-  /\berrors? (?:distinguished|separated) from faults?\b|\bbad request\b[^.]{0,80}\bnot\b|\bdistinguish\w*\b[^.]{0,40}\bfaults?\b/i;
+// Both gate BLOCKING findings, and taskWantsTests now also gates whether the suite is executed at
+// all -- so a miss here silences the newest blocking check entirely. Measured against rephrasings
+// before this change: tests 3/8, error distinction 3/7.
+//
+// The bare `tests?` that used to carry this also fired on "run it in the test environment first",
+// inventing a test requirement from an environment name. It keeps its word but not its compounds,
+// and that exclusion is a short closed list of nouns rather than an open guess.
+const TASK_WANTS_TESTS = taskMatcher({
+  any: [
+    /\bautomated\s+(?:tests?|checks?|verification)\b/i,
+    /\b(?:unit|integration|acceptance|end[-\s]to[-\s]end|e2e|smoke|regression)\s+tests?\b/i,
+    /\btest\s+(?:suite|coverage|cases?|harness)\b/i,
+    /\b(?:regression|code|test)\s+coverage\b/i,
+    /\btests?\b(?!\s+(?:environment|env|data|account|users?|mode|server|instance|fixtures?)\b)/i,
+  ],
+  // "cover the forged-callback path with specs", "CI must run the suite", "ship it with coverage
+  // for the duplicate-delivery case". None of these means a test suite on its own: a spec can be a
+  // pod spec, a suite can be a product suite, coverage can be network coverage.
+  near: [
+    { terms: "specs?|suite|coverage",
+      nouns: "covers?|covered|coverage|runs?|written|writes?|passing|assert\\w*|cases?|paths?|CI" },
+  ],
+});
+
+// `[^.]{0,80}` ran straight through a semicolon: "A bad request is fine; the cluster is not our
+// concern" read as a requirement to distinguish errors from faults. Clause-bounded now.
+const TASK_WANTS_ERROR_DISTINCTION = taskMatcher({
+  any: [
+    /\berrors?\s+(?:distinguished|separated|distinct)\s+from\s+faults?\b/i,
+    /\bnot\s+(?:be\s+)?(?:reported|treated|returned)\s+as\s+(?:an?\s+)?(?:server\s+error|fault|outage|failure|5\d\d)\b/i,
+  ],
+  near: [
+    { terms: "bad requests?|malformed|invalid\\s+(?:input|payload|body|request)|client (?:errors?|mistakes?)|caller'?s? mistakes?|4xx",
+      nouns: "faults?|outages?|server errors?|5xx|5\\d\\d|not|never", window: 50 },
+    { terms: "distinguish\\w*|separate[ds]?|differentiate[ds]?",
+      nouns: "faults?|server errors?|outages?|failures?", window: 50 },
+  ],
+});
 
 // A file is a test if it is named like one AND asserts something. Naming alone was not enough: a
 // file called test_main.py containing a TODO is not a test, and rewarding it would teach exactly
@@ -79,10 +116,10 @@ function walk(dir, exts, acc = [], root = dir) {
 }
 
 export function taskWantsTests(taskText = "") {
-  return TASK_WANTS_TESTS.test(taskText);
+  return TASK_WANTS_TESTS(taskText);
 }
 export function taskWantsErrorDistinction(taskText = "") {
-  return TASK_WANTS_ERROR_DISTINCTION.test(taskText);
+  return TASK_WANTS_ERROR_DISTINCTION(taskText);
 }
 
 export function checkCodeQuality(projectDir, taskText = "") {

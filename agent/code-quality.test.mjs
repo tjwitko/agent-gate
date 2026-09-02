@@ -176,3 +176,68 @@ test("a patch target outside the project is left alone", () => {
   );
   assert.deepEqual(failures.filter((f) => /patch target/.test(f)), []);
 });
+
+// --- the task's wording, not one phrasing of it ---------------------------
+// Measured before this change: 3 of 8 rephrasings recognised, plus one false positive. Both
+// triggers gate BLOCKING findings, and taskWantsTests also decides whether the suite is executed at
+// all -- so a miss here silences the newest blocking check entirely.
+const WANTS_TESTS = [
+  "Automated tests that someone else can run.",
+  "Include a test suite covering the signature check.",
+  "Write unit tests for the happy path.",
+  "Prove the signature check works with automated checks someone else can run.",
+  "Cover the forged-callback path with specs.",
+  "CI must run the suite on every commit.",
+  "Ship it with coverage for the duplicate-delivery case.",
+  "We need regression coverage before this goes live.",
+];
+for (const task of WANTS_TESTS) {
+  test(`a test requirement survives being rephrased: ${task.slice(0, 40)}`, () => {
+    assert.ok(taskWantsTests(task), task);
+  });
+}
+
+// Widening a trigger is how false positives get made. These ask for no tests, and the last one is
+// the case the old bare `tests?` invented a requirement from.
+const WANTS_NO_TESTS = [
+  "Build a REST API for managing users.",
+  "Deploy the service to production.",
+  "Run it in the test environment first.",
+  "Load the test data into the staging account.",
+  "Give me the deployment specs and the pod specs.",
+  "Our product suite includes three services.",
+];
+for (const task of WANTS_NO_TESTS) {
+  test(`a wider vocabulary does not invent a test requirement: ${task.slice(0, 40)}`, () => {
+    assert.equal(taskWantsTests(task), false, task);
+  });
+}
+
+const WANTS_ERROR_DISTINCTION = [
+  "Errors distinguished from faults: a bad request from the provider is not the same as our service failing.",
+  "A bad request must not be reported as a server error.",
+  "Distinguish client mistakes from infrastructure faults.",
+  "Return 4xx for malformed input and 5xx only when we break.",
+  "Do not return 500 for a malformed payload.",
+  "A caller's mistake is not an outage.",
+  "Client errors and server errors must be separated.",
+];
+for (const task of WANTS_ERROR_DISTINCTION) {
+  test(`an error-distinction requirement survives being rephrased: ${task.slice(0, 40)}`, () => {
+    assert.ok(taskWantsErrorDistinction(task), task);
+  });
+}
+
+// The trap the shared matcher exists to pay for: [^.]{0,80} ran through a semicolon.
+const NO_ERROR_DISTINCTION = [
+  "Handle errors gracefully.",
+  "Log every failure.",
+  "Return JSON responses.",
+  "A bad request is fine; the cluster is not our concern.",
+  "Distinguish the two providers; faults are logged separately.",
+];
+for (const task of NO_ERROR_DISTINCTION) {
+  test(`a proximity pair does not cross a clause: ${task.slice(0, 40)}`, () => {
+    assert.equal(taskWantsErrorDistinction(task), false, task);
+  });
+}

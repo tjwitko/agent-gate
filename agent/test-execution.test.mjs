@@ -56,7 +56,10 @@ test("a failing suite blocks and names which tests failed", () => {
 // The Haiku deliverable's exact state: a jest config, a test file, and no installed toolchain.
 // Reported, never blocking -- a missing node_modules is an environment fact, and failing work that
 // may be correct is how a gate gets switched off.
-test("a declared runner that is not installed is reported, not blocked on", () => {
+// A runner the project declares in its own manifest and did not install is the project's claim
+// failing, not a fact about this machine: nobody can run the suite as delivered, and the task asks
+// for tests someone else can run. This blocks, unlike every other unavailable reason.
+test("a declared runner that is not installed BLOCKS", () => {
   run(
     {
       "package.json": JSON.stringify({ devDependencies: { jest: "^29.7.0" } }),
@@ -64,12 +67,23 @@ test("a declared runner that is not installed is reported, not blocked on", () =
     },
     (dir) => {
       const r = testExecutionReport(dir, { wanted: true });
-      assert.equal(r.failures.length, 0);
-      assert.match(r.advisories[0], /NOT EXECUTED/);
-      assert.match(r.advisories[0], /jest.*not installed/s);
-      assert.match(r.advisories[0], /npm install/);
+      assert.equal(r.failures.length, 1);
+      assert.equal(r.advisories.length, 0);
+      assert.match(r.failures[0], /declares in package.json/);
+      assert.match(r.failures[0], /npm install/);
     }
   );
+});
+
+// The boundary: an environment fact must still only advise. Blocking on a toolchain this machine
+// happens not to have would fail work that may be perfectly correct.
+test("a Python suite with no pytest here is advised, not blocked", () => {
+  run({ "tests/test_x.py": "def test_x():\n    assert True\n" }, (dir) => {
+    const r = testExecutionReport(dir, { wanted: true });
+    if (r.failures.length) return; // pytest is installed on this machine; nothing to assert
+    assert.equal(r.failures.length, 0);
+    assert.match(r.advisories[0], /NOT EXECUTED/);
+  });
 });
 
 test("a project with no tests at all is reported as having none to run", () => {

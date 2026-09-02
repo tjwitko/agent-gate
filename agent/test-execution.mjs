@@ -53,11 +53,18 @@ export function detectSuite(projectDir) {
 
     if (declared) {
       if (!existsSync(bin(declared))) {
+        // The project's OWN manifest names this runner. Its absence is not a fact about this
+        // machine the way a missing pytest is -- it is the deliverable failing its own declared
+        // requirement, and the task asks for tests someone else can run. Marked so the report
+        // blocks rather than advises.
         return {
+          declaredRunnerMissing: true,
           unavailable:
-            `the suite is written for ${declared}, which is not installed — node_modules/.bin/${declared} ` +
-            `does not exist. Dependencies are deliberately not installed here, so run \`npm install\` ` +
-            `and try again. Until then nobody can run these tests, including whoever receives this project`,
+            `the suite is written for ${declared}, which this project declares in package.json and ` +
+            `which is not installed — node_modules/.bin/${declared} does not exist. Nobody can run ` +
+            `these tests as delivered, including whoever receives this project. Run \`npm install\` ` +
+            `(dependencies are deliberately not installed by this check, because npm install on a ` +
+            `generated manifest executes arbitrary postinstall hooks) and make sure the suite passes`,
         };
       }
       return { label: declared, cmd: bin(declared), args: declared === "jest" ? ["--ci"] : [], cwd: projectDir };
@@ -163,7 +170,9 @@ export const parseCountsForTest = parseCounts;
 /** Runs the suite. Returns { ran, unavailable, timedOut, counts, failing, exitCode }. */
 export function runTests(projectDir, { timeoutMs = TIMEOUT_MS } = {}) {
   const suite = detectSuite(projectDir);
-  if (suite.unavailable) return { ran: false, unavailable: suite.unavailable };
+  if (suite.unavailable) {
+    return { ran: false, unavailable: suite.unavailable, declaredRunnerMissing: !!suite.declaredRunnerMissing };
+  }
 
   const r = spawnSync(suite.cmd, suite.args, {
     cwd: suite.cwd,
@@ -212,13 +221,14 @@ export function testExecutionReport(projectDir, { wanted = false } = {}) {
   const r = runTests(projectDir);
 
   if (!r.ran) {
-    return {
-      failures: [],
-      advisories: [
-        `tests: NOT EXECUTED — ${r.unavailable}. Test files existing is not evidence that they pass, ` +
-          `and the task asks for tests someone else can run.`,
-      ],
-    };
+    const line =
+      `tests: NOT EXECUTED — ${r.unavailable}. Test files existing is not evidence that they pass, ` +
+      `and the task asks for tests someone else can run.`;
+    // A runner the project itself declared and did not install is the project's claim failing, so
+    // it blocks. Everything else here -- no pytest on this machine, a timeout, no runner
+    // identifiable at all -- is a fact about the environment, and blocking on those would fail work
+    // that may be correct.
+    return r.declaredRunnerMissing ? { failures: [line], advisories: [] } : { failures: [], advisories: [line] };
   }
 
   const c = r.counts;

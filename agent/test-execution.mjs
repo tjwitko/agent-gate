@@ -97,21 +97,32 @@ export function detectSuite(projectDir) {
 // failed" without saying how much of it did, which is the difference between one broken assertion
 // and a suite that never started.
 const COUNTERS = [
-  // jest / vitest: "Tests:  3 failed, 9 passed, 12 total"
-  { re: /Tests:?\s+(?:(\d+) failed[,|\s]+)?(?:(\d+) skipped[,|\s]+)?(\d+) passed[,|\s]+(\d+) total/i,
+  // jest: "Tests:  3 failed, 9 passed, 12 total"
+  { re: /^\s*Tests:\s+(?:(\d+) failed[,|\s]+)?(?:(\d+) skipped[,|\s]+)?(\d+) passed[,|\s]+(\d+) total/im,
     map: (m) => ({ failed: +(m[1] || 0), passed: +m[3], total: +m[4] }) },
-  // vitest alternative: "Tests  2 failed | 10 passed (12)"
-  { re: /Tests\s+(\d+) failed\s*\|\s*(\d+) passed\s*\((\d+)\)/i,
-    map: (m) => ({ failed: +m[1], passed: +m[2], total: +m[3] }) },
+  // vitest: "Tests  2 failed | 10 passed (12)", and with nothing failing "Tests  9 passed (9)".
+  // Anchored, and the failed segment is optional. Without both, an all-passing vitest run fell
+  // through to the loose counter at the bottom, which matched the "Test Files  1 passed (1)" line
+  // above it and reported a nine-test suite as "1 of 1 passed" -- an undercount that still said
+  // "passed", which is the kind of wrong answer nobody goes looking for.
+  { re: /^\s*Tests\s+(?:(\d+) failed\s*\|\s*)?(\d+) passed\s*\((\d+)\)/im,
+    map: (m) => ({ failed: +(m[1] || 0), passed: +m[2], total: +m[3] }) },
   // node --test: "# pass 21" / "# fail 0", or the ℹ-prefixed form
   { re: /[#ℹ]\s*pass\s+(\d+)[\s\S]*?[#ℹ]\s*fail\s+(\d+)/i,
     map: (m) => ({ passed: +m[1], failed: +m[2], total: +m[1] + +m[2] }) },
-  // pytest: "3 failed, 9 passed" or "9 passed"
-  { re: /(?:(\d+) failed,\s*)?(\d+) passed/i,
+  // pytest: "3 failed, 9 passed" or "9 passed". Last, and deliberately not allowed to start
+  // mid-line: every runner prints some other line containing "N passed", and this pattern will
+  // happily read whichever it reaches first.
+  { re: /^[^\n]*?(?:(\d+) failed,\s*)?(\d+) passed(?![^\n]*\bfiles?\b)/im,
     map: (m) => ({ failed: +(m[1] || 0), passed: +m[2], total: +(m[1] || 0) + +m[2] }) },
 ];
 
-function parseCounts(output) {
+// vitest and jest colour their summaries even under CI, and an escape sequence sitting between
+// "Tests" and its count defeats anchoring.
+const ANSI = /\u001B\[[0-9;]*[A-Za-z]/g;
+
+function parseCounts(rawOutput) {
+  const output = rawOutput.replace(ANSI, "");
   for (const c of COUNTERS) {
     const m = c.re.exec(output);
     if (m) return c.map(m);
@@ -123,6 +134,7 @@ function parseCounts(output) {
 // environment problem; three failures that name the task's own acceptance criteria is a broken
 // deliverable, and only the reader can tell those apart.
 function failingNames(output) {
+  output = output.replace(ANSI, "");
   const names = new Set();
   for (const re of [
     /^\s*[✕✖x×]\s+(.+?)(?:\s+\(\d+(?:\.\d+)?\s*m?s\))?$/gim, // node --test, vitest
@@ -143,6 +155,10 @@ function failingNames(output) {
   const deduped = all.filter((n) => !all.some((o) => o !== n && o.endsWith(`\u203a ${n}`)));
   return deduped.slice(0, 12);
 }
+
+/** Exposed for tests: each runner's summary is parsed from text, so all five can be checked
+ *  without installing five runners. The vitest undercount was invisible in every other way. */
+export const parseCountsForTest = parseCounts;
 
 /** Runs the suite. Returns { ran, unavailable, timedOut, counts, failing, exitCode }. */
 export function runTests(projectDir, { timeoutMs = TIMEOUT_MS } = {}) {

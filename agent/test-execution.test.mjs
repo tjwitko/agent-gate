@@ -5,7 +5,7 @@ import { tmpdir } from "os";
 import path from "path";
 import { existsSync } from "fs";
 
-import { detectSuite, runTests, testExecutionReport } from "./test-execution.mjs";
+import { detectSuite, runTests, testExecutionReport, parseCountsForTest } from "./test-execution.mjs";
 
 function run(files, fn) {
   const dir = mkdtempSync(path.join(tmpdir(), "testexec-"));
@@ -122,3 +122,24 @@ test("a suite that hangs is killed and reported, not treated as passing", () => 
     }
   );
 });
+
+// --- counter parsing, against each runner's real summary ------------------
+// vitest's all-passing summary reported a nine-test suite as "1 of 1 passed": the anchored vitest
+// pattern required a `N failed |` segment that was not there, so parsing fell through to the loose
+// counter, which matched the "Test Files  1 passed (1)" line printed just above. An undercount that
+// still says "passed" is the kind of wrong answer nobody goes looking for.
+const E = "\u001B[";
+const SUMMARIES = [
+  ["vitest, all passing", " Test Files  1 passed (1)\n      Tests  9 passed (9)\n", { passed: 9, failed: 0, total: 9 }],
+  ["vitest, with failures", " Test Files  1 failed (1)\n      Tests  3 failed | 6 passed (9)\n", { passed: 6, failed: 3, total: 9 }],
+  ["vitest, coloured", `${E}2m Test Files ${E}22m ${E}32m1 passed${E}39m (1)\n${E}2m      Tests ${E}22m ${E}32m9 passed${E}39m (9)\n`, { passed: 9, failed: 0, total: 9 }],
+  ["jest", "Tests:       3 failed, 9 passed, 12 total\n", { passed: 9, failed: 3, total: 12 }],
+  ["node --test", "\u2139 tests 21\n\u2139 suites 0\n\u2139 pass 21\n\u2139 fail 0\n", { passed: 21, failed: 0, total: 21 }],
+  ["pytest", "3 failed, 9 passed in 0.42s\n", { passed: 9, failed: 3, total: 12 }],
+];
+
+for (const [label, output, expected] of SUMMARIES) {
+  test(`the ${label} summary is counted correctly`, () => {
+    assert.deepEqual(parseCountsForTest(output), expected);
+  });
+}

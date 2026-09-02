@@ -1064,3 +1064,108 @@ test("a benign comparison earlier does not mask a real one later", () => {
   `;
   assert.equal(leakyCredentialCheck(src), "supplied_token");
 });
+
+// --- routing without a framework ------------------------------------------
+// A deliverable served every endpoint from one node:http handler and this check found no routes at
+// all: it said so honestly, blocked nothing, and contributed nothing to that run. Zero dependencies
+// is a defensible choice and must not buy exemption from the auth gate.
+const NODE_HTTP_APP = (guard) => `
+  import { createServer } from "http";
+  const CALLBACK_PATH = /^\\/callbacks\\/([^/]+)$/;
+
+  ${guard}
+
+  async function handleWebhook(req, res, svc) {
+    const raw = await readRawBody(req);
+    return svc.receive(raw, req.headers["x-webhook-signature"]);
+  }
+  async function handleGetCallback(req, res, id, svc) {
+    return svc.getByEventId(id);
+  }
+  export function createApp({ svc }) {
+    return createServer((req, res) => {
+      const url = new URL(req.url, "http://localhost");
+      if (req.method === "GET" && url.pathname === "/healthz") { return handleHealth(res); }
+      if (req.method === "POST" && url.pathname === "/webhooks/payment-provider") {
+        return handleWebhook(req, res, svc);
+      }
+      const match = CALLBACK_PATH.exec(url.pathname);
+      if (req.method === "GET" && match) {
+        return handleGetCallback(req, res, match[1], svc);
+      }
+    });
+  }
+`;
+
+// The guard sits two calls below the dispatch branch, in another module -- handleWebhook calls
+// receive(), and receive() is where the signature is verified.
+const CHAINED_SERVICE = `
+  import { createHmac, timingSafeEqual } from "crypto";
+  export function verifySignature(secret, body, provided) {
+    const expected = createHmac("sha256", secret).update(body).digest("hex");
+    return provided.length === expected.length && timingSafeEqual(Buffer.from(provided), Buffer.from(expected));
+  }
+  export function createService({ store }) {
+    return {
+      async receive(rawBody, header) {
+        if (!verifySignature(store.secret, rawBody, header)) { throw new Error("bad signature"); }
+        return store.put(rawBody);
+      },
+      async getByEventId(id) { return store.get(id); },
+    };
+  }
+`;
+
+test("a hand-rolled node:http dispatch is read as routes", () => {
+  const { routes } = run({ "src/app.js": NODE_HTTP_APP(""), "src/svc.js": CHAINED_SERVICE }, (d) =>
+    checkAuthentication(d)
+  );
+  const paths = routes.map((r) => `${r.method} ${r.route}`);
+  assert.ok(paths.includes("POST /webhooks/payment-provider"), `got ${paths.join(", ")}`);
+  // The path held in a regex constant, not a string literal.
+  assert.ok(paths.includes("GET /callbacks/:param"), `got ${paths.join(", ")}`);
+});
+
+test("a guard two calls down, in another file, protects the route", () => {
+  const { failures } = run({ "src/app.js": NODE_HTTP_APP(""), "src/svc.js": CHAINED_SERVICE }, (d) =>
+    authenticationFailures(d)
+  );
+  // The webhook route is protected by a signature verified two calls away, in another module.
+  assert.doesNotMatch(failures.join(" "), /webhooks\/payment-provider/);
+  // The support route in this fixture genuinely has no guard, and must still be reported: the
+  // point of following the chain is to see the guard that exists, not to assume one.
+  assert.match(failures.join(" "), /GET \/callbacks\/:param/);
+});
+
+// The point of the chain walk is not to call everything protected. A project that verifies a
+// signature SOMEWHERE, on a path this route never reaches, must still be reported.
+test("a signature verified on an unreachable path does not protect the route", () => {
+  const UNREACHED = `
+    import { createHmac } from "crypto";
+    export function verifySignature(secret, body, provided) {
+      return createHmac("sha256", secret).update(body).digest("hex") === provided;
+    }
+    export function somethingElse() { return verifySignature("k", "b", "p"); }
+  `;
+  const NO_GUARD_SERVICE = `
+    export function createService({ store }) {
+      return {
+        async receive(rawBody) { return store.put(rawBody); },
+        async getByEventId(id) { return store.get(id); },
+      };
+    }
+  `;
+  const { failures } = run(
+    { "src/app.js": NODE_HTTP_APP(""), "src/svc.js": NO_GUARD_SERVICE, "src/other.js": UNREACHED },
+    (d) => authenticationFailures(d)
+  );
+  assert.ok(failures.length > 0, "an unguarded webhook route must still be reported");
+  assert.match(failures.join(" "), /webhooks\/payment-provider/);
+});
+
+test("a health endpoint in a hand-rolled dispatch is open by convention", () => {
+  const { failures } = run({ "src/app.js": NODE_HTTP_APP(""), "src/svc.js": CHAINED_SERVICE }, (d) =>
+    authenticationFailures(d)
+  );
+  assert.doesNotMatch(failures.join(" "), /healthz/);
+});

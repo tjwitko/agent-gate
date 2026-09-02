@@ -246,3 +246,80 @@ test("an ambiguous log group is reported without blocking", () => {
     }
   );
 });
+
+// --- AWS Backup, missed on first contact with a real deliverable ----------
+// A run kept its records for seven years with an aws_backup_plan whose delete_after came from a
+// variable defaulting to 2555, guarded by a validation block refusing anything shorter. This check
+// knew only TTLs, lifecycle rules and Object Lock, and told the reader "nothing here establishes it
+// either" -- a confident statement about a requirement the project had met.
+const BACKUP_PLAN = (days) => ({
+  "terraform/variables.tf": `
+    variable "backup_retention_days" {
+      type    = number
+      default = ${days}
+    }`,
+  "terraform/backup.tf": `
+    resource "aws_backup_plan" "events_log" {
+      name = "events-log-retention"
+      rule {
+        rule_name         = "seven-year-retention"
+        target_vault_name = aws_backup_vault.events_log.name
+        lifecycle { delete_after = var.backup_retention_days }
+      }
+    }`,
+});
+
+test("an AWS Backup plan long enough is credited, through the variable", () => {
+  run(BACKUP_PLAN(2555), (dir) => {
+    const r = retentionFailures(dir, { requiredDays: SEVEN_YEARS });
+    assert.equal(r.failures.length, 0);
+    assert.match(r.advisories[0], /AWS Backup plan rule "seven-year-retention"/);
+    assert.match(r.advisories[0], /at least the 7 year/);
+  });
+});
+
+test("an AWS Backup plan that is too short is a finding", () => {
+  run(BACKUP_PLAN(90), (dir) => {
+    const r = retentionFailures(dir, { requiredDays: SEVEN_YEARS });
+    assert.equal(r.failures.length, 1);
+    assert.match(r.failures[0], /the period is short/);
+  });
+});
+
+test("a delete_after that cannot be resolved is reported, never credited", () => {
+  run(
+    {
+      "terraform/backup.tf": `
+        resource "aws_backup_plan" "events_log" {
+          rule {
+            rule_name = "retain"
+            lifecycle { delete_after = var.undeclared_somewhere_else }
+          }
+        }`,
+    },
+    (dir) => {
+      const r = retentionFailures(dir, { requiredDays: SEVEN_YEARS });
+      assert.equal(r.failures.length, 0);
+      assert.match(r.advisories.join(" "), /could not be resolved/);
+      // and it must not claim the period is short when it simply could not read it
+      assert.doesNotMatch(r.advisories.join(" "), /shorter than/);
+    }
+  );
+});
+
+test("a vault lock minimum is credited", () => {
+  run(
+    {
+      "terraform/backup.tf": `
+        resource "aws_backup_vault_lock_configuration" "events_log" {
+          backup_vault_name = "events-log-vault"
+          min_retention_days = 2555
+        }`,
+    },
+    (dir) => {
+      const r = retentionFailures(dir, { requiredDays: SEVEN_YEARS });
+      assert.equal(r.failures.length, 0);
+      assert.match(r.advisories.join(" "), /vault lock/);
+    }
+  );
+});

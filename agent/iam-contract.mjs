@@ -8,7 +8,7 @@ import { readdirSync, readFileSync, statSync } from "fs";
 import path from "path";
 import { parseAllDocuments } from "yaml";
 import { SKIP_DIRS } from "./skip-dirs.mjs";
-import { hclResources, hclBlocks, hclAttr, TF_SERVICE_ACCOUNT } from "./hcl-blocks.mjs";
+import { hclResources, hclBlocks, hclAttr, TF_SERVICE_ACCOUNT, hclVariableDefaults } from "./hcl-blocks.mjs";
 
 const MAX_FILE_BYTES = 512 * 1024;
 
@@ -167,14 +167,12 @@ export function irsaAnnotatedRoles(projectDir) {
 // then built "${var.project_name}-receiver-role", producing webhook-receiver-receiver-role while
 // its ServiceAccount pointed at webhook-receiver-role.
 function variableDefaults(projectDir) {
+  // Shares hclVariableDefaults with the retention check rather than keeping a second reader. The
+  // local one saw only quoted defaults, which is fine for a role name and silently returns nothing
+  // for `default = 2555` -- indistinguishable from the variable not existing.
   const defaults = new Map();
   for (const f of walkFiles(projectDir, [".tf"])) {
-    const re = /variable\s+"(\w+)"\s*\{([\s\S]*?)\n\}/g;
-    let m;
-    while ((m = re.exec(f.text))) {
-      const d = /\bdefault\s*=\s*"([^"]*)"/.exec(m[2]);
-      if (d) defaults.set(m[1], d[1]);
-    }
+    for (const [k, v] of hclVariableDefaults(f.text)) defaults.set(k, v);
   }
   return defaults;
 }

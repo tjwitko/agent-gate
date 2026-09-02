@@ -465,6 +465,12 @@ function inlineHandlerBodies(text, startOfCall) {
  */
 function routeHandlerBodies(route, all) {
   const bodies = [...(route.inlineBodies || [])];
+  // A framework route names its handler in the declaration; a hand-rolled dispatch branch just
+  // calls it, and the guard may be another call or two down. Expanded against `all` rather than the
+  // declaring file, because the chain crosses files as a matter of course.
+  if (route.followChain) {
+    for (const seed of route.inlineBodies || []) bodies.push(...reachableBodies(all, seed));
+  }
   // Each named handler's own body, not the whole corpus: a project that verifies a signature
   // somewhere must not thereby mark every route protected. A first attempt did exactly that and
   // reported an unauthenticated support endpoint as safe, which is worse than missing one.
@@ -510,6 +516,128 @@ function handlerVerifiesSignature(route, all) {
   return false;
 }
 
+
+// --- routing without a framework -------------------------------------------
+// A deliverable served a webhook endpoint, a health endpoint and a support lookup from a single
+// node:http handler -- `req.method === "POST" && url.pathname === "/webhooks/payment-provider"` --
+// and this check, which knows Express, Fastify, Nest and the Python decorators, found no routes at
+// all. It said so honestly and blocked nothing, which is the correct behaviour for an unreadable
+// project and still meant a blocking security check contributed nothing to that run. Zero
+// dependencies is a defensible choice and must not buy exemption from the auth gate.
+const NODE_HTTP_DISPATCH =
+  /\b(?:req|request)\.method\s*===?\s*["'`](GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)["'`]([\s\S]{0,300}?)\)\s*\{/gi;
+const PATHNAME_LITERAL = /\b(?:pathname|path|url)\s*===?\s*["'`](\/[^"'`]*)["'`]/gi;
+// `const m = ROUTE_RE.exec(url.pathname)` followed by `if (req.method === "GET" && m)`.
+const REGEX_MATCH_BINDING = /(?:const|let|var)\s+(\w+)\s*=\s*(\w+)\s*\.\s*(?:exec|match)\s*\(/g;
+
+// The literal prefix of a path regex, with each capture group named as a parameter:
+// /^\/callbacks\/([^/]+)$/ -> /callbacks/:param. Enough to judge whether the route is open by
+// convention and to name it in a finding; it is not a router.
+function pathFromRegexSource(src) {
+  const body = src.replace(/^\//, "").replace(/\/[gimsuy]*$/, "").replace(/^\^/, "").replace(/\$$/, "");
+  const out = body.replace(/\(\?:[^)]*\)|\([^)]*\)/g, ":param").replace(/\\\//g, "/");
+  return /^\//.test(out) ? out : `/${out}`;
+}
+
+
+const MAX_CALL_DEPTH = 3;
+const MAX_BODIES = 40;
+
+// Definitions of `name`, in the forms a handler chain actually uses: a declared function or const,
+// and a method in a class or object literal (`async receive(a, b) {`). The `)` followed by `{` is
+// what separates a definition from a call site.
+function definitionOf(text, name) {
+  const declared = new RegExp(`(?:export\\s+)?(?:async\\s+)?(?:const|let|var|function)\\s+${name}\\b`).exec(text);
+  if (declared) return declared.index;
+  const method = new RegExp(`(?:^|[{;,]|\\n)\\s*(?:async\\s+)?${name}\\s*\\([^)]*\\)\\s*\\{`, "m").exec(text);
+  return method ? method.index : -1;
+}
+
+/** The starting body plus every body reachable from it by name, to a bounded depth. */
+function reachableBodies(text, startBody) {
+  const bodies = [startBody];
+  const seen = new Set();
+  let frontier = [startBody];
+  for (let depth = 0; depth < MAX_CALL_DEPTH && bodies.length < MAX_BODIES; depth++) {
+    const next = [];
+    for (const b of frontier) {
+      // Bare calls and method calls alike: the guard may sit behind `service.receive(...)`.
+      for (const m of b.matchAll(/(?:\.\s*)?\b([A-Za-z_$][\w$]*)\s*\(/g)) {
+        const name = m[1];
+        if (seen.has(name) || RESERVED_CALL.test(name)) continue;
+        seen.add(name);
+        const at = definitionOf(text, name);
+        if (at === -1) continue;
+        const body = functionBodyAt(text, at);
+        bodies.push(body);
+        next.push(body);
+        if (bodies.length >= MAX_BODIES) return bodies;
+      }
+    }
+    frontier = next;
+  }
+  return bodies;
+}
+
+// Language and library names that are never a handler, kept out so the walk spends its budget on
+// the project's own code.
+const RESERVED_CALL =
+  /^(if|for|while|switch|catch|return|typeof|await|new|function|require|import|Promise|Object|Array|String|Number|Boolean|JSON|Math|Date|Error|Buffer|Map|Set|console|process|parseInt|parseFloat|test|expect|describe|it)$/;
+
+function nodeHttpRoutes(text, lineAt) {
+  const out = [];
+  NODE_HTTP_DISPATCH.lastIndex = 0;
+  let m;
+  while ((m = NODE_HTTP_DISPATCH.exec(text))) {
+    const method = m[1].toUpperCase();
+    const condition = m[2];
+    const blockStart = m.index + m[0].length - 1;
+    const body = functionBodyAt(text, blockStart);
+
+    const paths = [...condition.matchAll(PATHNAME_LITERAL)].map((p) => p[1]);
+
+    // A path held in a regex constant, reached through a match binding named in the condition.
+    if (paths.length === 0) {
+      const before = text.slice(Math.max(0, m.index - 400), m.index);
+      REGEX_MATCH_BINDING.lastIndex = 0;
+      let b;
+      while ((b = REGEX_MATCH_BINDING.exec(before))) {
+        if (!new RegExp(`\\b${b[1]}\\b`).test(condition)) continue;
+        // Greedy to the LAST slash on the line: a path regex almost always contains a character
+        // class like [^/], and a scanner that stops at the first unescaped slash truncated
+        // /^\/callbacks\/([^/]+)$/ into "/callbacks/([^".
+        const decl = new RegExp(`(?:const|let|var)\\s+${b[2]}\\s*=\\s*(/.*/[gimsuy]*)\\s*;?[ \\t]*$`, "m").exec(text);
+        if (decl) paths.push(pathFromRegexSource(decl[1]));
+      }
+    }
+    if (paths.length === 0) continue;
+
+    // Every function this branch reaches, not only the one it calls directly. Without following the
+    // chain, a correct deliverable read as unprotected: the branch calls handleWebhook, which calls
+    // webhookService.receive, which is where verifySignature lives. Reporting that route as having
+    // no signature check would be a false positive in a blocking gate, which destroys work rather
+    // than merely missing something. Bounded in depth and count so this stays a lookup, not an
+    // interpreter.
+    // Only the branch body here. The chain is followed later, against the whole-language corpus:
+    // this function sees one file, and the handler it calls routinely lives in another --
+    // handleWebhook is in app.js, the receive() that verifies the signature is in webhookService.js.
+    const bodies = [body];
+
+    for (const route of paths) {
+      out.push({
+        method,
+        route,
+        declaration: m[0],
+        context: condition,
+        inlineBodies: bodies,
+        followChain: true,
+        line: lineAt(m.index),
+      });
+    }
+  }
+  return out;
+}
+
 const jsAdapter = {
   name: "JavaScript/TypeScript",
   extensions: [".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"],
@@ -539,6 +667,8 @@ const jsAdapter = {
         line: lineAt(m.index),
       });
     }
+
+    out.push(...nodeHttpRoutes(text, lineAt));
 
     JS_FASTIFY_ROUTE_RE.lastIndex = 0;
     while ((m = JS_FASTIFY_ROUTE_RE.exec(text))) {

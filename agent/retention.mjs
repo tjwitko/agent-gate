@@ -21,7 +21,7 @@
 import path from "path";
 
 import { walk, uncommented } from "./source-files.mjs";
-import { hclResources, hclBlocks, hclAttr, hclNumber, hclBool } from "./hcl-blocks.mjs";
+import { hclResources, hclBlocks, hclAttr, hclNumber, hclBool, hclVariableDefaults } from "./hcl-blocks.mjs";
 
 const UNIT_DAYS = { day: 1, week: 7, month: 30, year: 365 };
 const WORD_NUMBERS = {
@@ -191,6 +191,48 @@ export function checkRetention(projectDir, { requiredDays } = {}) {
     }
   }
 
+  // --- AWS Backup, which is record retention when the horizon is long enough -
+  // Missed on first contact with a real deliverable. A run kept its records for seven years with an
+  // aws_backup_plan whose `delete_after` came from a variable defaulting to 2555, guarded by a
+  // validation block refusing anything shorter -- and this check, knowing only TTLs, lifecycle
+  // rules and Object Lock, told the reader "nothing here establishes it either". Not a false block,
+  // since it is advisory, but a confident statement about a requirement the project had met.
+  const vars = hclVariableDefaults(tfText);
+  const resolveDays = (raw) => {
+    if (raw === null || raw === undefined) return null;
+    if (typeof raw === "number") return raw;
+    const v = /^var\.(\w+)$/.exec(String(raw).trim());
+    if (v) {
+      const d = vars.get(v[1]);
+      return d === undefined ? null : Number(d);
+    }
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+  };
+  for (const plan of hclResources(tfText, /^aws_backup_plan$/)) {
+    for (const rule of hclBlocks(plan.body, "rule")) {
+      for (const lc of hclBlocks(rule, "lifecycle")) {
+        const raw = hclNumber(lc, "delete_after") ?? (/\bdelete_after\s*=\s*(var\.\w+)/.exec(lc) || [])[1];
+        const days = resolveDays(raw);
+        const name = hclAttr(rule, "rule_name") || plan.label;
+        if (days === null) {
+          // A horizon that cannot be resolved is not a horizon. Reported, never credited.
+          unnamed.push({
+            what: `AWS Backup plan rule "${name}"`,
+            horizonDays: null,
+            detail: "its delete_after could not be resolved to a number here",
+          });
+        } else {
+          credits.push({ what: `AWS Backup plan rule "${name}"`, horizonDays: days });
+        }
+      }
+    }
+  }
+  for (const lock of hclResources(tfText, /^aws_backup_vault_lock_configuration$/)) {
+    const days = resolveDays(hclNumber(lock.body, "min_retention_days") ?? (/\bmin_retention_days\s*=\s*(var\.\w+)/.exec(lock.body) || [])[1]);
+    if (days !== null) credits.push({ what: `AWS Backup vault lock on "${lock.label}"`, horizonDays: days });
+  }
+
   // --- settings that are about restoring a database, not keeping a record --
   const backupDays = hclNumber(tfText, "backup_retention_period");
   if (backupDays !== null) backupOnly.push({ what: "backup_retention_period", horizonDays: backupDays });
@@ -265,10 +307,15 @@ export function retentionFailures(projectDir, { requiredDays } = {}) {
 
   for (const u of report.unnamed) {
     if (u.horizonDays !== null && u.horizonDays >= requiredDays) continue;
+    // An unresolvable horizon is not a short one. Saying "shorter than the 7 years required" about
+    // a period this check simply could not read is a claim it has no basis for.
     advisories.push(
-      `retention: ${u.what} — ${u.detail}, which is shorter than the ${need} the task requires. ` +
-        `Not blocking, because nothing here says whether this holds the records or only this ` +
-        `service's own logs. If the records are in it, this deletes them.`
+      u.horizonDays === null
+        ? `retention: ${u.what} — ${u.detail}, so whether it satisfies the ${need} the task ` +
+            `requires could not be established here. Check it yourself rather than assuming either way.`
+        : `retention: ${u.what} — ${u.detail}, which is shorter than the ${need} the task requires. ` +
+            `Not blocking, because nothing here says whether this holds the records or only this ` +
+            `service's own logs. If the records are in it, this deletes them.`
     );
   }
 

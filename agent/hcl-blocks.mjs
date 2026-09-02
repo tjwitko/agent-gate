@@ -73,6 +73,26 @@ export function hclBool(text, attr) {
   return m ? m[1].toLowerCase() === "true" : null;
 }
 
+/** Every `variable "name" { default = ... }` in `text`, as name -> raw default (quotes stripped).
+ *  Numbers as well as strings: a retention period is `default = 2555`, and a string-only reader
+ *  silently returns nothing for it, which is indistinguishable from the variable not existing. */
+export function hclVariableDefaults(text) {
+  // Brace-matched, not `\n}`-terminated. A regex anchored on a closing brace at column zero reads
+  // conventionally formatted .tf and silently returns nothing for a block indented inside another
+  // -- and "no default" is indistinguishable from "no such variable", so a resolvable retention
+  // period read as unresolvable.
+  const defaults = new Map();
+  const re = /variable\s+"(\w+)"\s*\{/g;
+  let m;
+  while ((m = re.exec(text))) {
+    const body = blockAt(text, text.indexOf("{", m.index));
+    if (body === null) continue;
+    const d = /\bdefault\s*=\s*(?:"([^"]*)"|(-?\d+(?:\.\d+)?|true|false))/.exec(body);
+    if (d) defaults.set(m[1], d[1] !== undefined ? d[1] : d[2]);
+  }
+  return defaults;
+}
+
 // Long-lived workloads only. A Job or CronJob legitimately has no readiness probe, exactly as in
 // the YAML path.
 export const TF_SERVER_WORKLOAD = /^kubernetes_(deployment|stateful_set|daemon_set|replication_controller)(_v1)?$/;

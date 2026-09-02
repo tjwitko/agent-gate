@@ -241,3 +241,99 @@ for (const task of NO_ERROR_DISTINCTION) {
     assert.equal(taskWantsErrorDistinction(task), false, task);
   });
 }
+
+// --- a test that never reaches the project --------------------------------
+// A deliverable passed both test gates with two files that never touched its code: one computed an
+// HMAC twice with the same secret and asserted the results matched, the other copied the source
+// into a string literal and asserted the string contained "23505". Named like tests, full of
+// assertions, and green when run. Its own commit message said what happened -- "Add assertions to
+// test files for validator detection". Requiring assertions produced assertion-shaped files;
+// running them produced files that pass.
+const APP_JS = { "src/signature.js": "export function verify(a, b) { return a === b; }\n" };
+
+const VACUOUS = `
+  import crypto from 'crypto';
+  import assert from 'assert';
+  const a = crypto.createHmac('sha256', 'k').update('m').digest('hex');
+  const b = crypto.createHmac('sha256', 'k').update('m').digest('hex');
+  assert.strictEqual(a, b, 'Valid signature should be accepted');
+`;
+const REAL = `
+  import assert from 'assert';
+  import { verify } from '../src/signature.js';
+  assert.strictEqual(verify('a', 'a'), true);
+`;
+
+test("a suite that reaches none of the project blocks", () => {
+  const { failures } = run(
+    { ...APP_JS, "tests/sig.test.js": VACUOUS, "tests/dup.test.js": VACUOUS },
+    (d) => codeQualityFailures(d, WANTS)
+  );
+  const hit = failures.find((f) => /import anything from this project/.test(f));
+  assert.ok(hit, "a suite proving nothing must block");
+  assert.match(hit, /tests\/sig\.test\.js/);
+});
+
+test("one detached file among real ones is reported, not blocked on", () => {
+  const { failures, advisories } = run(
+    { ...APP_JS, "tests/real.test.js": REAL, "tests/vacuous.test.js": VACUOUS },
+    (d) => codeQualityFailures(d, WANTS)
+  );
+  assert.equal(failures.filter((f) => /import anything from this project/.test(f)).length, 0);
+  assert.match(advisories.join(" "), /1 of 2 test file\(s\) import\s+nothing/);
+});
+
+test("a suite that reaches the project is clean", () => {
+  const { failures, advisories } = run({ ...APP_JS, "tests/real.test.js": REAL }, (d) =>
+    codeQualityFailures(d, WANTS)
+  );
+  assert.equal(failures.filter((f) => /import anything/.test(f)).length, 0);
+  assert.equal(advisories.filter((a) => /import\s+nothing/.test(a)).length, 0);
+});
+
+// require(), dynamic import and a mock of a relative path all count as reaching the code.
+for (const [label, body] of [
+  ["require", "const assert = require('assert');\nconst { verify } = require('../src/signature.js');\nassert.ok(verify);"],
+  ["dynamic import", "import assert from 'assert';\nconst m = await import('../src/signature.js');\nassert.ok(m);"],
+  ["jest.mock", "import assert from 'assert';\njest.mock('../src/signature.js');\nassert.ok(true);"],
+]) {
+  test(`${label} counts as reaching the project`, () => {
+    const { failures } = run({ ...APP_JS, "tests/a.test.js": body }, (d) => codeQualityFailures(d, WANTS));
+    assert.equal(failures.filter((f) => /import anything/.test(f)).length, 0, label);
+  });
+}
+
+// Go and Java tests live in the same package as the code they test and reach it with no import at
+// all, so their silence here means nothing. Judging them would be a false block on the idiom.
+test("a Go test with no import is not judged", () => {
+  const { failures } = run(
+    {
+      "main.go": "package main\nfunc Verify(a, b string) bool { return a == b }\n",
+      "main_test.go": "package main\nimport \"testing\"\nfunc TestVerify(t *testing.T) { if !Verify(\"a\", \"a\") { t.Fatalf(\"no\") } }\n",
+    },
+    (d) => codeQualityFailures(d, WANTS)
+  );
+  assert.equal(failures.filter((f) => /import anything/.test(f)).length, 0);
+});
+
+test("a Python test importing a project module reaches it", () => {
+  const { failures } = run(
+    {
+      "app/signature.py": "def verify(a, b):\n    return a == b\n",
+      "tests/test_sig.py": "from app.signature import verify\n\ndef test_verify():\n    assert verify('a', 'a')\n",
+    },
+    (d) => codeQualityFailures(d, WANTS)
+  );
+  assert.equal(failures.filter((f) => /import anything/.test(f)).length, 0);
+});
+
+test("a Python test importing only the stdlib does not", () => {
+  const { failures } = run(
+    {
+      "app/signature.py": "def verify(a, b):\n    return a == b\n",
+      "tests/test_sig.py": "import hmac\n\ndef test_hmac():\n    assert hmac.compare_digest('a', 'a')\n",
+    },
+    (d) => codeQualityFailures(d, WANTS)
+  );
+  assert.ok(failures.some((f) => /import anything from this project/.test(f)));
+});

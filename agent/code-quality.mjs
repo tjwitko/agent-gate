@@ -79,6 +79,55 @@ const RERAISES_DETAIL = /detail\s*=\s*(?:str\s*\(\s*e\s*\)|f?["'`][^"'`]*\{e\})/
 // legitimately live in a dependency.
 const PY_PATCH_TARGET = /\bpatch(?:\.object)?\s*\(\s*["']([\w.]+)["']/g;
 
+// --- does a test touch the project at all? --------------------------------
+// A deliverable passed both test gates with two files that never reached its code. One computed an
+// HMAC twice with the same secret and asserted the results matched -- a property of Node's crypto,
+// not of the project. The other copied the source into a string literal and asserted the string
+// contained "23505". Both were named like tests, both contained assertions, both passed when run,
+// and the commit that added them said so outright: "Add assertions to test files for validator
+// detection". Requiring assertions made assertion-shaped files; running them made files that pass.
+//
+// The property those checks cannot see is whether the tests are about THIS project. Reaching the
+// code under test is the one thing a real test must do and a decorative one need not, and unlike an
+// assertion count it cannot be satisfied by writing more of the same.
+//
+// Only languages where an import is the sole route to the code are judged. Go and Java tests live
+// in the same package as what they test and reach it with no import at all, so their silence here
+// means nothing and they are left alone rather than guessed at.
+const IMPORT_JUDGEABLE = new Set([".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".py", ".rb"]);
+
+function importsProjectCode(file, files, pkgName) {
+  const t = file.text;
+  if (file.rel.endsWith(".py")) {
+    // A dotted import that resolves to a file in this project, or any relative import.
+    if (/^\s*from\s+\./m.test(t)) return true;
+    for (const m of t.matchAll(/^\s*(?:from|import)\s+([\w.]+)/gm)) {
+      if (resolveModuleFile(files, `${m[1]}.x`)) return true;
+    }
+    return false;
+  }
+  if (file.rel.endsWith(".rb")) return /\brequire_relative\b|\brequire\s+['"]\.\.?\//.test(t);
+
+  // JavaScript and TypeScript: a relative specifier, a dynamic import of one, a mock of one, or an
+  // import of this package by its own name (the "exports" map style).
+  if (/(?:^|[^\w])(?:import|export)\s[^;]*?['"]\.\.?\//s.test(t)) return true;
+  if (/\brequire\s*\(\s*['"]\.\.?\//.test(t)) return true;
+  if (/\bimport\s*\(\s*['"]\.\.?\//.test(t)) return true;
+  if (/\b(?:jest|vi)\s*\.\s*mock\s*\(\s*['"]\.\.?\//.test(t)) return true;
+  if (pkgName && new RegExp(`['"]${pkgName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:/[^'"]*)?['"]`).test(t)) return true;
+  return false;
+}
+
+/**
+ * Which test files reach this project's own code, and which do not.
+ * Files in languages where absence of an import proves nothing are not counted either way.
+ */
+export function testsReachingProject(tests, files, pkgName) {
+  const judgeable = tests.filter((t) => IMPORT_JUDGEABLE.has(path.extname(t.rel)));
+  const reaching = judgeable.filter((t) => importsProjectCode(t, files, pkgName));
+  return { judgeable, reaching, detached: judgeable.filter((t) => !reaching.includes(t)) };
+}
+
 function resolveModuleFile(files, dotted) {
   const parts = dotted.split(".");
   // Try progressively shorter prefixes: app.main.SECRET_KEY -> app/main.py holding SECRET_KEY.
@@ -127,6 +176,16 @@ export function checkCodeQuality(projectDir, taskText = "") {
   if (files.length === 0) return { ran: false, unknown: "no source files to read", tests: [], swallowing: [] };
 
   const tests = files.filter((f) => TEST_FILENAME.test(f.rel) && ASSERTION.test(f.text));
+
+  // A package that imports itself by name is reaching its own code, so the name is needed to tell
+  // that apart from an import of somebody else's library.
+  let pkgName = null;
+  try {
+    pkgName = JSON.parse(readFileSync(path.join(projectDir, "package.json"), "utf8")).name || null;
+  } catch {
+    /* no package.json, or unreadable: the relative-specifier tests still apply */
+  }
+  const reach = testsReachingProject(tests, files, pkgName);
   const namedOnly = files.filter((f) => TEST_FILENAME.test(f.rel) && !ASSERTION.test(f.text));
 
   const swallowing = [];
@@ -162,7 +221,7 @@ export function checkCodeQuality(projectDir, taskText = "") {
     }
   }
 
-  return { ran: true, unknown: null, tests, namedOnly, swallowing, badPatches };
+  return { ran: true, unknown: null, tests, namedOnly, swallowing, badPatches, reach };
 }
 
 /** Blocking when the task asks for the property; silent otherwise. */
@@ -203,6 +262,28 @@ export function codeQualityFailures(projectDir, taskText = "") {
         `separately, and its verdict is the one that counts. A test that imports a module before ` +
         `setting the environment that module reads, or patches an attribute it does not have, looks ` +
         `entirely reasonable in the file and fails the moment it runs.`
+    );
+  }
+
+  // Blocking only when NOTHING in the suite reaches the project: that is a suite which proves
+  // nothing whatever, and it passed both existing test gates. A suite where most files reach the
+  // code and one does not is a much smaller thing and is reported without blocking -- a decorative
+  // test among real ones misleads far less than a decorative suite.
+  const reach = r.reach || { judgeable: [], reaching: [], detached: [] };
+  if (taskWantsTests(taskText) && reach.judgeable.length > 0 && reach.reaching.length === 0) {
+    failures.push(
+      `code quality: none of the ${reach.judgeable.length} test file(s) import anything from this ` +
+        `project — ${reach.detached.map((t) => t.rel).join(", ")}. A test that never reaches the code ` +
+        `under test cannot be evidence about it, however many assertions it contains and whether or ` +
+        `not it passes: asserting that two identical HMAC calls agree tests the crypto library, and ` +
+        `asserting that a string copied from a source file contains a substring tests the copy. ` +
+        `Import the modules being tested and exercise them.`
+    );
+  } else if (taskWantsTests(taskText) && reach.detached.length > 0) {
+    advisories.push(
+      `code quality: ${reach.detached.length} of ${reach.judgeable.length} test file(s) import ` +
+        `nothing from this project — ${reach.detached.map((t) => t.rel).join(", ")}. Whatever they ` +
+        `assert, it is not about this code. Not blocking, because the rest of the suite does reach it.`
     );
   }
 

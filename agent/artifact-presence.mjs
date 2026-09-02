@@ -13,6 +13,8 @@
 
 import { readdirSync, readFileSync, statSync } from "fs";
 import path from "path";
+
+import { taskMatcher } from "./task-phrases.mjs";
 import { SKIP_DIRS } from "./skip-dirs.mjs";
 
 // Extensions where an empty file is never deliberate work. Deliberately excludes .gitignore,
@@ -22,23 +24,54 @@ const LEGITIMATELY_EMPTY = /(^|\/)(__init__\.py|\.gitkeep|\.gitignore|py\.typed)
 
 // What the task asked to be produced. Keyed on the deployment vocabulary the benchmark tasks use,
 // and each requires evidence in the project rather than a filename convention.
+// This gate BLOCKS, so the vocabulary widens only to terms that genuinely imply the artifact. A
+// trigger that fires wrongly makes a correct project fail for not producing something it was never
+// asked for, and that is the direction that gets a gate switched off.
+//
+// Two deliberate exclusions, both tempting and both wrong here:
+//
+//  * A bare "cluster" does not imply Kubernetes. "Run it on our existing cluster" is equally an
+//    ECS cluster, a Nomad cluster, a Spark cluster or a database cluster, and demanding Kubernetes
+//    manifests for any of them is a false block. A task that means Kubernetes says EKS, Helm,
+//    kubectl or Kubernetes, and every acceptance case that mentions a cluster also names IaC.
+//  * A bare "deploy" or "cloud" implies none of the three. Almost every task in this family
+//    contains one of them.
+//
+// The old kubernetes pattern also used `\bmanifests?\b.*\bservice\b`, where `.*` crosses
+// sentences: a task naming manifests in one paragraph and a service in another matched. Proximity
+// is clause-bounded now.
 const ARTIFACT_REQUIREMENTS = [
   {
     id: "kubernetes",
-    taskPhrase: /\bkubernetes\b|\bk8s\b|\bmanifests?\b.*\bservice\b/i,
+    taskPhrase: taskMatcher({
+      any: [/\bkubernetes\b/i, /\bk8s\b/i, /\bEKS\b/, /\bGKE\b/, /\bAKS\b/, /\bkubectl\b/i,
+            /\bkustomize\b/i, /\bhelm\s+charts?\b/i, /\bpod\s+specs?\b/i],
+      near: [{ terms: "manifests?", nouns: "kubernetes|k8s|helm|pods?|ingress|namespaces?|cluster" }],
+    }),
     label: "Kubernetes manifests",
     satisfied: (files) =>
       files.some((f) => [".yaml", ".yml"].includes(f.ext) && /\bkind\s*:/.test(f.text)),
   },
   {
     id: "dockerfile",
-    taskPhrase: /\bdockerfile\b|\bcontainer image\b/i,
+    taskPhrase: taskMatcher({
+      any: [/\bdockerfiles?\b/i, /\bcontainer\s+images?\b/i, /\bOCI\s+images?\b/i,
+            /\bcontaineri[sz]\w*\b/i, /\bdocker\s+build\b/i],
+      // "ship it as a container", "package the service in a container". Spelled out rather than
+      // stemmed: `ship\w*` would take "shipping" in "shipping address".
+      near: [{ terms: "ships?|shipped|packages?|packaged|runs?|builds?|built", nouns: "containers?" }],
+    }),
     label: "a Dockerfile",
     satisfied: (files) => files.some((f) => /dockerfile/i.test(path.basename(f.rel)) && /\bFROM\s+\S/i.test(f.text)),
   },
   {
     id: "terraform",
-    taskPhrase: /\bterraform\b/i,
+    taskPhrase: taskMatcher({
+      any: [/\bterraform\b/i, /\bopentofu\b/i, /\bHCL\b/,
+            /\binfrastructure[-\s]as[-\s]code\b/i, /\bIaC\b/],
+      near: [{ terms: "declares?|declared|defines?|defined|provisions?|provisioned|describes?|described",
+               nouns: "cloud resources?|infrastructure|aws resources?" }],
+    }),
     label: "Terraform configuration",
     satisfied: (files) => files.some((f) => f.ext === ".tf" && /\b(resource|module|data)\s+"/.test(f.text)),
   },
@@ -85,7 +118,7 @@ export function checkArtifactPresence(projectDir, taskText = "") {
   );
 
   const missing = ARTIFACT_REQUIREMENTS.filter(
-    (r) => r.taskPhrase.test(taskText) && !r.satisfied(files)
+    (r) => r.taskPhrase(taskText) && !r.satisfied(files)
   );
 
   return { ran: true, unknown: null, empty, missing };

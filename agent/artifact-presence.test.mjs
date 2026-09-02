@@ -130,3 +130,70 @@ test("the empty-file remediation names a tool that exists", () => {
   );
   assert.match(failures[0], /delete_file/);
 });
+
+// --- the task's wording, not the tool's name ------------------------------
+// Three requirements were recognised only when the task named the tool this project checks for:
+// three of four rephrasings of the same deployment requirement produced no finding at all. That
+// matters more here than in the two gates already fixed, because manifest-contract and iam-contract
+// both return nothing on a project with nothing to read -- defensible on their own terms, and safe
+// only because artifact-presence is the net that catches "nothing was produced". A missed trigger
+// puts a hole in that net in exactly the case it exists to cover: a model that wrote all five
+// manifests back as empty files, dropping blocking failures 5 -> 2 while three manifest-aware gates
+// went quiet.
+const README_ONLY = { "README.md": "# service\n" };
+
+const REPHRASINGS = [
+  "Kubernetes manifests for the service. Terraform for all infrastructure. A Dockerfile for the container image.",
+  "Deploy to EKS with Helm charts and infrastructure as code",
+  "Ship it as a container, declare the cloud resources, and give me the deployment specs",
+  "Deploy the service to our cluster using our standard IaC tooling",
+  "Package the service in a container and provision the AWS resources with OpenTofu",
+  "Give me the k8s manifests, a Dockerfile, and HCL for the infrastructure",
+  "Containerise it, write the pod specs, and define the cloud resources as code",
+];
+
+for (const task of REPHRASINGS) {
+  test(`a deployment requirement survives being rephrased: ${task.slice(0, 44)}`, () => {
+    const { failures } = run(README_ONLY, (d) => artifactPresenceFailures(d, task));
+    assert.ok(failures.length > 0, `no finding for: ${task}`);
+  });
+}
+
+// This gate BLOCKS, so a trigger that fires wrongly makes a correct project fail for missing an
+// artifact nobody asked for. These name no artifact and must stay silent.
+const NAMES_NO_ARTIFACT = [
+  "Build a REST API for managing users",
+  "Deploy the service",                       // bare deploy implies nothing
+  "Store the records in a database",
+  // Decided deliberately: a bare cluster is equally an ECS, Nomad, Spark or database cluster, and
+  // demanding Kubernetes manifests for one of those is a false block. A task that means Kubernetes
+  // says EKS, Helm, kubectl or Kubernetes.
+  "Run it on our existing cluster",
+  "Send the results to the cloud",
+  "Roll out the change to production",
+];
+
+for (const task of NAMES_NO_ARTIFACT) {
+  test(`a wider vocabulary does not invent a requirement: ${task.slice(0, 44)}`, () => {
+    const { failures } = run(README_ONLY, (d) => artifactPresenceFailures(d, task));
+    assert.deepEqual(failures, [], `invented a requirement from: ${task}`);
+  });
+}
+
+// Trap: `.*` in the old kubernetes pattern crossed sentence boundaries, so a task naming manifests
+// in one paragraph and a service in another matched.
+test("proximity does not reach across a sentence or a semicolon", () => {
+  const task =
+    "Write the deployment manifests for our internal tooling. The service itself is out of scope; " +
+    "another team owns the cluster.";
+  const { failures } = run(README_ONLY, (d) => artifactPresenceFailures(d, task));
+  assert.deepEqual(failures, []);
+});
+
+// Trap: /\bcontainer\b/ against "containers" is fine, but a noun list without its own `s?` is not.
+test("plural nouns match", () => {
+  const { failures } = run(README_ONLY, (d) =>
+    artifactPresenceFailures(d, "Ship the services as containers")
+  );
+  assert.ok(failures.length > 0);
+});

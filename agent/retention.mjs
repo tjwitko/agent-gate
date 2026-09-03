@@ -102,6 +102,95 @@ const RECORD_STORE_NAME =
 
 const humanDays = (d) => (d >= 365 && d % 365 === 0 ? `${d / 365} year(s)` : `${d} day(s)`);
 
+
+// --- can the store itself be destroyed? -----------------------------------
+// The checks above establish that nothing EXPIRES the records early. That is not the same as the
+// records surviving seven years, and the difference is one command. A deliverable declared
+// `enable_deletion_protection = true` -- on its load balancer. Its actual record store, an
+// aws_db_instance holding the callbacks, had no protection at all, so a single `terraform destroy`
+// erases the seven-year record while a grep for "deletion_protection" says the project is covered.
+//
+// What counts as protection is per resource type, because AWS spells it differently in each:
+const STORE_PROTECTION = [
+  {
+    type: /^aws_dynamodb_table$/,
+    label: "DynamoDB table",
+    protected: (body) => hclBool(body, "deletion_protection_enabled") === true || preventsDestroy(body),
+    missing: "deletion_protection_enabled = true, or lifecycle { prevent_destroy = true }",
+  },
+  {
+    type: /^(aws_db_instance|aws_rds_cluster)$/,
+    label: "RDS store",
+    protected: (body) => hclBool(body, "deletion_protection") === true || preventsDestroy(body),
+    missing: "deletion_protection = true, or lifecycle { prevent_destroy = true }",
+  },
+  {
+    type: /^aws_s3_bucket$/,
+    label: "S3 bucket",
+    // force_destroy is the opposite of protection: it exists so Terraform can delete a bucket that
+    // still has objects in it. A COMPLIANCE-mode Object Lock is protection on its own -- nobody can
+    // delete the objects, and a bucket that cannot be emptied cannot be destroyed. GOVERNANCE is
+    // not, because it can be bypassed.
+    protected: (body, ctx) =>
+      hclBool(body, "force_destroy") !== true && (preventsDestroy(body) || ctx.complianceLocked),
+    missing: "lifecycle { prevent_destroy = true }, a COMPLIANCE-mode Object Lock, or force_destroy left off",
+  },
+];
+
+function preventsDestroy(body) {
+  return hclBlocks(body, "lifecycle").some((l) => hclBool(l, "prevent_destroy") === true);
+}
+
+/**
+ * Whether the store holding the records can be destroyed, and whether its key can.
+ * Returns { unprotected, governanceLocks, deletableKeys }.
+ */
+export function checkRetentionDurability(tfText) {
+  // Which buckets are held by a COMPLIANCE-mode lock, by the label the lock resource points at.
+  const complianceLocked = new Set();
+  for (const r of hclResources(tfText, /^aws_s3_bucket_object_lock_configuration$/)) {
+    const compliance = hclBlocks(r.body, "default_retention").some((dr) => /\bmode\s*=\s*"COMPLIANCE"/i.test(dr));
+    if (!compliance) continue;
+    const ref = /\bbucket\s*=\s*aws_s3_bucket\.(\w+)/.exec(r.body);
+    complianceLocked.add(ref ? ref[1] : r.label);
+  }
+
+  const unprotected = [];
+  for (const spec of STORE_PROTECTION) {
+    for (const r of hclResources(tfText, spec.type)) {
+      // This BLOCKS, so it fires only on a store whose name says it holds the records. A bucket of
+      // load-balancer logs or build artifacts is not a seven-year archive, and demanding
+      // prevent_destroy on one would be a false block. The cost is a store called `main` or
+      // `primary` going unchecked -- the safe direction for a blocking finding, and the same rule
+      // already used for CloudWatch log groups.
+      if (NOT_A_RECORD_STORE.test(r.label) || !RECORD_STORE_NAME.test(r.label)) continue;
+      if (spec.protected(r.body, { complianceLocked: complianceLocked.has(r.label) })) continue;
+      unprotected.push({ what: `${spec.label} "${r.label}"`, missing: spec.missing });
+    }
+  }
+
+  // GOVERNANCE mode is bypassable by any principal holding s3:BypassGovernanceRetention. For a
+  // regulatory hold that is a different control from COMPLIANCE, which nobody can shorten -- not
+  // the account root, not AWS.
+  const governanceLocks = [];
+  for (const r of [
+    ...hclResources(tfText, /^aws_s3_bucket_object_lock_configuration$/),
+    ...hclResources(tfText, /^aws_s3_bucket$/),
+  ]) {
+    for (const dr of hclBlocks(r.body, "default_retention")) {
+      if (/\bmode\s*=\s*"GOVERNANCE"/i.test(dr)) governanceLocks.push(r.label);
+    }
+  }
+
+  // Ciphertext whose key is gone is not a record. A customer-managed key that terraform can
+  // schedule for deletion takes the archive with it.
+  const deletableKeys = hclResources(tfText, /^aws_kms_key$/)
+    .filter((k) => !preventsDestroy(k.body))
+    .map((k) => k.label);
+
+  return { unprotected, governanceLocks, deletableKeys };
+}
+
 /**
  * What in this project deletes records, and on what horizon.
  * Returns { ran, unknown, deleters, credits, backupOnly }.
@@ -259,7 +348,8 @@ export function checkRetention(projectDir, { requiredDays } = {}) {
     }
   }
 
-  return { ran: true, unknown: null, deleters, credits, backupOnly, unnamed, requiredDays };
+  return { ran: true, unknown: null, deleters, credits, backupOnly, unnamed,
+           durability: checkRetentionDurability(tfText), requiredDays };
 }
 
 /**
@@ -336,11 +426,44 @@ export function retentionFailures(projectDir, { requiredDays } = {}) {
     );
   }
 
+  // Emitted on the EXPIRY verdict alone. Gating it on total silence meant a durability finding
+  // suppressed it, and the reader lost the answer to "does anything delete these records" -- two
+  // separate properties, and each needs its own line.
   if (!failures.length && !advisories.length) {
     advisories.push(
       `retention: nothing here deletes the records — no TTL, no lifecycle expiration, no log retention — ` +
         `so the ${need} requirement is not violated by this configuration. That is the whole of what was ` +
-        `established: durability of the store itself was not checked.`
+        `established here; whether the store survives the period is reported separately.`
+    );
+  }
+
+  // Surviving the period is a separate property from not being expired early, and it is checked
+  // separately. A store nothing expires but anything can drop is not retained.
+  const dur = report.durability || { unprotected: [], governanceLocks: [], deletableKeys: [] };
+  for (const u of dur.unprotected) {
+    failures.push(
+      `retention: ${u.what} holds the records and can be destroyed — no ${u.missing}. Nothing here ` +
+        `expires these records, but one \`terraform destroy\`, or one resource replacement, ends the ` +
+        `${need} the task requires. Declaring protection on some other resource does not count: a ` +
+        `deliverable set enable_deletion_protection on its load balancer while the database holding ` +
+        `the callbacks had none.`
+    );
+  }
+  if (dur.governanceLocks.length) {
+    advisories.push(
+      `retention: Object Lock on ${dur.governanceLocks.map((l) => `"${l}"`).join(", ")} is in ` +
+        `GOVERNANCE mode, which any principal holding s3:BypassGovernanceRetention can shorten. ` +
+        `COMPLIANCE mode cannot be shortened by anyone, including the account root and AWS. For a ` +
+        `${need} regulatory hold that is the difference between a control and a default.`
+    );
+  }
+  if (dur.deletableKeys.length && (dur.unprotected.length === 0 || dur.governanceLocks.length)) {
+    advisories.push(
+      `retention: KMS key(s) ${dur.deletableKeys.map((k) => `"${k}"`).join(", ")} have no ` +
+        `lifecycle { prevent_destroy = true }. If the records are encrypted with a key this ` +
+        `configuration can schedule for deletion, destroying the key destroys the archive: ` +
+        `ciphertext without its key is not a record. Protecting the store and not its key leaves ` +
+        `the shorter of the two paths open.`
     );
   }
 

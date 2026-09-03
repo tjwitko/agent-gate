@@ -22,6 +22,11 @@ function run(files, fn) {
 
 const SEVEN_YEARS = 7 * 365;
 
+// Findings about something EXPIRING the records early, as distinct from findings about the store
+// being destroyable. Both live in this check and a fixture can legitimately draw one of each, so a
+// test asserts about the property it is testing rather than counting every failure.
+const expiryFindings = (r) => r.failures.filter((f) => !/can be destroyed/.test(f));
+
 // --- reading the requirement ----------------------------------------------
 test("the period is read from the task in the forms a task actually writes it", () => {
   const cases = [
@@ -61,9 +66,9 @@ test("a lifecycle expiration shorter than the requirement blocks", () => {
     },
     (dir) => {
       const r = retentionFailures(dir, { requiredDays: SEVEN_YEARS });
-      assert.equal(r.failures.length, 1);
-      assert.match(r.failures[0], /destroys records before/);
-      assert.match(r.failures[0], /90 day/);
+      assert.equal(expiryFindings(r).length, 1);
+      assert.match(expiryFindings(r)[0], /destroys records before/);
+      assert.match(expiryFindings(r)[0], /90 day/);
     }
   );
 });
@@ -79,8 +84,8 @@ test("an enabled DynamoDB TTL blocks, because the horizon is not in the configur
     },
     (dir) => {
       const r = retentionFailures(dir, { requiredDays: SEVEN_YEARS });
-      assert.equal(r.failures.length, 1);
-      assert.match(r.failures[0], /TTL/);
+      assert.equal(expiryFindings(r).length, 1);
+      assert.match(expiryFindings(r)[0], /TTL/);
     }
   );
 });
@@ -94,7 +99,7 @@ test("a TTL that is present but disabled is not a finding", () => {
         }`,
     },
     (dir) => {
-      assert.equal(retentionFailures(dir, { requiredDays: SEVEN_YEARS }).failures.length, 0);
+      assert.equal(expiryFindings(retentionFailures(dir, { requiredDays: SEVEN_YEARS })).length, 0);
     }
   );
 });
@@ -136,10 +141,10 @@ test("no expiry anywhere is compliance, not a finding", () => {
     { "main.tf": `resource "aws_dynamodb_table" "callbacks" { name = "callbacks" }` },
     (dir) => {
       const r = retentionFailures(dir, { requiredDays: SEVEN_YEARS });
-      assert.equal(r.failures.length, 0);
-      assert.match(r.advisories[0], /nothing here deletes the records/);
-      // and it must not overclaim
-      assert.match(r.advisories[0], /durability of the store itself was not checked/);
+      assert.equal(expiryFindings(r).length, 0);
+      assert.match(r.advisories.join(" "), /nothing here deletes the records/);
+      // and it must not overclaim: surviving the period is a separate question with its own line
+      assert.match(r.advisories.join(" "), /reported separately/);
     }
   );
 });
@@ -371,4 +376,131 @@ test("number words above twelve are read, and longer words win", () => {
   assert.equal(taskRetentionRequirement("Keep it for ninety days")?.days, 90);
   assert.equal(taskRetentionRequirement("Keep it for seventeen days")?.days, 17);
   assert.equal(taskRetentionRequirement("Keep it for seven days")?.days, 7);
+});
+
+// --- surviving the period, not just avoiding early expiry -----------------
+// Everything above establishes that nothing EXPIRES the records early. That is not the same as the
+// records surviving seven years, and the difference is one command. A deliverable declared
+// `enable_deletion_protection = true` -- on its load balancer. The aws_db_instance actually holding
+// the callbacks had no protection at all, so one `terraform destroy` ended the seven-year record
+// while a grep for "deletion_protection" said the project was covered.
+const blocks = (r) => r.failures.filter((f) => /can be destroyed/.test(f));
+
+test("a record store with no destroy protection blocks", () => {
+  run({ "main.tf": `resource "aws_dynamodb_table" "callbacks" { name = "callbacks" }` }, (dir) => {
+    const r = retentionFailures(dir, { requiredDays: SEVEN_YEARS });
+    assert.equal(blocks(r).length, 1);
+    assert.match(blocks(r)[0], /deletion_protection_enabled = true/);
+  });
+});
+
+test("protection declared on another resource does not count", () => {
+  run(
+    {
+      "main.tf": `
+        resource "aws_lb" "main" { enable_deletion_protection = true }
+        resource "aws_db_instance" "webhook" { engine = "postgres" }`,
+    },
+    (dir) => {
+      const r = retentionFailures(dir, { requiredDays: SEVEN_YEARS });
+      assert.equal(blocks(r).length, 1);
+      assert.match(blocks(r)[0], /RDS store "webhook"/);
+    }
+  );
+});
+
+for (const [label, body] of [
+  ["deletion_protection_enabled", `resource "aws_dynamodb_table" "callbacks" { deletion_protection_enabled = true }`],
+  ["prevent_destroy", `resource "aws_dynamodb_table" "callbacks" { lifecycle { prevent_destroy = true } }`],
+]) {
+  test(`${label} counts as protection`, () => {
+    run({ "main.tf": body }, (dir) => {
+      assert.equal(blocks(retentionFailures(dir, { requiredDays: SEVEN_YEARS })).length, 0);
+    });
+  });
+}
+
+// A bucket nobody can empty is a bucket nobody can destroy, so a COMPLIANCE lock is protection on
+// its own. GOVERNANCE is not: it is bypassable by anyone holding s3:BypassGovernanceRetention.
+test("a COMPLIANCE-mode Object Lock protects the bucket; GOVERNANCE does not", () => {
+  const bucket = (mode) => ({
+    "main.tf": `
+      resource "aws_s3_bucket" "callback_archive" { bucket = "callbacks" }
+      resource "aws_s3_bucket_object_lock_configuration" "callback_archive" {
+        bucket = aws_s3_bucket.callback_archive.id
+        rule { default_retention { mode = "${mode}"  years = 7 } }
+      }`,
+  });
+  run(bucket("COMPLIANCE"), (dir) => {
+    assert.equal(blocks(retentionFailures(dir, { requiredDays: SEVEN_YEARS })).length, 0);
+  });
+  run(bucket("GOVERNANCE"), (dir) => {
+    const r = retentionFailures(dir, { requiredDays: SEVEN_YEARS });
+    assert.equal(blocks(r).length, 1);
+    assert.match(r.advisories.join(" "), /GOVERNANCE mode/);
+    assert.match(r.advisories.join(" "), /s3:BypassGovernanceRetention/);
+  });
+});
+
+test("force_destroy defeats a prevent_destroy on the same bucket", () => {
+  run(
+    {
+      "main.tf": `
+        resource "aws_s3_bucket" "callback_archive" {
+          force_destroy = true
+          lifecycle { prevent_destroy = true }
+        }`,
+    },
+    (dir) => {
+      assert.equal(blocks(retentionFailures(dir, { requiredDays: SEVEN_YEARS })).length, 1);
+    }
+  );
+});
+
+// This BLOCKS, so it fires only on a store whose name says it holds the records. Log and artifact
+// buckets are not seven-year archives and demanding prevent_destroy on one is a false block.
+for (const label of ["alb_logs", "build_artifacts", "terraform_state", "session_cache"]) {
+  test(`an unrelated store is not in scope: ${label}`, () => {
+    run({ "main.tf": `resource "aws_s3_bucket" "${label}" { bucket = "x" }` }, (dir) => {
+      assert.equal(blocks(retentionFailures(dir, { requiredDays: SEVEN_YEARS })).length, 0, label);
+    });
+  });
+}
+
+test("nothing is checked for durability when the task states no period", () => {
+  run({ "main.tf": `resource "aws_dynamodb_table" "callbacks" { name = "x" }` }, (dir) => {
+    assert.deepEqual(retentionFailures(dir, {}).failures, []);
+  });
+});
+
+// Ciphertext without its key is not a record.
+test("a deletable KMS key beside a protected store is reported", () => {
+  run(
+    {
+      "main.tf": `
+        resource "aws_dynamodb_table" "callbacks" { deletion_protection_enabled = true }
+        resource "aws_kms_key" "app" { deletion_window_in_days = 30 }`,
+    },
+    (dir) => {
+      const r = retentionFailures(dir, { requiredDays: SEVEN_YEARS });
+      assert.equal(blocks(r).length, 0);
+      assert.match(r.advisories.join(" "), /prevent_destroy/);
+      assert.match(r.advisories.join(" "), /ciphertext without its key/i);
+    }
+  );
+});
+
+test("a protected KMS key draws no finding", () => {
+  run(
+    {
+      "main.tf": `
+        resource "aws_dynamodb_table" "callbacks" { deletion_protection_enabled = true }
+        resource "aws_kms_key" "app" { lifecycle { prevent_destroy = true } }`,
+    },
+    (dir) => {
+      const r = retentionFailures(dir, { requiredDays: SEVEN_YEARS });
+      assert.equal(blocks(r).length, 0);
+      assert.doesNotMatch(r.advisories.join(" "), /KMS key/);
+    }
+  );
 });

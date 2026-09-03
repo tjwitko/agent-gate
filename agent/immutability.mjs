@@ -185,8 +185,35 @@ export function checkImmutability(projectDir, { required = false } = {}) {
     // after the separator reported that as missing — a Go deliverable that HAD the control was told
     // it did not. Exactly the defect that cost a run when this pattern required `=` and TypeScript
     // wrote `:`; a third language, the same assumption about spelling.
-    const conditional =
+    // Fourth language, fourth spelling, and this one destroyed work rather than merely blocking it.
+    // Go's SDK field is a *string, so the idiomatic form takes the address of a local:
+    //
+    //     immutabilityProtection := "attribute_not_exists(event_id)"
+    //     ConditionExpression: &immutabilityProtection,
+    //
+    // A deliverable wrote exactly that and spent three commits rewriting it. Its first version used
+    // aws.String(...), which this pattern accepts; trying to satisfy the check it moved AWAY from
+    // the accepted form twice, and renamed the variable on the last attempt to make the intent
+    // "more explicit". Every version was correct.
+    //
+    // So the value is now followed through one level of indirection: a bare identifier after the
+    // separator is resolved to its assignment. Loosening a blocking check risks a false negative,
+    // and the guard against that is that the identifier must be assigned a string literal actually
+    // containing attribute_not_exists -- evidence, not a name that sounds right.
+    const conditionalLiteral =
       /condition_?expression\s*[:=]\s*(?:[\w.]+\s*\(\s*)?["'`][^"'`]*attribute_not_exists/i.test(all);
+    const viaVariable = () => {
+      // Not followed by `.` or `(`, which is what separates a bare identifier from the head of a
+      // wrapping call like aws.String(...). Listing the terminators instead missed `&cond })`,
+      // because a struct literal closes with a brace rather than a comma.
+      const ref = /condition_?expression\s*[:=]\s*[&*]?\s*([A-Za-z_$][\w$]*)(?!\s*[.(])/i.exec(all);
+      if (!ref) return false;
+      // `:=` for Go, `=` for everything else, optionally through a wrapping call.
+      return new RegExp(
+        `\\b${ref[1]}\\s*:?=\\s*(?:[\\w.]+\\s*\\(\\s*)?["'\`][^"'\`]*attribute_not_exists`
+      ).test(all);
+    };
+    const conditional = conditionalLiteral || viaVariable();
     // Only judge the IAM policy if one actually grants DynamoDB actions here.
     const grants = [...tfText.matchAll(/"dynamodb:(\w+)"/g)].map((m) => m[1]);
     const mutating = grants.filter((a) => /^(DeleteItem|UpdateItem|BatchWriteItem)$/i.test(a));

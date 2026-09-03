@@ -414,3 +414,69 @@ test("a real DynamoDB client is still detected", () => {
     }
   );
 });
+
+// --- a ConditionExpression reached through a variable ---------------------
+// Go's SDK field is a *string, so the idiomatic form takes the address of a local. A deliverable
+// wrote exactly that and spent three commits rewriting it: its first version used aws.String(...),
+// which this check accepts, and trying to satisfy the check it moved AWAY from the accepted form
+// twice, renaming the variable on the last attempt to make the intent "more explicit". Every
+// version was correct. Fourth language, fourth spelling, and the first to destroy work rather than
+// merely block it.
+const GO_STORE = (putItem) => ({
+  "main.go": `
+    package main
+    import ("github.com/aws/aws-sdk-go-v2/service/dynamodb")
+    func record(a *App, item map[string]types.AttributeValue) error {
+      ${putItem}
+      return err
+    }`,
+  "main.tf": `resource "aws_dynamodb_table" "callbacks" {
+    name = "callbacks"
+    deletion_protection_enabled = true
+  }`,
+});
+
+const guarded = (r) => r.stores.filter((s) => s.kind === "dynamodb" && !s.protected);
+
+for (const [label, put] of [
+  ["address of a local", `immutabilityProtection := "attribute_not_exists(event_id)"
+      _, err := a.db.PutItem(ctx, &dynamodb.PutItemInput{ Item: item, ConditionExpression: &immutabilityProtection })`],
+  ["aws.String helper", `_, err := a.db.PutItem(ctx, &dynamodb.PutItemInput{ Item: item, ConditionExpression: aws.String("attribute_not_exists(event_id)") })`],
+  ["plain identifier", `cond := "attribute_not_exists(event_id)"
+      _, err := a.db.PutItem(ctx, &dynamodb.PutItemInput{ Item: item, ConditionExpression: cond })`],
+]) {
+  test(`a conditional write is recognised: ${label}`, () => {
+    run(GO_STORE(put), (dir) => {
+      const r = checkImmutability(dir, { required: true });
+      const missing = guarded(r).filter((s) => /ConditionExpression/.test(s.missing || ""));
+      assert.equal(missing.length, 0, `${label} was reported as missing its condition`);
+    });
+  });
+}
+
+// Loosening a blocking check risks accepting something that is not protection. The identifier must
+// be assigned a string that actually contains attribute_not_exists -- a name that sounds right is
+// not evidence.
+test("an identifier that is never assigned the condition is not protection", () => {
+  run(
+    GO_STORE(`immutabilityProtection := "event_id = :id"
+      _, err := a.db.PutItem(ctx, &dynamodb.PutItemInput{ Item: item, ConditionExpression: &immutabilityProtection })`),
+    (dir) => {
+      const r = checkImmutability(dir, { required: true });
+      assert.ok(
+        guarded(r).some((s) => /ConditionExpression/.test(s.missing || "")),
+        "a condition that does not test existence must still be reported"
+      );
+    }
+  );
+});
+
+test("no ConditionExpression at all is still reported", () => {
+  run(
+    GO_STORE(`_, err := a.db.PutItem(ctx, &dynamodb.PutItemInput{ Item: item })`),
+    (dir) => {
+      const r = checkImmutability(dir, { required: true });
+      assert.ok(guarded(r).some((s) => /ConditionExpression/.test(s.missing || "")));
+    }
+  );
+});

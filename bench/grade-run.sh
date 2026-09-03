@@ -25,8 +25,14 @@ if [ -d "$ARG" ]; then DIR="$(cd "$ARG" && pwd)"; else DIR="$LLM_ROOT/webhook-$A
 
 echo "===================================================================="
 echo " run      : $DIR"
-echo " controls : $(git -C "$CONTROLS" rev-parse --short HEAD 2>/dev/null || echo unknown)"
-git -C "$CONTROLS" diff --quiet 2>/dev/null || echo " WARNING  : controls have uncommitted changes — this grade is not reproducible"
+# All five control repos, because the gate is not one repository. Two runs once carried identical
+# "controls @" lines while dep-audit had changed between them.
+for r in local-delegate-mcp terraform-guard-mcp dep-audit-mcp secret-guard-mcp identity-guard-mcp; do
+  d="$LLM_ROOT/$r"
+  sha="$(git -C "$d" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  git -C "$d" diff --quiet 2>/dev/null || sha="$sha (UNCOMMITTED — grade not reproducible)"
+  printf " %-22s %s\n" "$r" "$sha"
+done
 [ -f "$DIR/RUN.md" ] && sed -n 's/^- /            /p' "$DIR/RUN.md"
 echo "===================================================================="
 echo

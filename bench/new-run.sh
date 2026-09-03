@@ -88,17 +88,36 @@ cat > "$DIR/.claude/settings.local.json" <<'JSON'
 }
 JSON
 
+# The gate spans five repositories, not one. Recording only local-delegate-mcp meant two runs could
+# carry the same "controls @" line while dep-audit or terraform-guard had changed underneath them --
+# which happened: check_dependencies learned direct-vs-transitive between two runs whose RUN.md
+# would have been identical.
+CONTROL_REPOS="local-delegate-mcp terraform-guard-mcp dep-audit-mcp secret-guard-mcp identity-guard-mcp"
+gate_lines() {
+  for r in $CONTROL_REPOS; do
+    d="$LLM_ROOT/$r"
+    [ -d "$d/.git" ] || { echo "- $r: NOT A REPOSITORY"; continue; }
+    sha="$(git -C "$d" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    dirty=""
+    git -C "$d" diff --quiet 2>/dev/null || dirty=" (UNCOMMITTED — not reproducible)"
+    echo "- $r: $sha$dirty"
+  done
+}
 GATE="$(git -C "$CONTROLS" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 GATE_DIRTY=""
-git -C "$CONTROLS" diff --quiet 2>/dev/null || GATE_DIRTY=" (UNCOMMITTED CHANGES — this run is not reproducible)"
+for r in $CONTROL_REPOS; do
+  git -C "$LLM_ROOT/$r" diff --quiet 2>/dev/null || GATE_DIRTY=" (UNCOMMITTED CHANGES — this run is not reproducible)"
+done
 
 cat > "$DIR/RUN.md" <<MD
 # webhook-$NAME
 
 - started: $(date -u +"%Y-%m-%dT%H:%MZ")
 - model: ${MODEL:-unspecified}
-- controls: local-delegate-mcp @ $GATE$GATE_DIRTY
 - task: agent/fixtures/webhook-receiver-task.txt @ $(git -C "$CONTROLS" log -1 --format=%h -- agent/fixtures/webhook-receiver-task.txt 2>/dev/null || echo unknown)
+
+## Controls
+$(gate_lines)
 
 Freeze the controls for the duration. A defect found mid-run goes in
 docs/candidate-rules.md, not into the code — changing a gate while a run is live

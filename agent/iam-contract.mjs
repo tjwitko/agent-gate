@@ -16,21 +16,19 @@ const MAX_FILE_BYTES = 512 * 1024;
 // well over a thousand -- which is exactly why an unknown name is reported as unverifiable rather
 // than as wrong. Note AmazonEKS_CNI_Policy: real policy names DO contain underscores, so "looks
 // oddly punctuated" is not evidence of anything.
-const KNOWN_MANAGED_POLICIES = new Set([
-  "AdministratorAccess", "AmazonDynamoDBFullAccess", "AmazonDynamoDBReadOnlyAccess",
-  "AmazonEBSCSIDriverPolicy", "AmazonEC2ContainerRegistryFullAccess",
-  "AmazonEC2ContainerRegistryPowerUser", "AmazonEC2ContainerRegistryReadOnly",
-  "AmazonEC2ReadOnlyAccess", "AmazonEC2FullAccess", "AmazonEFSCSIDriverPolicy",
-  "AmazonEKSClusterPolicy", "AmazonEKSServicePolicy", "AmazonEKSVPCResourceController",
-  "AmazonEKSWorkerNodePolicy", "AmazonEKSWorkerNodeMinimalPolicy", "AmazonEKS_CNI_Policy",
-  "AmazonElasticFileSystemFullAccess", "AmazonKinesisFullAccess", "AmazonRDSFullAccess",
-  "AmazonS3FullAccess", "AmazonS3ReadOnlyAccess", "AmazonSNSFullAccess", "AmazonSQSFullAccess",
-  "AmazonSSMManagedInstanceCore", "AmazonSSMReadOnlyAccess", "AmazonVPCFullAccess",
-  "AWSLambdaBasicExecutionRole", "AWSLambdaVPCAccessExecutionRole", "AWSXrayWriteOnlyAccess",
-  "CloudWatchAgentServerPolicy", "CloudWatchFullAccess", "CloudWatchLogsFullAccess",
-  "CloudWatchLogsReadOnlyAccess", "ReadOnlyAccess", "SecretsManagerReadWrite",
-  "AmazonSecretsManagerReadWrite", "PowerUserAccess",
-]);
+// Parsed from AWS's own reference page by bench/fetch-managed-policies.sh, not transcribed: a
+// fabricated name in this file would be silently accepted as real, which is the one failure this
+// check exists to prevent. It replaced 37 hardcoded names, which is why most graded runs drew an
+// advisory saying a perfectly real policy was "not in this check's known list".
+//
+// The file has a date and AWS adds policies continually, so absence still does not mean a name is
+// wrong -- that verdict needs the near-miss evidence below, or `aws iam get-policy`.
+const KNOWN_MANAGED_POLICIES = new Set(
+  readFileSync(new URL("./fixtures/aws-managed-policies.txt", import.meta.url), "utf8")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith("#"))
+);
 
 const MANAGED_POLICY_ARN = /arn:aws[a-z-]*:iam::aws:policy\/(?:[\w+=,.@-]+\/)*([\w+=,.@-]+)/g;
 
@@ -43,12 +41,21 @@ function normalise(name) {
 function nearestKnown(name) {
   const n = normalise(name);
   const stem = n.replace(/policy$/, "");
-  if (stem.length < 10) return null;
+  // Every prefix match, then the closest by length. With 37 candidates the first match was almost
+  // always the right one; with 1585 it is whichever happens to sort first, and
+  // AmazonEBSCSID_Policy drew "did you mean AmazonEBSCSIDriverEKSClusterScopedPolicy?" when
+  // AmazonEBSCSIDriverPolicy was sitting right there. A wrong suggestion beside a correct verdict
+  // is how a reader learns to skim the verdict.
+  let best = null;
   for (const known of KNOWN_MANAGED_POLICIES) {
     const k = normalise(known);
-    if (k !== n && (k.startsWith(stem) || n.startsWith(k.replace(/policy$/, "")))) return known;
+    if (k === n) continue;
+    if (!(k.startsWith(stem) || n.startsWith(k.replace(/policy$/, "")))) continue;
+    if (best === null || Math.abs(known.length - name.length) < Math.abs(best.length - name.length)) {
+      best = known;
+    }
   }
-  return null;
+  return best;
 }
 
 function walkFiles(dir, exts, acc = [], root = dir) {

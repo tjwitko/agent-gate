@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "fs";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
@@ -260,4 +261,75 @@ test("a hand-written placeholder in Terraform is still a finding", () => {
     iamContractFailures
   );
   assert.ok(failures.find((f) => /are not a role ARN/.test(f)));
+});
+
+// --- the managed-policy list ----------------------------------------------
+// 37 hardcoded names meant most real policies came back "not in this check's known list", an
+// advisory in most graded runs that correctly said it was evidence of nothing. The list is now
+// parsed from AWS's own reference page by bench/fetch-managed-policies.sh -- parsed, not
+// transcribed, because a fabricated name would be silently accepted as real, which is the single
+// failure this check exists to prevent.
+const attach = (...names) => ({
+  "iam.tf": names
+    .map((n, i) => `resource "aws_iam_role_policy_attachment" "a${i}" {\n  policy_arn = "arn:aws:iam::aws:policy/${n}"\n}`)
+    .join("\n"),
+});
+
+test("the fixture carries a real list, not a handful of names", () => {
+  // A partial list is safe but useless; this guards against the generator silently writing one.
+  const names = readFileSync(new URL("./fixtures/aws-managed-policies.txt", import.meta.url), "utf8")
+    .split("\n")
+    .filter((l) => l.trim() && !l.startsWith("#"));
+  assert.ok(names.length > 1000, `only ${names.length} names in the fixture`);
+  assert.ok(names.includes("AdministratorAccess"));
+  assert.ok(!names.includes("NotARealPolicyName"));
+});
+
+// Every policy name the six graded deliverables actually attached. Each of these drew a "not in
+// this check's known list" advisory before.
+for (const name of [
+  "AmazonRDSEnhancedMonitoringRole",
+  "AmazonECSTaskExecutionRolePolicy",
+  "AWSBackupServiceRolePolicyForBackup",
+  "AmazonEKSClusterPolicy",
+  "AmazonEKSWorkerNodePolicy",
+]) {
+  test(`a real managed policy is recognised: ${name}`, () => {
+    const r = run(attach(name), (d) => checkManagedPolicies(d));
+    assert.deepEqual(r.wrong, []);
+    assert.deepEqual(r.unverifiable, []);
+  });
+}
+
+test("a policy reached through a service-role path is recognised", () => {
+  const r = run(
+    { "iam.tf": 'policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"' },
+    (d) => checkManagedPolicies(d)
+  );
+  assert.deepEqual(r.unverifiable, []);
+  assert.deepEqual(r.wrong, []);
+});
+
+// A near miss is still reported as wrong, and the suggestion must be the closest real name. With
+// 37 candidates the first prefix match was almost always right; with 1585 it is whichever sorts
+// first, and AmazonEBSCSID_Policy drew "did you mean AmazonEBSCSIDriverEKSClusterScopedPolicy?"
+// while AmazonEBSCSIDriverPolicy sat right there. A wrong suggestion beside a correct verdict
+// teaches the reader to skim the verdict.
+for (const [typo, expected] of [
+  ["AmazonEBSCSID_Policy", "AmazonEBSCSIDriverPolicy"],
+  ["AmazonEKSWorkerNodePolcy", "AmazonEKSWorkerNodePolicy"],
+]) {
+  test(`a typo is reported with the closest real name: ${typo}`, () => {
+    const r = run(attach(typo), (d) => checkManagedPolicies(d));
+    assert.equal(r.wrong.length, 1);
+    assert.equal(r.wrong[0].near, expected);
+  });
+}
+
+// Absence from a dated file is not proof a policy does not exist -- AWS adds them continually --
+// so a name with no near miss stays advisory rather than blocking.
+test("an unrecognised name with no near miss is advisory, not wrong", () => {
+  const r = run(attach("TotallyInventedPolicyName"), (d) => checkManagedPolicies(d));
+  assert.deepEqual(r.wrong, []);
+  assert.equal(r.unverifiable.length, 1);
 });

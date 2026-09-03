@@ -381,7 +381,14 @@ const JS_NEST_ROUTE_RE = /@(Get|Post|Put|Patch|Delete|All)\s*\(\s*(?:(['"`])([^'
 // middleware and the verifier may be any of them, not only the last.
 function routeHandlerNames(context) {
   const call = context.slice(0, context.indexOf(");") + 1 || context.length);
-  return [...call.matchAll(/(^|[,\s(])([A-Za-z_$][\w$]*)\s*(?=[,)])/g)].map((m) => m[2]);
+  // The optional receiver is what Go needs: `mux.HandleFunc("/lookup", s.handleLookup)` names its
+  // handler as a method VALUE, and a pattern anchored on `[,\s(]` never sees past the dot. Both
+  // routes of the first Go deliverable read as unauthenticated because of it -- including one that
+  // reads Authorization and returns 401 -- so a supported language had been blind to the standard
+  // net/http idiom the whole time.
+  return [...call.matchAll(/(^|[,\s(])(?:[A-Za-z_$][\w$]*\s*\.\s*)?([A-Za-z_$][\w$]*)\s*(?=[,)])/g)].map(
+    (m) => m[2]
+  );
 }
 
 // The handler's own body, bounded by its braces. A fixed-size window instead of this read past the
@@ -475,7 +482,11 @@ function routeHandlerBodies(route, all) {
   // somewhere must not thereby mark every route protected. A first attempt did exactly that and
   // reported an unauthenticated support endpoint as safe, which is worse than missing one.
   for (const name of routeHandlerNames(route.context)) {
-    const def = new RegExp(`(?:export\\s+)?(?:const|let|var|function|async\\s+function)\\s+${name}\\b`).exec(all);
+    // `func handleX(` and `func (s *Server) handleX(` alike. Without the receiver form the body of
+    // every Go method handler went unread, so no credential check inside one could be seen.
+    const def =
+      new RegExp(`(?:export\\s+)?(?:const|let|var|function|async\\s+function)\\s+${name}\\b`).exec(all) ||
+      new RegExp(`\\bfunc\\s*(?:\\([^)]*\\)\\s*)?${name}\\s*\\(`).exec(all);
     if (!def) continue;
     bodies.push(functionBodyAt(all, def.index));
   }
@@ -807,10 +818,42 @@ const goAdapter = {
     return null;
   },
 
-  routeAuth(r) {
+  routeAuth(r, all) {
+    // Read the handler, not only the route line. Go's standard library has no middleware chain, so
+    // the guard lives INSIDE the handler -- and this adapter used to look only for an auth-ish word
+    // beside the route. Both endpoints of the first Go deliverable were reported as accepting
+    // requests from anyone, including one that reads Authorization and returns 401 on its seventh
+    // line. The same false positive as the inline-arrow case in JavaScript, in another language:
+    // protection judged by handler shape rather than by what the handler does.
+    // Signature first: it is the more specific finding, and an X-Signature header satisfies the
+    // credential pattern too. Reporting the webhook route as protected by "a credential" when it is
+    // protected by a verified HMAC is the same defect as a near-miss suggestion naming the wrong
+    // policy -- right verdict, wrong reason, and a reader who notices that learns to skim verdicts.
+    for (const body of routeHandlerBodies(r, all)) {
+      if (GO_SIGNATURE_VERIFY.test(body) && GO_AUTH_REJECTION.test(body)) {
+        return "a verified request signature";
+      }
+      if (GO_CREDENTIAL_READ.test(body) && GO_AUTH_REJECTION.test(body)) {
+        return "a credential checked in the handler";
+      }
+    }
     return AUTH_WORD.test(r.context) ? "middleware in the route's chain" : null;
   },
 };
+
+// `r.Header.Get("Authorization")`, and the http.Status* constants a Go handler refuses with. A
+// value read is not a control until something acts on it, so both halves are required -- the same
+// rule the Python and JavaScript adapters already apply.
+const GO_CREDENTIAL_READ =
+  /\bHeader\s*\.\s*Get\s*\(\s*"[^"]*(?:key|token|secret|auth|signature)[^"]*"\s*\)/i;
+const GO_AUTH_REJECTION =
+  /\bhttp\.Status(?:Unauthorized|Forbidden)\b|\bWriteHeader\s*\(\s*(?:401|403)\s*\)/;
+// `.Verify(` included because the HMAC itself is usually a call or two deeper -- the deliverable
+// that exposed this wrote `s.signer.Verify(body, signature, signingTime, s.sharedKey)` in the
+// handler and did the hmac work in another file. In Go a `.Verify(` call is signature or
+// certificate verification nearly without exception.
+const GO_SIGNATURE_VERIFY =
+  /\bhmac\.(?:New|Equal)\s*\(|\bsubtle\.ConstantTimeCompare\s*\(|\b[Vv]erify(?:Signature)?\s*\(|\.\s*[Vv]erify\w*\s*\(/;
 
 // ---------------------------------------------------------------------------------------------
 // Java -- Spring MVC / Spring Security

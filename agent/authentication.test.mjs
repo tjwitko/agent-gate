@@ -1169,3 +1169,77 @@ test("a health endpoint in a hand-rolled dispatch is open by convention", () => 
   );
   assert.doesNotMatch(failures.join(" "), /healthz/);
 });
+
+// --- Go handlers are methods on a receiver -------------------------------
+// The first Go deliverable had BOTH endpoints reported as accepting requests from anyone, including
+// one that reads Authorization and returns 401 on its seventh line. Two causes, both about handler
+// shape rather than handler behaviour: `mux.HandleFunc("/lookup", s.handleLookup)` names its
+// handler as a method VALUE, which the name extractor could not see past the dot; and
+// `func (s *Server) handleLookup(...)` is a method, which the definition lookup did not match. The
+// Go adapter then judged protection from an auth-ish word beside the route, which Go's standard
+// library has no place to put -- the guard lives inside the handler.
+const GO_SERVER = (webhookBody, lookupBody) => ({
+  "main.go": `
+    package main
+    import ("net/http"; "crypto/hmac")
+
+    func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
+      ${webhookBody}
+    }
+    func (s *Server) handleLookup(w http.ResponseWriter, r *http.Request) {
+      ${lookupBody}
+    }
+    func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+      w.WriteHeader(http.StatusOK)
+    }
+    func (s *Server) Start() error {
+      mux := http.NewServeMux()
+      mux.HandleFunc("/webhook", s.handleWebhook)
+      mux.HandleFunc("/lookup", s.handleLookup)
+      mux.HandleFunc("/health", s.handleHealth)
+      return http.ListenAndServe(":8080", mux)
+    }`,
+});
+
+const GUARDED_WEBHOOK = `
+  signature := r.Header.Get("X-Signature")
+  if !s.signer.Verify(body, signature, s.sharedKey) {
+    http.Error(w, "Signature verification failed", http.StatusUnauthorized)
+    return
+  }`;
+const GUARDED_LOOKUP = `
+  apiKey := r.Header.Get("Authorization")
+  if apiKey == "" {
+    http.Error(w, "Missing API key", http.StatusUnauthorized)
+    return
+  }`;
+const OPEN = `w.WriteHeader(http.StatusOK)`;
+
+test("a Go method handler that verifies a signature is protected", () => {
+  const { routes } = run(GO_SERVER(GUARDED_WEBHOOK, GUARDED_LOOKUP), (d) => checkAuthentication(d));
+  const byPath = Object.fromEntries(routes.map((r) => [r.route, r.protectedBy]));
+  assert.equal(byPath["/webhook"], "a verified request signature");
+  assert.equal(byPath["/lookup"], "a credential checked in the handler");
+});
+
+test("a Go method handler with no guard is still reported", () => {
+  const { failures } = run(GO_SERVER(OPEN, OPEN), (d) => authenticationFailures(d));
+  assert.ok(failures.length > 0, "an unguarded Go handler must still be caught");
+  assert.match(failures.join(" "), /\/webhook/);
+  assert.match(failures.join(" "), /\/lookup/);
+});
+
+// Reading a header is not a control until something acts on it -- the same rule the Python and
+// JavaScript adapters apply.
+test("a Go handler that reads a credential and never refuses is not protected", () => {
+  const { failures } = run(
+    GO_SERVER(OPEN, `apiKey := r.Header.Get("Authorization")\n  _ = apiKey\n  w.WriteHeader(http.StatusOK)`),
+    (d) => authenticationFailures(d)
+  );
+  assert.match(failures.join(" "), /\/lookup/);
+});
+
+test("a Go health endpoint stays exempt", () => {
+  const { failures } = run(GO_SERVER(GUARDED_WEBHOOK, GUARDED_LOOKUP), (d) => authenticationFailures(d));
+  assert.doesNotMatch(failures.join(" "), /health/);
+});

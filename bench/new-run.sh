@@ -129,7 +129,12 @@ Build the project described in $TASK.
 Build it in the current directory, $DIR, which is empty apart from
 configuration. Do not read, copy from, or write to any other project directory.
 
-Security controls are available as MCP tools and are scoped to this directory. Validate with:
+Security controls are available as MCP tools and are scoped to this directory.
+
+While writing Terraform, use the terraform_validate MCP tool to check it. It needs no credentials
+and no plan, so it is cheap to call often — but it reports nothing about security.
+
+For the full check, including the security rules, validate with:
   node $CONTROLS/agent/validate-project.mjs . $TASK
 If a tool refuses or cannot run, say so plainly — never report it as a pass.
 PROMPT

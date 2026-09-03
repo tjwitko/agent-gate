@@ -1,0 +1,24 @@
+## Security gate
+
+This repository has a security gate. Run it before you say the work is done:
+
+    {{VALIDATE_COMMAND}}
+
+Exit 0 means nothing is blocking. Exit 1 means something is. Exit 3 means part of the gate could
+not run, which is not the same as passing.
+
+**A refusal is not a pass.** If a tool refuses, errors, or reports that it did not run, that check
+produced no evidence about this project. Say so plainly in your summary. Do not describe it as
+passing and do not count it toward "all checks green".
+
+**Tests are evidence only when they run and reach the code.** A suite that is never executed, that
+imports nothing from this project, or that asserts something true by construction is not evidence
+that anything works — however many assertions it contains and whether or not it passes. Install the
+dependencies and run it before you call it passing.
+
+**A written justification only covers what it names.** If you argue that findings do not apply, say
+which findings. An argument about one package does not carry to another, and the gate reports which
+findings are in packages this project depends on directly.
+
+**Fix what blocks, or say what you left.** If you stop with blocking findings outstanding, list them
+and why. A summary that reads as complete while the gate is red is the failure this exists to catch.

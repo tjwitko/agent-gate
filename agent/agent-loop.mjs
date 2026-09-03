@@ -952,12 +952,26 @@ function checkovAdvisory(dir, projectDir) {
   const probe = spawnSync("checkov", ["--version"], { encoding: "utf8" });
   if (probe.status !== 0) return null; // not installed — absence is the non-blocking direction
 
-  let present = [];
-  try {
-    present = readdirSync(dir).filter((f) => f.endsWith(".tf"));
-  } catch {
-    return null;
-  }
+  // Counted recursively, because `checkov -d` scans recursively. Counting only this directory's own
+  // .tf files while reading checkov's evaluated set -- which includes the child modules it walked
+  // into -- produced "covering 5 of 2 .tf file(s)". A ratio above one is nonsense, and it discredits
+  // the sentence it appears in.
+  const countTf = (d, acc = []) => {
+    let entries;
+    try {
+      entries = readdirSync(d, { withFileTypes: true });
+    } catch {
+      return acc;
+    }
+    for (const e of entries) {
+      if (SKIP_DIRS.has(e.name) || VENDORED_PATH_RE.test(e.name)) continue;
+      const full = path.join(d, e.name);
+      if (e.isDirectory()) countTf(full, acc);
+      else if (e.name.endsWith(".tf")) acc.push(path.relative(dir, full));
+    }
+    return acc;
+  };
+  const present = countTf(dir);
   if (present.length === 0) return null;
 
   const rel = path.relative(projectDir, dir) || ".";
@@ -1052,6 +1066,61 @@ async function lockfilePresent(projectDir) {
 // across runs a missing file means a different project, not a regression.
 let previousInventory = null;
 
+
+/**
+ * Every directory under `projectDir` that is a Terraform ROOT: it holds .tf files and is not
+ * referenced as a child module by another directory.
+ *
+ * A child module is not a root. A deliverable that split its infrastructure into
+ * terraform/modules/{vpc,rds,eks,security_groups} -- the first here to modularise, and the right way
+ * to write it -- drew FOUR blocking findings, one per module, every one of them
+ * "provider-authentication". Of course: only the root declares `provider "aws"`, and planning a
+ * child module standalone is meaningless. The gate was penalising the better practice, and only
+ * because every earlier deliverable had been one flat directory.
+ *
+ * Read from the `source` attribute rather than guessed from the path, so `modules/` in a name proves
+ * nothing either way and a genuine root that happens to live under one is still planned.
+ */
+export function terraformRoots(projectDir) {
+  const dirs = [];
+  const findTf = (dir) => {
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      // `.external_modules` holds Checkov's downloaded modules and lives INSIDE the project. Without
+      // it here, a run with one vendored EKS module presented 2,499 Terraform roots, 2,490 of them
+      // third-party, and the gate ran init+validate+plan against every one -- hours of work, and a
+      // failure list so long the next request was 143,066 tokens against a 65,536 context, which
+      // ended the run outright.
+      if (SKIP_DIRS.has(e.name)) continue;
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) findTf(full);
+      else if (e.name.endsWith(".tf") && !dirs.includes(dir)) dirs.push(dir);
+    }
+  };
+  findTf(projectDir);
+
+  const childModules = new Set();
+  for (const dir of dirs) {
+    for (const f of readdirSync(dir).filter((n) => n.endsWith(".tf"))) {
+      let text = "";
+      try {
+        text = readFileSync(path.join(dir, f), "utf8");
+      } catch {
+        continue;
+      }
+      for (const m of text.matchAll(/\bsource\s*=\s*"(\.\.?\/[^"]*)"/g)) {
+        childModules.add(path.resolve(dir, m[1]));
+      }
+    }
+  }
+  return dirs.filter((d) => !childModules.has(path.resolve(d)));
+}
+
 export async function validateProject(projectDir, toolRegistry, taskText = "") {
   // Every check runs behind this. A Helm chart made one check throw on a shape it assumed, the
   // exception escaped checkManifestContract, and validateProject aborted — so ZERO of the fourteen
@@ -1094,26 +1163,8 @@ export async function validateProject(projectDir, toolRegistry, taskText = "") {
     if (/ERRORS|SYNTAX ERROR|BUILD ERRORS/.test(result)) failures.push(`build_check:\n${result}`);
   }
 
-  // Any directory holding .tf files is a Terraform root worth validating.
-  const tfDirs = [];
-  const findTf = (dir) => {
-    for (const e of readdirSync(dir, { withFileTypes: true })) {
-      // `.external_modules` holds Checkov's downloaded modules and lives INSIDE the project. Without
-      // it here, a run with one vendored EKS module presented 2,499 Terraform roots, 2,490 of them
-      // third-party, and the gate ran init+validate+plan against every one -- hours of work, and a
-      // failure list so long the next request was 143,066 tokens against a 65,536 context, which
-      // ended the run outright. Fifth place this same omission appeared.
-      if (SKIP_DIRS.has(e.name)) continue;
-      const full = path.join(dir, e.name);
-      if (e.isDirectory()) findTf(full);
-      else if (e.name.endsWith(".tf") && !tfDirs.includes(dir)) tfDirs.push(dir);
-    }
-  };
-  try {
-    findTf(projectDir);
-  } catch {
-    /* nothing to scan */
-  }
+  // Every Terraform ROOT under the project. Child modules are excluded: see terraformRoots.
+  const tfDirs = terraformRoots(projectDir);
 
   const tfPlan = toolRegistry.get("terraform_plan");
   for (const dir of tfDirs) {

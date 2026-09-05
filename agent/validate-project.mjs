@@ -82,6 +82,21 @@ for (const c of CONTROLS) {
 const r = await validateProject(projectDir, registry, taskText);
 for (const c of clients) c.proc?.kill();
 
+// A server that connected but whose tool the gate never invoked. That is not the same as a server
+// that could not be reached, and it is harder to see: identity-guard was declared in every run's
+// .mcp.json, spawned by nothing, and absent from this list for ten graded deliverables, while every
+// report printed a line called `authentication` -- the in-process route check, a different thing
+// entirely. A check that was running concealed one that was not, and the name did the concealing.
+//
+// So `provides` is now an assertion rather than documentation: whatever a control claims to supply
+// must appear in `ran`, or the run says so before its verdict.
+const silent = [];
+for (const c of CONTROLS) {
+  if (unreachable.some((u) => u.startsWith(`${c.name} `))) continue;
+  const missing = c.provides.filter((tool) => !r.ran.some((x) => x === tool || x.startsWith(`${tool}(`)));
+  if (missing.length) silent.push(`${c.name} connected, but ${missing.join(", ")} was never called`);
+}
+
 console.log(`project        : ${projectDir}`);
 console.log(`task text      : ${taskFile ? taskFile : "NONE — checks gated on the task will report as not checked"}`);
 console.log(`validators run : ${r.ran.join(", ")}\n`);
@@ -91,6 +106,13 @@ console.log(`validators run : ${r.ran.join(", ")}\n`);
 if (unreachable.length) {
   console.log(`!! ${unreachable.length} CONTROL(S) COULD NOT BE REACHED — this run is INCOMPLETE`);
   for (const u of unreachable) console.log(`   - ${u}`);
+  console.log("");
+}
+if (silent.length) {
+  console.log(`!! ${silent.length} CONTROL(S) CONNECTED AND WERE NEVER CALLED — this run is INCOMPLETE`);
+  for (const u of silent) console.log(`   - ${u}`);
+  console.log("   A server that starts and is never asked anything reports nothing, which is");
+  console.log("   indistinguishable from a server that found nothing.");
   console.log("");
 }
 
@@ -105,5 +127,8 @@ if (r.advisories.length) {
   for (const a of r.advisories) console.log(`\n  · ${a.split("\n")[0]}`);
 }
 
-if (unreachable.length) process.exit(3);
+// Exit 3 covers both, because both mean the same thing to anything reading this result: part of the
+// gate produced no evidence. A silent control is if anything the worse of the two, since an
+// unreachable one at least announces itself the moment it fails to start.
+if (unreachable.length || silent.length) process.exit(3);
 process.exit(r.failures.length ? 1 : 0);

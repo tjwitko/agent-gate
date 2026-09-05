@@ -1499,6 +1499,27 @@ export async function validateProject(projectDir, toolRegistry, taskText = "") {
               advisory.map((f) => `${f.file}: ${f.message}`).join("; ")
           );
         }
+        // An allowance is never silence. Writing `# identity-guard:allow <rule> <reason>` costs a
+        // model nothing and needs no understanding -- it is strictly easier to produce than any of
+        // the fixes this gate asks for -- so every one is named in the report with its reason, and
+        // a deliverable carrying five reads differently from one carrying none. The reader decides
+        // whether the reason holds; the gate only guarantees they see it.
+        const allowed = parsed.allowances || [];
+        if (allowed.length) {
+          advisories.push(
+            `workload identity: ${allowed.length} finding(s) were opted out of in the manifests, ` +
+              `not fixed — ` +
+              allowed.map((a) => `${a.file}: ${a.ruleId} ("${a.reason}")`).join("; ") +
+              `. Each is a claim someone made. Check that the reason is true of this project before ` +
+              `treating the rule as satisfied.`
+          );
+        }
+        for (const r of parsed.refusedAllowances || []) {
+          advisories.push(
+            `workload identity: an opt-out in ${r.file} names ${r.ruleId} and gives no reason, so it ` +
+              `had no effect. An allowance has to say what it is for, or it does not exist.`
+          );
+        }
       }
     } catch {
       advisories.push(

@@ -1467,6 +1467,47 @@ export async function validateProject(projectDir, toolRegistry, taskText = "") {
   // Belt and braces behind the write_file interception. That check covers everything the model
   // writes; this covers everything else in the tree — files the project directory was seeded with
   // before the run, and anything a tool wrote as a side effect.
+  // Workload identity. Registered in .mcp.json since the beginning and never invoked by the gate,
+  // so check_auth_posture ran in no grade at all -- the `authentication` line in every run is the
+  // in-process route check, which is a different thing. Registration is not enforcement, which is
+  // the observation this whole project started from.
+  //
+  // Its own blocking/advisory split is respected rather than re-derived: a heuristic finding it
+  // marks advisory stays advisory here.
+  const authPosture = toolRegistry.get("check_auth_posture");
+  if (authPosture) {
+    const result = await authPosture.server.call("check_auth_posture", { directory: "." });
+    ran.push("check_auth_posture");
+    try {
+      const parsed = JSON.parse(result);
+      const scanned = parsed.root ? path.resolve(parsed.root) : null;
+      const root = path.resolve(projectDir);
+      if (scanned && scanned !== root && !scanned.startsWith(root + path.sep)) {
+        failures.push(
+          `check_auth_posture scanned ${scanned}, which is not this project (${root}). The ` +
+            `workload-identity check did NOT run against this project — treat it as unperformed.`
+        );
+      } else {
+        const blocking = (parsed.findings || []).filter((f) => !f.heuristic && f.severity !== "low");
+        const advisory = (parsed.findings || []).filter((f) => f.heuristic || f.severity === "low");
+        for (const f of blocking) {
+          failures.push(`workload identity: ${f.file}: ${f.message}${f.remediation ? ` — ${f.remediation}` : ""}`);
+        }
+        if (advisory.length) {
+          advisories.push(
+            `workload identity: ${advisory.length} heuristic finding(s) — ` +
+              advisory.map((f) => `${f.file}: ${f.message}`).join("; ")
+          );
+        }
+      }
+    } catch {
+      advisories.push(
+        `workload identity: check_auth_posture returned output that could not be parsed, so nothing ` +
+          `was established about how these workloads authenticate.`
+      );
+    }
+  }
+
   const secretScan = toolRegistry.get("scan_path");
   if (secretScan) {
     const result = await secretScan.server.call("scan_path", { target: "." });

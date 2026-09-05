@@ -41,6 +41,13 @@ const CONTROLS = [
   // project. Confirmed against secret-guard-mcp/index.mjs:29 and dep-audit-mcp/index.mjs:24.
   { name: "dep-audit", entry: process.env.DEPAUDIT_SERVER || path.join(siblings, "dep-audit-mcp", "index.mjs"), provides: ["check_dependencies"], env: { SCAN_ROOT: projectDir } },
   { name: "secret-guard", entry: process.env.SECRETGUARD_SERVER || path.join(siblings, "secret-guard-mcp", "index.mjs"), provides: ["scan_path"], env: { SCAN_ROOT: projectDir } },
+  // Missing from this list since it was written, while the comment at the top of the file named it
+  // as one of the four. check_auth_posture therefore ran in no grade at all: the `authentication`
+  // line in every run's output is the in-process route check in agent/authentication.mjs, which is
+  // a different thing from identity-guard's workload-identity scan. The pre-commit hook does run
+  // it -- that is where "workload identity — N file(s) checked" comes from -- so it has been
+  // guarding these repos and never a deliverable.
+  { name: "identity-guard", entry: process.env.IDENTITYGUARD_SERVER || path.join(siblings, "identity-guard-mcp", "index.mjs"), provides: ["check_auth_posture"], env: { SCAN_ROOT: projectDir } },
 ];
 
 const registry = new Map();

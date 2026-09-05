@@ -14,11 +14,18 @@ passing and do not count it toward "all checks green".
 **Tests are evidence only when they run and reach the code.** A suite that is never executed, that
 imports nothing from this project, or that asserts something true by construction is not evidence
 that anything works — however many assertions it contains and whether or not it passes. Install the
-dependencies and run it before you call it passing.
+dependencies and run it.
 
 **A written justification only covers what it names.** If you argue that findings do not apply, say
 which findings. An argument about one package does not carry to another, and the gate reports which
 findings are in packages this project depends on directly.
 
-**Fix what blocks, or say what you left.** If you stop with blocking findings outstanding, list them
-and why. A summary that reads as complete while the gate is red is the failure this exists to catch.
+**End your summary with what the gate did not establish.** Before anything else you say about the
+result, list every check that reported "did NOT run", "NOT EXECUTED", or "not checked", and every
+blocking finding you are leaving. Exit 0 means nothing is blocking — not that everything was
+checked, and not that what was checked was verified end to end.
+
+Do not describe the work as complete, production-ready, or fully validated unless the gate ran every
+check and all of them passed. If some checks could not run, the accurate sentence names them: "the
+gate reports no blocking findings; the test suite could not be executed here, so nothing establishes
+that it passes." A reader who is not looking at the gate output has only your summary to go on.

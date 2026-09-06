@@ -1,0 +1,56 @@
+# This repository running its own gate, plus the regression corpus.
+#
+# The gate is the product; the corpus is what stops the gate rotting. Every control defect in this
+# project's history was found by running real work through the controls, not by unit tests, so the
+# corpus runs here alongside them.
+name: gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  unit:
+    name: unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci --ignore-scripts
+      - run: npm test
+
+  corpus:
+    name: regression corpus
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci --ignore-scripts
+      # The fixtures are sibling checkouts of this repository, so this job only runs where they are
+      # present. It reports that it skipped rather than passing silently: a corpus that quietly does
+      # not run is worth less than no corpus, because it reports green while checking nothing.
+      - name: corpus
+        run: |
+          if [ ! -d "../webhook-claude" ]; then
+            echo "::warning title=corpus::fixtures not present in this checkout — the corpus did NOT run"
+            exit 0
+          fi
+          npm run corpus
+
+  self-gate:
+    name: gate this repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci --ignore-scripts
+      - uses: ./
+        with:
+          project: "."

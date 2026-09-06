@@ -1,0 +1,117 @@
+name: "agent-gate"
+description: "Run the security control set against a project and fail the build on blocking findings or on a control that could not run."
+author: "local-delegate-mcp"
+
+inputs:
+  project:
+    description: "Directory to validate."
+    required: false
+    default: "."
+  task-file:
+    description: >-
+      The task description. Six checks are gated on what the task asked for — immutability,
+      retention, secret rotation, tests, error distinction and required artifacts. Without this they
+      report "not checked", which is accurate and much less useful.
+    required: false
+    default: ""
+  terraform-guard:
+    description: "Path to terraform-guard-mcp/index.mjs. Overrides .agent-gate.json and node_modules."
+    required: false
+    default: ""
+  dep-audit:
+    description: "Path to dep-audit-mcp/index.mjs."
+    required: false
+    default: ""
+  secret-guard:
+    description: "Path to secret-guard-mcp/index.mjs."
+    required: false
+    default: ""
+  identity-guard:
+    description: "Path to identity-guard-mcp/index.mjs."
+    required: false
+    default: ""
+
+outputs:
+  outcome:
+    description: "clean | blocked | incomplete"
+    value: ${{ steps.gate.outputs.outcome }}
+  blocking:
+    description: "Number of blocking findings."
+    value: ${{ steps.gate.outputs.blocking }}
+  result:
+    description: "Path to the machine-readable result JSON."
+    value: ${{ steps.gate.outputs.result }}
+
+runs:
+  using: "composite"
+  steps:
+    - id: gate
+      shell: bash
+      env:
+        TFGUARD_SERVER: ${{ inputs.terraform-guard }}
+        DEPAUDIT_SERVER: ${{ inputs.dep-audit }}
+        SECRETGUARD_SERVER: ${{ inputs.secret-guard }}
+        IDENTITYGUARD_SERVER: ${{ inputs.identity-guard }}
+      run: |
+        set -uo pipefail
+        # Empty inputs must not become empty env vars: resolve-controls treats a set variable as an
+        # explicit instruction and errors when it points nowhere, which would turn "not configured"
+        # into "misconfigured" for every consumer who does not override a control.
+        for v in TFGUARD_SERVER DEPAUDIT_SERVER SECRETGUARD_SERVER IDENTITYGUARD_SERVER; do
+          [ -z "${!v}" ] && unset "$v"
+        done
+
+        RESULT="${RUNNER_TEMP:-/tmp}/agent-gate.json"
+        ARGS=("${{ inputs.project }}")
+        [ -n "${{ inputs.task-file }}" ] && ARGS+=("${{ inputs.task-file }}")
+
+        # Once, not twice. terraform plan and checkov dominate the runtime here, and running the
+        # gate a second time to get human output would double them on every CI job. The log view is
+        # rendered from the same JSON that carries the verdict.
+        node "${GITHUB_ACTION_PATH}/bin/validate.mjs" "${ARGS[@]}" --json > "$RESULT"
+        CODE=$?
+
+        node -e '
+          const r = require(process.argv[1]);
+          for (const c of r.controls) console.log(`control  : ${c.name.padEnd(16)} ${c.status.padEnd(14)} ${c.resolvedFrom || c.error}`);
+          console.log(`validators: ${r.validatorsRun.join(", ")}`);
+          console.log(`\nBLOCKING : ${r.blocking}${r.incomplete ? " FROM THE CHECKS THAT RAN" : ""}\n`);
+          for (const f of r.findings) console.log(`  - ${f.message}\n`);
+          for (const a of r.advisories) console.log(`  . ${a.message}\n`);
+        ' "$RESULT" || echo "(could not render the result; the JSON is at $RESULT)"
+
+        echo "result=$RESULT" >> "$GITHUB_OUTPUT"
+        BLOCKING=$(node -e "process.stdout.write(String(require(process.argv[1]).blocking))" "$RESULT" 2>/dev/null || echo "?")
+        echo "blocking=$BLOCKING" >> "$GITHUB_OUTPUT"
+
+        # Exit 3 is a DISTINCT outcome from exit 1 and must stay that way. Both fail the build; what
+        # must never happen is reporting them identically. "Could not run" is not "found nothing",
+        # and a consumer who cannot tell them apart has bought the silent pass this whole control
+        # set exists to remove.
+        case "$CODE" in
+          0)
+            echo "outcome=clean" >> "$GITHUB_OUTPUT"
+            echo "::notice title=agent-gate::No blocking findings."
+            exit 0
+            ;;
+          1)
+            echo "outcome=blocked" >> "$GITHUB_OUTPUT"
+            echo "::error title=agent-gate: blocked::$BLOCKING blocking finding(s). The gate ran in full; these are real."
+            exit 1
+            ;;
+          3)
+            echo "outcome=incomplete" >> "$GITHUB_OUTPUT"
+            echo "::error title=agent-gate: INCOMPLETE::Part of the gate could not run. This is not a pass and not a clean failure — the project was not fully checked. See the control list in the log."
+            exit 1
+            ;;
+          2)
+            echo "outcome=incomplete" >> "$GITHUB_OUTPUT"
+            echo "::error title=agent-gate: usage error::The action invoked the gate incorrectly."
+            exit 1
+            ;;
+          *)
+            echo "outcome=incomplete" >> "$GITHUB_OUTPUT"
+            echo "::error title=agent-gate::Unexpected exit $CODE — treating as incomplete rather than as a pass."
+            exit 1
+            ;;
+        esac

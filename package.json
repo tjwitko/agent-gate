@@ -4,6 +4,9 @@
   "description": "MCP server that lets an LLM delegate self-contained, low-skill subtasks to a locally-hosted model",
   "type": "module",
   "main": "index.mjs",
+  "bin": {
+    "agent-gate": "./bin/validate.mjs"
+  },
   "scripts": {
     "test": "node --test agent/*.test.mjs"
   },

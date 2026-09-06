@@ -20,6 +20,19 @@ dependencies and run it.
 which findings. An argument about one package does not carry to another, and the gate reports which
 findings are in packages this project depends on directly.
 
+**If a finding genuinely does not apply, say so where the gate will record it.** Some rules cannot
+fit every project: a rule requiring a workload to prove an identity rather than hold a shared secret
+has no remedy to offer for an HMAC secret shared with a third party, because there is nothing to
+replace it with. In a Kubernetes manifest, write the opt-out as a comment naming the rule from the
+finding and why it does not apply here:
+
+    # identity-guard:allow identity.secret-as-auth  inbound HMAC from the provider, no identity to prove
+
+Every allowance is reported in the gate output with its reason, so this records the decision rather
+than removing the finding. Prose in a document the gate does not read is not an opt-out. Use it only
+where the rule cannot apply, never where the fix is merely inconvenient — a reason that is not true
+of this project is worse than the finding it hides.
+
 **End your summary with what the gate did not establish.** Before anything else you say about the
 result, list every check that reported "did NOT run", "NOT EXECUTED", or "not checked", and every
 blocking finding you are leaving. Exit 0 means nothing is blocking — not that everything was

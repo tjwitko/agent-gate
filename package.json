@@ -8,7 +8,8 @@
     "agent-gate": "./bin/validate.mjs"
   },
   "scripts": {
-    "test": "node --test agent/*.test.mjs"
+    "test": "node --test agent/*.test.mjs",
+    "corpus": "node corpus/run.mjs"
   },
   "license": "ISC",
   "dependencies": {

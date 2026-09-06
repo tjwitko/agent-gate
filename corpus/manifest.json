@@ -1,0 +1,99 @@
+{
+  "measured": "2026-09-06",
+  "note": "Ten graded deliverables frozen as fixtures. webhook-haiku-5 and webhook-haiku-9 are excluded: both hold uncommitted work and look mid-run, so their verdicts are not stable ground truth.",
+  "entries": [
+    {
+      "name": "webhook-claude",
+      "path": "../webhook-claude",
+      "taskFile": "agent/fixtures/webhook-receiver-task.txt",
+      "expectedBlocking": 0,
+      "expectedFindings": {}
+    },
+    {
+      "name": "webhook-sonnet-2",
+      "path": "../webhook-sonnet-2",
+      "taskFile": "agent/fixtures/webhook-receiver-task.txt",
+      "expectedBlocking": 0,
+      "expectedFindings": {}
+    },
+    {
+      "name": "webhook-sonnet-3",
+      "path": "../webhook-sonnet-3",
+      "taskFile": "agent/fixtures/webhook-receiver-task.txt",
+      "expectedBlocking": 0,
+      "expectedFindings": {}
+    },
+    {
+      "name": "webhook-haiku",
+      "path": "../webhook-haiku",
+      "taskFile": "agent/fixtures/webhook-receiver-task.txt",
+      "expectedBlocking": 4,
+      "expectedFindings": {
+        "immutability": 1,
+        "tests": 1,
+        "workload identity": 2
+      }
+    },
+    {
+      "name": "webhook-haiku-2",
+      "path": "../webhook-haiku-2",
+      "taskFile": "agent/fixtures/webhook-receiver-task.txt",
+      "expectedBlocking": 7,
+      "expectedFindings": {
+        "check_dependencies": 1,
+        "retention": 2,
+        "terraform_plan": 1,
+        "workload identity": 3
+      }
+    },
+    {
+      "name": "webhook-haiku-3",
+      "path": "../webhook-haiku-3",
+      "taskFile": "agent/fixtures/webhook-receiver-task.txt",
+      "expectedBlocking": 7,
+      "expectedFindings": {
+        "code quality": 1,
+        "retention": 1,
+        "workload identity": 5
+      }
+    },
+    {
+      "name": "webhook-haiku-4",
+      "path": "../webhook-haiku-4",
+      "taskFile": "agent/fixtures/webhook-receiver-task.txt",
+      "expectedBlocking": 4,
+      "expectedFindings": {
+        "tests": 1,
+        "workload identity": 3
+      }
+    },
+    {
+      "name": "webhook-haiku-6",
+      "path": "../webhook-haiku-6",
+      "taskFile": "agent/fixtures/webhook-receiver-task.txt",
+      "expectedBlocking": 6,
+      "expectedFindings": {
+        "check_dependencies": 1,
+        "workload identity": 5
+      }
+    },
+    {
+      "name": "webhook-haiku-7",
+      "path": "../webhook-haiku-7",
+      "taskFile": "agent/fixtures/webhook-receiver-task.txt",
+      "expectedBlocking": 1,
+      "expectedFindings": {
+        "workload identity": 1
+      }
+    },
+    {
+      "name": "webhook-haiku-8",
+      "path": "../webhook-haiku-8",
+      "taskFile": "agent/fixtures/webhook-receiver-task.txt",
+      "expectedBlocking": 2,
+      "expectedFindings": {
+        "workload identity": 2
+      }
+    }
+  ]
+}

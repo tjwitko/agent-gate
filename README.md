@@ -267,3 +267,53 @@ path-traversal / sensitive-filename refusals). Registered as a
 project-scoped Claude Code MCP server via `/Users/tomwitkowski/LLM/.mcp.json`
 — not yet exercised through a live Claude Code chat turn, only through a
 direct JSON-RPC test harness.
+
+## agent-gate — running the controls against a project
+
+The validators live in this repository; the guard servers live in four others. `agent-gate` runs
+all of them against a project directory and reports one verdict.
+
+```
+agent-gate <project-dir> [task-file] [--json]
+```
+
+| exit | meaning |
+|---|---|
+| 0 | nothing blocking |
+| 1 | blocking findings |
+| 2 | usage error |
+| 3 | part of the gate could not run |
+
+**Exit 3 is the one that matters.** "Could not run" is not "passed", and anything consuming this
+result has to tell them apart. Two failures in this project's history were exactly that confusion:
+a runner that handed the validators an empty tool registry and printed `BLOCKING: none`, and a
+control that connected and was never asked anything through ten graded runs while a
+similarly-named check ran beside it. Never collapse 3 into 1, and never treat it as 0.
+
+### Where the controls come from
+
+Resolution runs in this order, and the run reports which rule won for each control:
+
+1. an environment variable — `TFGUARD_SERVER`, `DEPAUDIT_SERVER`, `SECRETGUARD_SERVER`, `IDENTITYGUARD_SERVER`
+2. `.agent-gate.json` in the project under test
+3. `node_modules`, so the controls can be ordinary npm dependencies
+4. a sibling checkout — how this repository has always worked, kept for local development
+
+```json
+{
+  "controls": {
+    "terraform-guard": "./vendor/terraform-guard-mcp/index.mjs",
+    "dep-audit": "../dep-audit-mcp/index.mjs"
+  }
+}
+```
+
+An environment variable or config entry pointing at a file that does not exist is an **error**, not
+a reason to fall through to the next rule: someone said where the control was and was wrong, and
+quietly using a different one would hide that. A control that resolves from nowhere exits 3.
+
+### The task file
+
+Six checks are gated on what the task asked for — immutability, retention, secret rotation, tests,
+error distinction and required artifacts. Without a task file they report "not checked", which is
+accurate and much less useful. Pass one.

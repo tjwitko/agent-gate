@@ -480,3 +480,42 @@ test("no ConditionExpression at all is still reported", () => {
     }
   );
 });
+
+// --- the requirement, without crossing a clause ---------------------------
+// The proximity span used [^.]{0,60}, which stops at a full stop and runs straight through a
+// semicolon and a newline. "Users cannot register themselves; an admin adds them and can later
+// remove an account" was read as a requirement that records be immutable -- and the consequence is
+// blocking: once the gate believes immutability was required, a project with no identifiable
+// append-only store fails outright. An ordinary sentence in a task description could stop correct
+// work from completing.
+//
+// secret-rotation and the shared task-phrases matcher already spell this [^.;\n], each after the
+// same bug was found there. This was the oldest requirement-reader and the last to get it.
+const REQUIRES = [
+  "Once a callback has been recorded, its contents must stay exactly as received.",
+  "Nothing in the running system should be able to change or remove a record.",
+  "A stored callback must not be modified after it is written.",
+  "The audit log is immutable.",
+  "Records are append-only.",
+  "Write-once storage for the receipts.",
+];
+for (const task of REQUIRES) {
+  test(`an immutability requirement is recognised: ${task.slice(0, 44)}`, () => {
+    assert.equal(taskRequiresImmutability(task), true, task);
+  });
+}
+
+const DOES_NOT_REQUIRE = [
+  "Support lookups by event id.",
+  "Users can update their profile.",
+  // Each of these crossed a clause boundary before the span was constrained.
+  "Users cannot register themselves; an admin adds them and can later remove an account.",
+  "The service must not restart during a deploy; rolling updates change one pod at a time.",
+  "A request may not exceed 1MB; larger payloads are truncated before we modify the record store.",
+  "The queue must not back up\nworkers delete messages after processing.",
+];
+for (const task of DOES_NOT_REQUIRE) {
+  test(`no immutability requirement is invented from: ${task.slice(0, 44)}`, () => {
+    assert.equal(taskRequiresImmutability(task), false, task);
+  });
+}

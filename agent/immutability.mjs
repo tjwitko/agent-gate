@@ -49,7 +49,15 @@ const IMMUTABILITY_PHRASES = [
   /\bWORM\b/,
   /\btamper[- ]?(proof|evident|resistant)\b/i,
   /stay\s+(exactly\s+)?as\s+received/i,
-  /\b(cannot|must not|may not|should not|nothing)\b[^.]{0,60}\b(chang|modif|alter|delet|remov|overwrit|edit)/i,
+  // [^.;\n], not [^.]. A semicolon and a newline end a thought as surely as a full stop, and this
+  // span ran straight through both: "Users cannot register themselves; an admin adds them and can
+  // later remove an account" was read as a requirement that records be immutable. The consequence
+  // is blocking -- once the gate believes immutability was required, a project with no identifiable
+  // append-only store fails outright -- so an ordinary sentence could stop correct work.
+  //
+  // secret-rotation and the shared task-phrases matcher already spell it this way, each after the
+  // same bug was found there. This is the oldest of the requirement-readers and the last to get it.
+  /\b(cannot|must not|may not|should not|nothing)\b[^.;\n]{0,60}\b(chang|modif|alter|delet|remov|overwrit|edit)/i,
 ];
 
 export function taskRequiresImmutability(taskText = "") {

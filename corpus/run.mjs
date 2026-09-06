@@ -56,21 +56,24 @@ function diffCounts(expected, actual) {
   return drift;
 }
 
+// The fixtures are sibling checkouts by default and can be pointed elsewhere, so a vendored or
+// fetched copy satisfies the corpus without editing the manifest.
+const FIXTURE_ROOT = process.env.CORPUS_FIXTURES ? path.resolve(process.env.CORPUS_FIXTURES) : REPO;
+
 const manifest = JSON.parse(readFileSync(path.join(__dirname, "manifest.json"), "utf8"));
 console.log(`corpus: ${manifest.entries.length} deliverables, verdicts measured ${manifest.measured}\n`);
 
 let failed = 0;
-let skipped = 0;
+let missing = 0;
 for (const entry of manifest.entries) {
   // Relative to the repository root, not to corpus/ — the fixtures are siblings of the repo.
-  const dir = path.resolve(REPO, entry.path);
+  const dir = path.resolve(FIXTURE_ROOT, entry.path);
   const taskFile = path.resolve(REPO, entry.taskFile);
   if (!existsSync(dir)) {
     // Reported, never silently passed. A corpus that shrinks because fixtures went missing would
     // report green while checking less and less.
     console.log(`  MISSING  ${entry.name} — no such directory: ${dir}`);
-    skipped++;
-    failed++;
+    missing++;
     continue;
   }
 
@@ -94,8 +97,20 @@ for (const entry of manifest.entries) {
 }
 
 console.log("");
+
+// Exit 3, not 1, and not 0. A corpus that cannot find its fixtures did not run, and that is a
+// different fact from a corpus that ran and found drift -- the same distinction the gate itself
+// draws between "blocking findings" and "part of the gate could not run". Reporting it as a pass
+// is the failure this whole project exists to remove, and it was sitting in this repo's own
+// workflow: a guard that exited 0 with a warning when the fixtures were absent.
+if (missing) {
+  console.log(`${missing} of ${manifest.entries.length} fixture(s) are not present — THE CORPUS DID NOT RUN.`);
+  console.log(`Set CORPUS_FIXTURES to the directory holding them, or check them out beside this repo.`);
+  console.log(`This is not a pass: nothing was verified about the ${missing} that are missing.`);
+  process.exit(3);
+}
 if (failed) {
-  console.log(`${failed} deliverable(s) drifted${skipped ? ` (${skipped} missing)` : ""}.`);
+  console.log(`${failed} deliverable(s) drifted.`);
   console.log("A control that stops firing is as much a regression as one that starts over-firing.");
   console.log("If the change was deliberate, re-derive corpus/manifest.json and say so in the commit.");
   process.exit(1);

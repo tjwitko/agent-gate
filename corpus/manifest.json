@@ -95,5 +95,9 @@
         "workload identity": 2
       }
     }
-  ]
+  ],
+  "fixtures": {
+    "root": "sibling checkouts of this repository by default; override with CORPUS_FIXTURES",
+    "vendoring": "Source-only plus a fresh `git init && git add -A && git commit` reproduces every verdict exactly: measured on webhook-haiku-7, which returns 1 blocking with {workload identity: 1} either way. The .terraform provider cache is NOT needed -- terraform_plan behaves identically without it. .git IS needed, because the uncommitted_work validator reads it, and a fresh init is enough. Ten deliverables are 24 MB of source against 10.4 GB as they sit on disk, where the bulk is provider binaries and history."
+  }
 }

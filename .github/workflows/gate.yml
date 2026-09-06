@@ -31,16 +31,24 @@ jobs:
         with:
           node-version: "22"
       - run: npm ci --ignore-scripts
-      # The fixtures are sibling checkouts of this repository, so this job only runs where they are
-      # present. It reports that it skipped rather than passing silently: a corpus that quietly does
-      # not run is worth less than no corpus, because it reports green while checking nothing.
+      # The fixtures are sibling checkouts by default; set CORPUS_FIXTURES to point at a vendored or
+      # fetched copy. This job does NOT pass when they are absent. The first version of it did --
+      # `exit 0` with a warning -- which is a job reporting green while verifying nothing, in the
+      # workflow of a project whose entire subject is gates that do that. The corpus exits 3 when it
+      # cannot find its fixtures, distinct from exit 1 for drift, and both are surfaced distinctly
+      # here for the same reason the gate distinguishes them.
       - name: corpus
         run: |
-          if [ ! -d "../webhook-claude" ]; then
-            echo "::warning title=corpus::fixtures not present in this checkout — the corpus did NOT run"
-            exit 0
-          fi
+          set +e
           npm run corpus
+          CODE=$?
+          set -e
+          case "$CODE" in
+            0) echo "::notice title=corpus::all fixtures match" ;;
+            3) echo "::error title=corpus: DID NOT RUN::The fixtures are not present, so nothing was verified. Set CORPUS_FIXTURES or check them out beside this repository." ;;
+            *) echo "::error title=corpus: drift::A control changed behaviour against a frozen deliverable." ;;
+          esac
+          exit $CODE
 
   self-gate:
     name: gate this repository

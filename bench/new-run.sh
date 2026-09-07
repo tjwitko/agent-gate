@@ -25,20 +25,26 @@ CONTROLS="$LLM_ROOT/local-delegate-mcp"
 TASK="$CONTROLS/agent/fixtures/webhook-receiver-task.txt"
 
 if [ $# -lt 1 ]; then
-  echo "usage: $(basename "$0") <run-name> [model] [--agents-md]" >&2
+  echo "usage: $(basename "$0") <run-name> [model] [--agents-md|--inline-stanza]" >&2
   echo "example: $(basename "$0") haiku-2 haiku" >&2
-  echo "  --agents-md  write AGENTS.md from templates/, and print the CONTROL prompt (which says" >&2
-  echo "               nothing about validating) so the file is what has to carry it" >&2
+  echo "  --agents-md      write AGENTS.md from templates/, and print the CONTROL prompt (which says" >&2
+  echo "                   nothing about validating) so the file is what has to carry it" >&2
+  echo "  --inline-stanza  put the stanza text in the prompt itself. Use this to test what a CLAUSE" >&2
+  echo "                   does, not whether the file gets read: AGENTS.md was read in two runs of" >&2
+  echo "                   four, and a clause test through a channel that delivers half the time" >&2
+  echo "                   spends a whole run on a coin flip." >&2
   exit 2
 fi
 
 NAME="$1"
 MODEL=""
 AGENTS_MD=0
+INLINE_STANZA=0
 shift
 for a in "$@"; do
   case "$a" in
     --agents-md) AGENTS_MD=1 ;;
+    --inline-stanza) INLINE_STANZA=1 ;;
     *) MODEL="$a" ;;
   esac
 done
@@ -137,8 +143,28 @@ MD
 # The signpost half of the distribution plan: a repository carries the stanza so an agent meets the
 # gate without a per-run prompt. Written from the template with the validate command filled in, and
 # committed with the rest of the scaffold so uncommitted_work does not flag it as the model's.
+if [ "$INLINE_STANZA" = "1" ]; then
+  # The stanza in the prompt, so the clause under test is guaranteed to reach the model. This
+  # deliberately abandons AGENTS.md as the delivery mechanism for clause testing -- that question is
+  # already answered, and it is not the same question as whether a clause works once read.
+  sed 's/^/       /' <<PROMPT
+Build the project described in $TASK.
+Build it in the current directory, $DIR, which is empty apart from
+configuration. Do not read, copy from, or write to any other project directory.
+
+$(sed "s#{{VALIDATE_COMMAND}}#node $CONTROLS/bin/validate.mjs . $TASK#" "$CONTROLS/templates/AGENTS.md.tmpl")
+PROMPT
+  echo
+  echo "  (the stanza is inlined in the prompt; no AGENTS.md is written)"
+  echo
+  echo "  3. when it says it is done:"
+  echo
+  echo "       $CONTROLS/bench/grade-run.sh $NAME"
+  echo
+  exit 0
+fi
 if [ "$AGENTS_MD" = "1" ]; then
-  VALIDATE_COMMAND="node $CONTROLS/agent/validate-project.mjs . $TASK"
+  VALIDATE_COMMAND="node $CONTROLS/bin/validate.mjs . $TASK"
   sed "s#{{VALIDATE_COMMAND}}#$VALIDATE_COMMAND#" "$CONTROLS/templates/AGENTS.md.tmpl" > "$DIR/AGENTS.md"
 fi
 
@@ -190,7 +216,7 @@ While writing Terraform, use the terraform_validate MCP tool to check it. It nee
 and no plan, so it is cheap to call often — but it reports nothing about security.
 
 For the full check, including the security rules, validate with:
-  node $CONTROLS/agent/validate-project.mjs . $TASK
+  node $CONTROLS/bin/validate.mjs . $TASK
 If a tool refuses or cannot run, say so plainly — never report it as a pass.
 PROMPT
 echo

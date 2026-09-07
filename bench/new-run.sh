@@ -143,26 +143,6 @@ MD
 # The signpost half of the distribution plan: a repository carries the stanza so an agent meets the
 # gate without a per-run prompt. Written from the template with the validate command filled in, and
 # committed with the rest of the scaffold so uncommitted_work does not flag it as the model's.
-if [ "$INLINE_STANZA" = "1" ]; then
-  # The stanza in the prompt, so the clause under test is guaranteed to reach the model. This
-  # deliberately abandons AGENTS.md as the delivery mechanism for clause testing -- that question is
-  # already answered, and it is not the same question as whether a clause works once read.
-  sed 's/^/       /' <<PROMPT
-Build the project described in $TASK.
-Build it in the current directory, $DIR, which is empty apart from
-configuration. Do not read, copy from, or write to any other project directory.
-
-$(sed "s#{{VALIDATE_COMMAND}}#node $CONTROLS/bin/validate.mjs . $TASK#" "$CONTROLS/templates/AGENTS.md.tmpl")
-PROMPT
-  echo
-  echo "  (the stanza is inlined in the prompt; no AGENTS.md is written)"
-  echo
-  echo "  3. when it says it is done:"
-  echo
-  echo "       $CONTROLS/bench/grade-run.sh $NAME"
-  echo
-  exit 0
-fi
 if [ "$AGENTS_MD" = "1" ]; then
   VALIDATE_COMMAND="node $CONTROLS/bin/validate.mjs . $TASK"
   sed "s#{{VALIDATE_COMMAND}}#$VALIDATE_COMMAND#" "$CONTROLS/templates/AGENTS.md.tmpl" > "$DIR/AGENTS.md"
@@ -188,6 +168,26 @@ echo "       cd $DIR && claude${MODEL:+ --model $MODEL}"
 echo
 echo "  2. paste this as the first message:"
 echo
+if [ "$INLINE_STANZA" = "1" ]; then
+  # The stanza in the prompt, so the clause under test is guaranteed to reach the model. This
+  # deliberately abandons AGENTS.md as the delivery mechanism for clause testing -- that question is
+  # already answered, and it is not the same question as whether a clause works once read.
+  sed 's/^/       /' <<PROMPT
+Build the project described in $TASK.
+Build it in the current directory, $DIR, which is empty apart from
+configuration. Do not read, copy from, or write to any other project directory.
+
+$(sed "s#{{VALIDATE_COMMAND}}#node $CONTROLS/bin/validate.mjs . $TASK#" "$CONTROLS/templates/AGENTS.md.tmpl")
+PROMPT
+  echo
+  echo "  (the stanza is inlined in the prompt; no AGENTS.md is written)"
+  echo
+  echo "  3. when it says it is done:"
+  echo
+  echo "       $CONTROLS/bench/grade-run.sh $NAME"
+  echo
+  exit 0
+fi
 if [ "$AGENTS_MD" = "1" ]; then
   # Deliberately says nothing about validating. AGENTS.md is what has to carry it, and a prompt that
   # also said so would tell us nothing about whether the file works.

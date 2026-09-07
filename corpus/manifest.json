@@ -1,103 +1,155 @@
 {
-  "measured": "2026-09-06",
-  "note": "Ten graded deliverables frozen as fixtures. webhook-haiku-5 and webhook-haiku-9 are excluded: both hold uncommitted work and look mid-run, so their verdicts are not stable ground truth.",
+  "measured": "2026-09-07",
+  "note": "Ten graded deliverables vendored as fixtures. webhook-haiku-5 and webhook-haiku-9 are excluded: both hold uncommitted work and look mid-run, so their verdicts are not stable ground truth. Expected values are derived from the VENDORED copies, which is what the corpus runs against; where that differs from the as-delivered grade, the entry says so and why.",
   "entries": [
     {
       "name": "webhook-claude",
-      "path": "../webhook-claude",
+      "path": "corpus/fixtures/webhook-claude",
       "taskFile": "agent/fixtures/webhook-receiver-task.txt",
-      "expectedBlocking": 0,
-      "expectedFindings": {}
+      "expectedBlocking": 1,
+      "expectedFindings": {
+        "tests": 1
+      },
+      "upstreamHead": "766c5fd36d6d",
+      "digest": "d49efe1c8f10ced0",
+      "upstream": "../webhook-claude",
+      "asDelivered": 0,
+      "differsFromAsDelivered": "as delivered this scored 0; the vendored copy scores 1 because node_modules is not vendored, so the test suite cannot run and the tests check fires"
     },
     {
       "name": "webhook-sonnet-2",
-      "path": "../webhook-sonnet-2",
+      "path": "corpus/fixtures/webhook-sonnet-2",
       "taskFile": "agent/fixtures/webhook-receiver-task.txt",
       "expectedBlocking": 0,
-      "expectedFindings": {}
+      "expectedFindings": {},
+      "upstreamHead": "8c070cb9fa99",
+      "digest": "a2e1e190b82fb379",
+      "upstream": "../webhook-sonnet-2",
+      "asDelivered": 0
     },
     {
       "name": "webhook-sonnet-3",
-      "path": "../webhook-sonnet-3",
+      "path": "corpus/fixtures/webhook-sonnet-3",
       "taskFile": "agent/fixtures/webhook-receiver-task.txt",
-      "expectedBlocking": 0,
-      "expectedFindings": {}
+      "expectedBlocking": 1,
+      "expectedFindings": {
+        "tests": 1
+      },
+      "upstreamHead": "b19eb5fbf118",
+      "digest": "78425f95413d4eaf",
+      "upstream": "../webhook-sonnet-3",
+      "asDelivered": 0,
+      "differsFromAsDelivered": "as delivered this scored 0; the vendored copy scores 1 because node_modules is not vendored, so the test suite cannot run and the tests check fires"
     },
     {
       "name": "webhook-haiku",
-      "path": "../webhook-haiku",
+      "path": "corpus/fixtures/webhook-haiku",
       "taskFile": "agent/fixtures/webhook-receiver-task.txt",
       "expectedBlocking": 4,
       "expectedFindings": {
         "immutability": 1,
         "tests": 1,
         "workload identity": 2
-      }
+      },
+      "upstreamHead": "3e38a405925f",
+      "digest": "ad78dc25cf5e1e20",
+      "upstream": "../webhook-haiku",
+      "asDelivered": 4
     },
     {
       "name": "webhook-haiku-2",
-      "path": "../webhook-haiku-2",
+      "path": "corpus/fixtures/webhook-haiku-2",
       "taskFile": "agent/fixtures/webhook-receiver-task.txt",
-      "expectedBlocking": 7,
+      "expectedBlocking": 8,
       "expectedFindings": {
         "check_dependencies": 1,
         "retention": 2,
         "terraform_plan": 1,
+        "tests": 1,
         "workload identity": 3
-      }
+      },
+      "upstreamHead": "d0ac8f5d9724",
+      "digest": "bd64114ad4ac7f4f",
+      "upstream": "../webhook-haiku-2",
+      "asDelivered": 7,
+      "differsFromAsDelivered": "as delivered this scored 7; the vendored copy scores 8 because node_modules is not vendored, so the test suite cannot run and the tests check fires"
     },
     {
       "name": "webhook-haiku-3",
-      "path": "../webhook-haiku-3",
+      "path": "corpus/fixtures/webhook-haiku-3",
       "taskFile": "agent/fixtures/webhook-receiver-task.txt",
       "expectedBlocking": 7,
       "expectedFindings": {
         "code quality": 1,
         "retention": 1,
         "workload identity": 5
-      }
+      },
+      "upstreamHead": "bfd6840c1979",
+      "digest": "038d29c16c79ecc9",
+      "upstream": "../webhook-haiku-3",
+      "asDelivered": 7
     },
     {
       "name": "webhook-haiku-4",
-      "path": "../webhook-haiku-4",
+      "path": "corpus/fixtures/webhook-haiku-4",
       "taskFile": "agent/fixtures/webhook-receiver-task.txt",
       "expectedBlocking": 4,
       "expectedFindings": {
         "tests": 1,
         "workload identity": 3
-      }
+      },
+      "upstreamHead": "9a6a67f9748c",
+      "digest": "ea0f687ed341f2ee",
+      "upstream": "../webhook-haiku-4",
+      "asDelivered": 4
     },
     {
       "name": "webhook-haiku-6",
-      "path": "../webhook-haiku-6",
+      "path": "corpus/fixtures/webhook-haiku-6",
       "taskFile": "agent/fixtures/webhook-receiver-task.txt",
       "expectedBlocking": 6,
       "expectedFindings": {
         "check_dependencies": 1,
         "workload identity": 5
-      }
+      },
+      "upstreamHead": "68a078c60c66",
+      "digest": "bf6bcb5c2b0df68d",
+      "upstream": "../webhook-haiku-6",
+      "asDelivered": 6
     },
     {
       "name": "webhook-haiku-7",
-      "path": "../webhook-haiku-7",
+      "path": "corpus/fixtures/webhook-haiku-7",
       "taskFile": "agent/fixtures/webhook-receiver-task.txt",
       "expectedBlocking": 1,
       "expectedFindings": {
         "workload identity": 1
-      }
+      },
+      "upstreamHead": "4ab2796d1164",
+      "digest": "c2d58ea531787f57",
+      "upstream": "../webhook-haiku-7",
+      "asDelivered": 1
     },
     {
       "name": "webhook-haiku-8",
-      "path": "../webhook-haiku-8",
+      "path": "corpus/fixtures/webhook-haiku-8",
       "taskFile": "agent/fixtures/webhook-receiver-task.txt",
       "expectedBlocking": 2,
       "expectedFindings": {
         "workload identity": 2
-      }
+      },
+      "upstreamHead": "902418a005da",
+      "digest": "0ed98f9bae23fd42",
+      "upstream": "../webhook-haiku-8",
+      "asDelivered": 2
     }
   ],
   "fixtures": {
     "root": "sibling checkouts of this repository by default; override with CORPUS_FIXTURES",
     "vendoring": "Source-only plus a fresh `git init && git add -A && git commit` reproduces every verdict exactly: measured on webhook-haiku-7, which returns 1 blocking with {workload identity: 1} either way. The .terraform provider cache is NOT needed -- terraform_plan behaves identically without it. .git IS needed, because the uncommitted_work validator reads it, and a fresh init is enough. Ten deliverables are 24 MB of source against 10.4 GB as they sit on disk, where the bulk is provider binaries and history."
+  },
+  "archive": {
+    "file": "corpus/fixtures.tar.gz",
+    "digest": "eeb707bcadac5128"
   }
 }

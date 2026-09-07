@@ -9,7 +9,9 @@
   },
   "scripts": {
     "test": "node --test agent/*.test.mjs",
-    "corpus": "node corpus/run.mjs"
+    "corpus": "node corpus/run.mjs",
+    "corpus:vendor": "node corpus/vendor.mjs",
+    "corpus:check": "node corpus/vendor.mjs --check"
   },
   "license": "ISC",
   "dependencies": {

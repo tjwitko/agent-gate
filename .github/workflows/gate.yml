@@ -31,8 +31,8 @@ jobs:
         with:
           node-version: "22"
       - run: npm ci --ignore-scripts
-      # The fixtures are sibling checkouts by default; set CORPUS_FIXTURES to point at a vendored or
-      # fetched copy. This job does NOT pass when they are absent. The first version of it did --
+      # The fixtures ship in the repository as corpus/fixtures.tar.gz, so this job needs nothing
+      # beside the checkout. It does NOT pass when they are absent. The first version of it did --
       # `exit 0` with a warning -- which is a job reporting green while verifying nothing, in the
       # workflow of a project whose entire subject is gates that do that. The corpus exits 3 when it
       # cannot find its fixtures, distinct from exit 1 for drift, and both are surfaced distinctly

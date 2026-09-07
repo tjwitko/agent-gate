@@ -12,7 +12,8 @@
 // working code, and a check that sat unspawned through ten graded runs while a similarly-named one
 // ran beside it.
 import { execFileSync } from "child_process";
-import { readFileSync, existsSync } from "fs";
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
 import path from "path";
 import { fileURLToPath } from "url";
 
@@ -58,16 +59,42 @@ function diffCounts(expected, actual) {
 
 // The fixtures are sibling checkouts by default and can be pointed elsewhere, so a vendored or
 // fetched copy satisfies the corpus without editing the manifest.
-const FIXTURE_ROOT = process.env.CORPUS_FIXTURES ? path.resolve(process.env.CORPUS_FIXTURES) : REPO;
+// The fixtures ship as one archive, extracted to scratch space for the run. Vendoring them as files
+// put their deliberately vulnerable dependency manifests into this repository's own dependency scan
+// and added fifteen Terraform roots to every pre-commit run; an archive is opaque to both.
+// CORPUS_FIXTURES still points at a directory of unpacked fixtures, for anyone who wants that.
+const ARCHIVE = path.join(__dirname, "fixtures.tar.gz");
+let FIXTURE_ROOT = process.env.CORPUS_FIXTURES ? path.resolve(process.env.CORPUS_FIXTURES) : null;
+let extracted = null;
+if (!FIXTURE_ROOT) {
+  if (existsSync(ARCHIVE)) {
+    extracted = mkdtempSync(path.join(tmpdir(), "corpus-fixtures-"));
+    execFileSync("tar", ["-xzf", ARCHIVE, "-C", extracted]);
+    FIXTURE_ROOT = extracted;
+  } else {
+    FIXTURE_ROOT = REPO;
+  }
+}
+process.on("exit", () => { if (extracted) rmSync(extracted, { recursive: true, force: true }); });
 
-const manifest = JSON.parse(readFileSync(path.join(__dirname, "manifest.json"), "utf8"));
-console.log(`corpus: ${manifest.entries.length} deliverables, verdicts measured ${manifest.measured}\n`);
+// --update re-derives the expected values instead of diffing against them. It is the same code path
+// either way, deliberately: a separate script for re-deriving would prepare the fixtures slightly
+// differently from the one that checks them, and then the corpus would be measuring something the
+// runner never runs. That happened during this file's own development -- the re-derive script
+// skipped the scratch copy and the git init, and every fixture read as drifted.
+const UPDATE = process.argv.includes("--update");
+
+const manifestPath = path.join(__dirname, "manifest.json");
+const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+console.log(`corpus: ${manifest.entries.length} deliverables${UPDATE ? " — RE-DERIVING expected values" : `, verdicts measured ${manifest.measured}`}\n`);
 
 let failed = 0;
 let missing = 0;
 for (const entry of manifest.entries) {
   // Relative to the repository root, not to corpus/ — the fixtures are siblings of the repo.
-  const dir = path.resolve(FIXTURE_ROOT, entry.path);
+  // From the archive the fixtures sit at their bare names; from a directory they sit where the
+  // manifest says.
+  const dir = extracted ? path.join(FIXTURE_ROOT, entry.name) : path.resolve(FIXTURE_ROOT, entry.path);
   const taskFile = path.resolve(REPO, entry.taskFile);
   if (!existsSync(dir)) {
     // Reported, never silently passed. A corpus that shrinks because fixtures went missing would
@@ -77,9 +104,35 @@ for (const entry of manifest.entries) {
     continue;
   }
 
-  const r = runGate(dir, taskFile);
+  // The gate runs against a scratch copy, never the committed fixture. Two reasons, both learned
+  // here: `terraform init` and `go build` write .terraform/, .terraform.lock.hcl and go.sum into
+  // whatever tree they run in, which would leave version-controlled fixtures dirty after every
+  // corpus run; and the uncommitted_work validator reads git state, so the fixture needs a
+  // repository with everything committed -- which cannot live inside the fixture itself, because
+  // `git add` would commit it as an embedded repository and a fresh clone would find nothing.
+  const scratch = mkdtempSync(path.join(tmpdir(), "corpus-"));
+  const work = path.join(scratch, entry.name);
+  let r;
+  try {
+    cpSync(dir, work, { recursive: true });
+    execFileSync("git", ["-C", work, "init", "-q"]);
+    execFileSync("git", ["-C", work, "add", "-A"]);
+    execFileSync("git", ["-C", work, "-c", "user.name=corpus", "-c", "user.email=corpus@localhost",
+      "commit", "-q", "-m", "corpus fixture"]);
+    r = runGate(work, taskFile);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
   const counts = {};
   for (const f of r.findings) counts[findingId(f.message)] = (counts[findingId(f.message)] || 0) + 1;
+  if (UPDATE) {
+    const wasBlocking = entry.expectedBlocking;
+    entry.expectedBlocking = r.blocking;
+    entry.expectedFindings = Object.fromEntries(Object.entries(counts).sort());
+    console.log(`  recorded ${entry.name}  ${wasBlocking} -> ${r.blocking}`);
+    continue;
+  }
+
   const drift = diffCounts(entry.expectedFindings, counts);
 
   // A control that could not run makes the verdict meaningless, so it fails regardless of counts.
@@ -94,6 +147,13 @@ for (const entry of manifest.entries) {
   } else {
     console.log(`  ok       ${entry.name}  (${r.blocking} blocking)`);
   }
+}
+
+if (UPDATE) {
+  manifest.measured = new Date().toISOString().slice(0, 10);
+  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+  console.log(`\nre-derived ${manifest.entries.length} verdicts into corpus/manifest.json`);
+  process.exit(0);
 }
 
 console.log("");

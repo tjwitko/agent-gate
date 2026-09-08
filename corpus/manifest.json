@@ -142,6 +142,24 @@
       "digest": "0ed98f9bae23fd42",
       "upstream": "../webhook-haiku-8",
       "asDelivered": 2
+    },
+    {
+      "name": "webhook-haiku-12",
+      "path": "corpus/fixtures/webhook-haiku-12",
+      "taskFile": "agent/fixtures/webhook-receiver-task.txt",
+      "expectedBlocking": 6,
+      "expectedFindings": {
+        "iam": 2,
+        "immutability": 1,
+        "manifest contract": 1,
+        "terraform_plan": 1,
+        "tests": 1
+      },
+      "upstreamHead": "ad7dc2081089",
+      "digest": "029be271b76351b2",
+      "upstream": "../webhook-haiku-12",
+      "asDelivered": 5,
+      "differsFromAsDelivered": "as delivered this scored 5; the vendored copy scores 6 because node_modules is not vendored, so the test suite cannot run and the tests check fires"
     }
   ],
   "fixtures": {
@@ -150,6 +168,6 @@
   },
   "archive": {
     "file": "corpus/fixtures.tar.gz",
-    "digest": "eeb707bcadac5128"
+    "digest": "3a8d5c5ab59bb747"
   }
 }

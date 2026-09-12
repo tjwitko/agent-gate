@@ -1,5 +1,5 @@
 {
-  "measured": "2026-09-07",
+  "measured": "2026-09-12",
   "note": "Ten graded deliverables vendored as fixtures. webhook-haiku-5 and webhook-haiku-9 are excluded: both hold uncommitted work and look mid-run, so their verdicts are not stable ground truth. Expected values are derived from the VENDORED copies, which is what the corpus runs against; where that differs from the as-delivered grade, the entry says so and why.",
   "entries": [
     {
@@ -14,7 +14,8 @@
       "digest": "d49efe1c8f10ced0",
       "upstream": "../webhook-claude",
       "asDelivered": 0,
-      "differsFromAsDelivered": "as delivered this scored 0; the vendored copy scores 1 because node_modules is not vendored, so the test suite cannot run and the tests check fires"
+      "differsFromAsDelivered": "the vendored copy scores 1 where the original scores 0, because node_modules is not vendored: the suite cannot run, so the tests check fires",
+      "asDeliveredMeasured": "against the original deliverable, same gate"
     },
     {
       "name": "webhook-sonnet-2",
@@ -25,7 +26,8 @@
       "upstreamHead": "8c070cb9fa99",
       "digest": "a2e1e190b82fb379",
       "upstream": "../webhook-sonnet-2",
-      "asDelivered": 0
+      "asDelivered": 0,
+      "asDeliveredMeasured": "against the original deliverable, same gate"
     },
     {
       "name": "webhook-sonnet-3",
@@ -39,7 +41,8 @@
       "digest": "78425f95413d4eaf",
       "upstream": "../webhook-sonnet-3",
       "asDelivered": 0,
-      "differsFromAsDelivered": "as delivered this scored 0; the vendored copy scores 1 because node_modules is not vendored, so the test suite cannot run and the tests check fires"
+      "differsFromAsDelivered": "the vendored copy scores 1 where the original scores 0, because node_modules is not vendored: the suite cannot run, so the tests check fires",
+      "asDeliveredMeasured": "against the original deliverable, same gate"
     },
     {
       "name": "webhook-haiku",
@@ -54,7 +57,8 @@
       "upstreamHead": "3e38a405925f",
       "digest": "ad78dc25cf5e1e20",
       "upstream": "../webhook-haiku",
-      "asDelivered": 4
+      "asDelivered": 4,
+      "asDeliveredMeasured": "against the original deliverable, same gate"
     },
     {
       "name": "webhook-haiku-2",
@@ -72,7 +76,8 @@
       "digest": "bd64114ad4ac7f4f",
       "upstream": "../webhook-haiku-2",
       "asDelivered": 7,
-      "differsFromAsDelivered": "as delivered this scored 7; the vendored copy scores 8 because node_modules is not vendored, so the test suite cannot run and the tests check fires"
+      "differsFromAsDelivered": "the vendored copy scores 8 where the original scores 7, because node_modules is not vendored: the suite cannot run, so the tests check fires",
+      "asDeliveredMeasured": "against the original deliverable, same gate"
     },
     {
       "name": "webhook-haiku-3",
@@ -87,7 +92,8 @@
       "upstreamHead": "bfd6840c1979",
       "digest": "038d29c16c79ecc9",
       "upstream": "../webhook-haiku-3",
-      "asDelivered": 7
+      "asDelivered": 7,
+      "asDeliveredMeasured": "against the original deliverable, same gate"
     },
     {
       "name": "webhook-haiku-4",
@@ -101,7 +107,8 @@
       "upstreamHead": "9a6a67f9748c",
       "digest": "ea0f687ed341f2ee",
       "upstream": "../webhook-haiku-4",
-      "asDelivered": 4
+      "asDelivered": 4,
+      "asDeliveredMeasured": "against the original deliverable, same gate"
     },
     {
       "name": "webhook-haiku-6",
@@ -115,7 +122,8 @@
       "upstreamHead": "68a078c60c66",
       "digest": "bf6bcb5c2b0df68d",
       "upstream": "../webhook-haiku-6",
-      "asDelivered": 6
+      "asDelivered": 6,
+      "asDeliveredMeasured": "against the original deliverable, same gate"
     },
     {
       "name": "webhook-haiku-7",
@@ -128,7 +136,8 @@
       "upstreamHead": "4ab2796d1164",
       "digest": "c2d58ea531787f57",
       "upstream": "../webhook-haiku-7",
-      "asDelivered": 1
+      "asDelivered": 1,
+      "asDeliveredMeasured": "against the original deliverable, same gate"
     },
     {
       "name": "webhook-haiku-8",
@@ -141,7 +150,8 @@
       "upstreamHead": "902418a005da",
       "digest": "0ed98f9bae23fd42",
       "upstream": "../webhook-haiku-8",
-      "asDelivered": 2
+      "asDelivered": 2,
+      "asDeliveredMeasured": "against the original deliverable, same gate"
     },
     {
       "name": "webhook-haiku-12",
@@ -159,7 +169,8 @@
       "digest": "029be271b76351b2",
       "upstream": "../webhook-haiku-12",
       "asDelivered": 5,
-      "differsFromAsDelivered": "as delivered this scored 5; the vendored copy scores 6 because node_modules is not vendored, so the test suite cannot run and the tests check fires"
+      "differsFromAsDelivered": "the vendored copy scores 6 where the original scores 5, because node_modules is not vendored: the suite cannot run, so the tests check fires",
+      "asDeliveredMeasured": "against the original deliverable, same gate"
     }
   ],
   "fixtures": {

@@ -129,7 +129,27 @@ for (const entry of manifest.entries) {
     const wasBlocking = entry.expectedBlocking;
     entry.expectedBlocking = r.blocking;
     entry.expectedFindings = Object.fromEntries(Object.entries(counts).sort());
-    console.log(`  recorded ${entry.name}  ${wasBlocking} -> ${r.blocking}`);
+
+    // asDelivered is re-measured too, against the ORIGINAL, whenever it is on this machine.
+    // Leaving it frozen while the vendored number is re-derived would let the two drift apart on any
+    // control change, and the pair only means something if both were measured under the same gate.
+    const upstream = entry.upstream ? path.resolve(REPO, entry.upstream) : null;
+    if (upstream && existsSync(upstream)) {
+      const u = runGate(upstream, taskFile);
+      entry.asDelivered = u.blocking;
+      entry.asDeliveredMeasured = "against the original deliverable, same gate";
+    } else if (typeof entry.asDelivered === "number") {
+      entry.asDeliveredStale = "the original was not on this machine when the vendored number was re-derived; this figure is from an earlier gate";
+    }
+    if (entry.asDelivered !== entry.expectedBlocking) {
+      entry.differsFromAsDelivered =
+        `the vendored copy scores ${entry.expectedBlocking} where the original scores ${entry.asDelivered}, ` +
+        `because node_modules is not vendored: the suite cannot run, so the tests check fires`;
+    } else {
+      delete entry.differsFromAsDelivered;
+      delete entry.asDeliveredStale;
+    }
+    console.log(`  recorded ${entry.name}  ${wasBlocking} -> ${r.blocking}${entry.asDelivered !== r.blocking ? `  (as delivered: ${entry.asDelivered})` : ""}`);
     continue;
   }
 
@@ -145,7 +165,14 @@ for (const entry of manifest.entries) {
     for (const d of drift) console.log(`      ${d}`);
     failed++;
   } else {
-    console.log(`  ok       ${entry.name}  (${r.blocking} blocking)`);
+    // Both numbers on the line. Four of eleven fixtures score differently vendored than delivered,
+    // and a scoreboard on which the clean projects read as 1 invites exactly one question -- the
+    // answer to which should not be a footnote in a manifest nobody opens.
+    const delivered =
+      typeof entry.asDelivered === "number" && entry.asDelivered !== r.blocking
+        ? `; ${entry.asDelivered} as delivered — the suite cannot run without node_modules`
+        : "";
+    console.log(`  ok       ${entry.name}  (${r.blocking} blocking${delivered})`);
   }
 }
 

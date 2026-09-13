@@ -50,8 +50,8 @@ jobs:
           esac
           exit $CODE
 
-  self-gate:
-    name: gate this repository
+  action:
+    name: the action, against fixtures with known verdicts
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -59,6 +59,62 @@ jobs:
         with:
           node-version: "22"
       - run: npm ci --ignore-scripts
-      - uses: ./
+
+      # Fixtures with verdicts frozen in corpus/manifest.json, so this asserts the action's
+      # behaviour rather than merely running it. The earlier version of this job pointed the gate at
+      # this repository, which reported four blocking findings -- every one of them inside bench/,
+      # where the fixtures are deliberately imperfect because that is what proves the rules fire.
+      # A tool is not a webhook receiver, and gating it as though it were is theatre that would have
+      # made this workflow red from its first run.
+      - name: unpack fixtures
+        run: |
+          mkdir -p "${RUNNER_TEMP}/fixtures"
+          tar -xzf corpus/fixtures.tar.gz -C "${RUNNER_TEMP}/fixtures"
+          # The uncommitted_work validator reads git state, so each fixture needs a repository with
+          # everything committed -- which is why the archive carries none.
+          for d in "${RUNNER_TEMP}/fixtures"/*/; do
+            git -C "$d" init -q
+            git -C "$d" add -A
+            git -C "$d" -c user.name=ci -c user.email=ci@localhost commit -qm "fixture"
+          done
+
+      - id: clean
+        uses: ./
         with:
-          project: "."
+          project: ${{ runner.temp }}/fixtures/webhook-sonnet-2
+          task-file: agent/fixtures/webhook-receiver-task.txt
+
+      - id: blocked
+        continue-on-error: true
+        uses: ./
+        with:
+          project: ${{ runner.temp }}/fixtures/webhook-haiku-3
+          task-file: agent/fixtures/webhook-receiver-task.txt
+
+      # Exit 3 is the outcome this whole contract exists to keep distinct from exit 1, so it is
+      # asserted rather than assumed. Pointing a control at a path that does not exist is the
+      # cheapest way to produce it.
+      - id: incomplete
+        continue-on-error: true
+        uses: ./
+        with:
+          project: ${{ runner.temp }}/fixtures/webhook-sonnet-2
+          task-file: agent/fixtures/webhook-receiver-task.txt
+          terraform-guard: /nonexistent/server.mjs
+
+      - name: assert
+        run: |
+          fail=0
+          check() {
+            if [ "$2" = "$3" ]; then echo "  ok   $1 -> $2"; else echo "  FAIL $1 -> got '$2', want '$3'"; fail=1; fi
+          }
+          check "clean fixture"        "${{ steps.clean.outputs.outcome }}"      "clean"
+          check "blocked fixture"      "${{ steps.blocked.outputs.outcome }}"    "blocked"
+          check "unreachable control"  "${{ steps.incomplete.outputs.outcome }}" "incomplete"
+          # A blocked run and an incomplete run must not report the same thing. That confusion is the
+          # silent pass this control set exists to remove, and at CI scale it is invisible.
+          if [ "${{ steps.blocked.outputs.outcome }}" = "${{ steps.incomplete.outputs.outcome }}" ]; then
+            echo "  FAIL blocked and incomplete reported identically"
+            fail=1
+          fi
+          exit $fail

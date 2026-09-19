@@ -53,12 +53,26 @@ runs:
         SECRETGUARD_SERVER: ${{ inputs.secret-guard }}
         IDENTITYGUARD_SERVER: ${{ inputs.identity-guard }}
       run: |
+        # GitHub runs composite `run:` steps as `bash --noprofile --norc -e -o pipefail`, and
+        # `set -uo pipefail` does NOT clear that inherited -e. The gate's exit code is this action's
+        # entire result -- 1 is "blocking", 3 is "could not run" -- so under errexit the gate
+        # aborted the step the instant it reported anything other than clean, and every line below
+        # this one was dead code: no rendered findings, no `outcome`, no annotation, just a bare
+        # "Process completed with exit code 1". The action could only ever report success.
+        #
+        # That is precisely the confusion this action exists to prevent, so errexit is turned off
+        # explicitly and each command's failure is handled where it happens.
+        set +e
         set -uo pipefail
+
         # Empty inputs must not become empty env vars: resolve-controls treats a set variable as an
         # explicit instruction and errors when it points nowhere, which would turn "not configured"
         # into "misconfigured" for every consumer who does not override a control.
+        # Written as `if` rather than `[ ... ] && unset`, because that && list returns non-zero
+        # whenever the variable IS set, which under the inherited errexit killed the step for the
+        # one case that supplies an override.
         for v in TFGUARD_SERVER DEPAUDIT_SERVER SECRETGUARD_SERVER IDENTITYGUARD_SERVER; do
-          [ -z "${!v}" ] && unset "$v"
+          if [ -z "${!v}" ]; then unset "$v"; fi
         done
 
         RESULT="${RUNNER_TEMP:-/tmp}/agent-gate.json"

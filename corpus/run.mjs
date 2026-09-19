@@ -44,7 +44,20 @@ function runGate(projectDir, taskFile) {
     out = err.stdout;
     if (!out) throw new Error(`gate produced no output for ${projectDir}: ${err.message}`);
   }
-  return JSON.parse(out);
+  try {
+    return JSON.parse(out);
+  } catch (err) {
+    // A raw SyntaxError here points at whatever leaked onto stdout and says nothing about which
+    // fixture was being measured or that the corpus stopped early. The first CI run ended this way
+    // on fixture five of eleven, and the traceback read as a corpus bug rather than as a narration
+    // line in front of the document.
+    const head = out.slice(0, 200).replace(/\n/g, "\\n");
+    throw new Error(
+      `the gate's --json output for ${projectDir} is not JSON (${err.message}).\n` +
+        `stdout began: ${head}\n` +
+        "In --json mode stdout must carry only the result document; something wrote to it."
+    );
+  }
 }
 
 function diffCounts(expected, actual) {
@@ -163,6 +176,16 @@ for (const entry of manifest.entries) {
   } else if (r.blocking !== entry.expectedBlocking || drift.length) {
     console.log(`  DRIFT    ${entry.name} — blocking ${entry.expectedBlocking} -> ${r.blocking}`);
     for (const d of drift) console.log(`      ${d}`);
+    // The counts say WHICH check moved; they never say why, and on a machine that is not this one
+    // that is the whole question. Four fixtures drifted on the first CI run with `build_check:
+    // expected 0, got 1` and nothing else to go on -- the message was sitting in the result
+    // document the whole time. Printing it costs nothing on a green run, because there is no drift
+    // to print.
+    for (const f of r.findings) {
+      if (drift.some((d) => d.startsWith(`${findingId(f.message)}:`))) {
+        console.log(`        ${f.message.replace(/\n/g, "\n        ")}`);
+      }
+    }
     failed++;
   } else {
     // Both numbers on the line. Four of eleven fixtures score differently vendored than delivered,

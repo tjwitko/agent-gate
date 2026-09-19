@@ -165,8 +165,24 @@ async function main() {
     console.error("node_modules, then a sibling checkout. A control that resolves from nowhere exits 3.");
     process.exit(EXIT.USAGE);
   }
-  const result = await runGate(positional[0], positional[1]);
-  console.log(json ? machine(result) : human(result));
+  // In --json mode stdout carries exactly one thing: the result document. The validators share
+  // their code with the agent loop, which narrates progress to console.log, so a single narration
+  // line lands in front of the JSON and makes it unparseable. That is how the corpus first failed
+  // on CI -- `[gate] check_dependencies: ... (no lockfile)` wedged ahead of the document, and a
+  // SyntaxError pointing at the narration rather than at the gate.
+  //
+  // Silencing the one line that leaked would leave every other console.log in that shared code one
+  // refactor away from doing the same, so stdout is closed to narration for the duration instead.
+  // The narration is not discarded -- it goes to stderr, where a human still reads it.
+  const narrate = console.log;
+  if (json) console.log = (...a) => console.error(...a);
+  let result;
+  try {
+    result = await runGate(positional[0], positional[1]);
+  } finally {
+    console.log = narrate;
+  }
+  process.stdout.write(`${json ? machine(result) : human(result)}\n`);
   process.exit(result.exitCode);
 }
 

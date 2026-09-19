@@ -5,7 +5,7 @@ import { tmpdir } from "os";
 import path from "path";
 import { existsSync } from "fs";
 
-import { detectSuite, runTests, testExecutionReport, parseCountsForTest } from "./test-execution.mjs";
+import { detectSuite, runTests, testExecutionReport, parseCountsForTest, failingNamesForTest } from "./test-execution.mjs";
 
 function run(files, fn) {
   const dir = mkdtempSync(path.join(tmpdir(), "testexec-"));
@@ -123,9 +123,15 @@ test("a suite that hangs is killed and reported, not treated as passing", () => 
   run(
     {
       "package.json": "{}",
+      // A never-resolving promise is NOT a hang on every Node: 22 notices nothing is keeping the
+      // event loop alive and fails the test immediately, so the timeout path this test exists to
+      // prove was never reached there. The interval keeps the loop alive, which hangs on any
+      // version.
       "src/a.test.mjs": `
         import test from "node:test";
-        test("hangs", async () => { await new Promise(() => {}); });
+        test("hangs", async () => {
+          await new Promise(() => { setInterval(() => {}, 1000); });
+        });
       `,
     },
     (dir) => {
@@ -157,3 +163,35 @@ for (const [label, output, expected] of SUMMARIES) {
     assert.deepEqual(parseCountsForTest(output), expected);
   });
 }
+
+// --- both reporter formats -------------------------------------------------
+// `node --test` emits the spec format to a TTY and TAP to a pipe, and this code always reads a
+// pipe, so which one arrives depends on the Node version rather than on anything here: 26 emits
+// spec, 22 emits TAP. The gate ran on CI under Node 22 and printed "1 of 2 test(s) FAILED" followed
+// by a sentence telling the reader to check the names above, with no names above.
+test("a failing test is named in TAP output as well as spec", () => {
+  const tap = [
+    "TAP version 13",
+    "# Subtest: a genuine callback is accepted",
+    "ok 1 - a genuine callback is accepted",
+    "# Subtest: a forged callback is rejected",
+    "not ok 2 - a forged callback is rejected",
+    "1..2",
+    "# tests 2",
+    "# pass 1",
+    "# fail 1",
+  ].join("\n");
+  const names = failingNamesForTest(tap);
+  assert.deepEqual(names, ["a forged callback is rejected"]);
+});
+
+test("a TAP file-level subtest path is not reported as a test name", () => {
+  const tap = ["not ok 1 - src/a.test.mjs", "not ok 2 - a forged callback is rejected"].join("\n");
+  assert.deepEqual(failingNamesForTest(tap), ["a forged callback is rejected"]);
+});
+
+test("the spec format still works", () => {
+  assert.deepEqual(failingNamesForTest("\u2716 a forged callback is rejected (1.2ms)"), [
+    "a forged callback is rejected",
+  ]);
+});

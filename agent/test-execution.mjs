@@ -144,14 +144,25 @@ function failingNames(output) {
   output = output.replace(ANSI, "");
   const names = new Set();
   for (const re of [
-    /^\s*[✕✖x×]\s+(.+?)(?:\s+\(\d+(?:\.\d+)?\s*m?s\))?$/gim, // node --test, vitest
+    /^\s*[✕✖x×]\s+(.+?)(?:\s+\(\d+(?:\.\d+)?\s*m?s\))?$/gim, // node --test spec, vitest
+    // TAP. `node --test` emits the spec format to a TTY and TAP to a pipe, and this always runs
+    // against a pipe -- so which one arrives depends on the Node version, not on anything this code
+    // controls. Node 26 emits spec either way; Node 22 emits TAP. Without this line the gate ran on
+    // CI and printed "1 of 2 test(s) FAILED" followed by a sentence telling the reader to check the
+    // names above, with no names above. Counts survived only because TAP's `# fail` happens to
+    // match the count patterns.
+    /^\s*not ok \d+ - (.+?)(?:\s+#.*)?$/gim,
     /^\s*●\s+(.+)$/gm, // jest
     /^---\s+FAIL:\s+(\S+)/gm, // go
     /^FAILED\s+(\S+)/gm, // pytest
   ]) {
     for (const m of output.matchAll(re)) {
+      // TAP names a file-level subtest by its path, which is not a test name. The spec reporter
+      // never emits those, so dropping them keeps the two formats reporting the same thing.
       const n = m[1].trim();
-      if (n && !/^failing tests|^tests?:/i.test(n)) names.add(n);
+      if (!n || /^failing tests|^tests?:/i.test(n)) continue;
+      if (/\.(m|c)?[jt]sx?$/.test(n) || /^[./]/.test(n)) continue;
+      names.add(n);
     }
   }
   // jest prints each failure twice -- once as `✕ short name` in the run list and again as
@@ -166,6 +177,10 @@ function failingNames(output) {
 /** Exposed for tests: each runner's summary is parsed from text, so all five can be checked
  *  without installing five runners. The vitest undercount was invisible in every other way. */
 export const parseCountsForTest = parseCounts;
+
+/** Exposed for the same reason parseCounts is: the TAP path only occurs naturally on a Node
+ *  version this machine does not run, and it shipped broken because of that. */
+export const failingNamesForTest = failingNames;
 
 /** Runs the suite. Returns { ran, unavailable, timedOut, counts, failing, exitCode }. */
 export function runTests(projectDir, { timeoutMs = TIMEOUT_MS } = {}) {

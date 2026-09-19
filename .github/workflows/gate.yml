@@ -12,13 +12,23 @@ on:
 
 jobs:
   unit:
-    name: unit tests
+    name: unit tests (node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # A matrix because one Node version hid a defect in the product's own output for a month.
+        # `node --test` emits the spec format to a TTY and TAP to a pipe, and this code always reads
+        # a pipe -- so the format depends on the Node version. 22 emits TAP, 26 emits spec, the
+        # development machine runs 26, and the failing-test-name parser only knew spec. On CI the
+        # gate printed "1 of 2 test(s) FAILED" followed by a sentence telling the reader to check
+        # the names above, with no names above.
+        node: ["20", "22", "24"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: ${{ matrix.node }}
       - run: npm ci --ignore-scripts
       - run: npm test
 

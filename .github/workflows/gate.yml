@@ -41,6 +41,18 @@ jobs:
         with:
           node-version: "22"
       - run: npm ci --ignore-scripts
+      - uses: ./.github/actions/control-tooling
+      # One provider download per job instead of one per fixture. `terraform init` runs once for
+      # every Terraform root across eleven deliverables, and the AWS provider is not small.
+      - name: terraform plugin cache
+        run: |
+          echo "TF_PLUGIN_CACHE_DIR=$HOME/.terraform.d/plugin-cache" >> "$GITHUB_ENV"
+          mkdir -p "$HOME/.terraform.d/plugin-cache"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.terraform.d/plugin-cache
+          key: tf-plugins-${{ runner.os }}-${{ hashFiles('corpus/fixtures.tar.gz') }}
+          restore-keys: tf-plugins-${{ runner.os }}-
       # The fixtures ship in the repository as corpus/fixtures.tar.gz, so this job needs nothing
       # beside the checkout. It does NOT pass when they are absent. The first version of it did --
       # `exit 0` with a warning -- which is a job reporting green while verifying nothing, in the
@@ -69,6 +81,16 @@ jobs:
         with:
           node-version: "22"
       - run: npm ci --ignore-scripts
+      - uses: ./.github/actions/control-tooling
+      - name: terraform plugin cache
+        run: |
+          echo "TF_PLUGIN_CACHE_DIR=$HOME/.terraform.d/plugin-cache" >> "$GITHUB_ENV"
+          mkdir -p "$HOME/.terraform.d/plugin-cache"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.terraform.d/plugin-cache
+          key: tf-plugins-${{ runner.os }}-${{ hashFiles('corpus/fixtures.tar.gz') }}
+          restore-keys: tf-plugins-${{ runner.os }}-
 
       # Fixtures with verdicts frozen in corpus/manifest.json, so this asserts the action's
       # behaviour rather than merely running it. The earlier version of this job pointed the gate at

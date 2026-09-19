@@ -1,0 +1,75 @@
+# The external binaries the guard servers shell out to.
+#
+# Three of the four controls are thin, careful wrappers around a scanner that is not written in
+# JavaScript and does not arrive with `npm ci`: terraform-guard runs `terraform`, secret-guard runs
+# `gitleaks`, dep-audit runs `osv-scanner`. checkov is advisory rather than blocking, but the gate
+# reports its coverage, and a run without it reports less than a run with it.
+#
+# The versions are pinned to the ones on the machine where corpus/manifest.json was derived. This is
+# not caution for its own sake: the corpus compares finding COUNTS against frozen deliverables, so a
+# newer scanner with one more rule reports drift in a control that did not change. Pinning keeps the
+# corpus measuring this repository rather than upstream's release cadence. Bumping one of these is
+# expected to come with a re-derived manifest in the same commit.
+name: control tooling
+description: Installs and verifies the external scanners the four guard servers invoke.
+
+runs:
+  using: composite
+  steps:
+    - uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: "1.15.8"
+        # The wrapper replaces `terraform` with a script that copies stdout and stderr into step
+        # outputs. terraform-guard parses that output, so the wrapper is a parsing hazard for no
+        # benefit here.
+        terraform_wrapper: false
+
+    - name: gitleaks
+      shell: bash
+      env:
+        GITLEAKS_VERSION: "8.30.1"
+      run: |
+        set -euo pipefail
+        curl -fsSL -o /tmp/gitleaks.tar.gz \
+          "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+        sudo tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks
+        sudo chmod +x /usr/local/bin/gitleaks
+
+    - name: osv-scanner
+      shell: bash
+      env:
+        OSV_VERSION: "2.4.0"
+      run: |
+        set -euo pipefail
+        sudo curl -fsSL -o /usr/local/bin/osv-scanner \
+          "https://github.com/google/osv-scanner/releases/download/v${OSV_VERSION}/osv-scanner_linux_amd64"
+        sudo chmod +x /usr/local/bin/osv-scanner
+
+    - name: checkov
+      shell: bash
+      run: pipx install checkov==3.3.10
+
+    # Every install above is verified here rather than trusted. A missing scanner does not make the
+    # gate quiet -- the servers report that they cannot run and the gate exits 3 -- but it turns a
+    # job that was meant to verify behaviour into a job that verifies nothing, twenty minutes later
+    # and one level less obviously. This is the cheapest place to find out.
+    - name: verify the tooling is present and is the pinned version
+      shell: bash
+      run: |
+        fail=0
+        check() {
+          local name="$1" want="$2" got
+          if ! command -v "$name" >/dev/null 2>&1; then
+            echo "  MISSING  $name is not on PATH"; fail=1; return
+          fi
+          got="$($name $3 2>&1 | head -1)"
+          case "$got" in
+            *"$want"*) echo "  ok       $name -> $got" ;;
+            *)         echo "  VERSION  $name -> '$got', expected to contain '$want'"; fail=1 ;;
+          esac
+        }
+        check terraform   "1.15.8" version
+        check gitleaks    "8.30.1" version
+        check osv-scanner "2.4.0"  --version
+        check checkov     "3.3.10" --version
+        exit $fail

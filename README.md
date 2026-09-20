@@ -289,12 +289,14 @@ The control set is the active half. The four guard servers are public and instal
 runs as a CLI and as a GitHub Action, and the corpus guards it against regression. Unit tests pass
 on Node 20, 22 and 24; the corpus passes locally on all eleven fixtures.
 
-Known open items, none of them silent:
+A check that cannot run now says so everywhere it can happen: an unreachable MCP control, a control
+that connected and was never called, and — since `build_check` learned the difference — a checker
+whose toolchain is missing. All three route to exit 3 rather than to a finding or a pass.
 
-- The corpus does not yet pass end-to-end on Linux CI. The remaining differences are environmental
-  and are listed in `docs/ci.md`: `go build` inside a container over a bind-mounted git repository
-  fails VCS stamping, and `check_dependencies` finds fewer vulnerabilities on CI than locally.
-- `build_check` reports a *missing tool* as though it were a code defect — an absent `ruff` yields
-  "python STATIC ERRORS", which counts as blocking. That is a false positive in a blocking gate,
-  and the Go branch has the mirror-image bug, treating an unavailable toolchain as a pass.
+Known open items, none of them silent, all recorded in [`docs/ci.md`](docs/ci.md):
+
+- `check_dependencies` finds fewer vulnerabilities on Linux CI than locally, on two fixtures, and
+  the cause is not established. The first thing to rule out is `dep-audit-mcp` reporting zero
+  findings when it cannot reach the vulnerability database, which would be a silent pass inside the
+  control set.
 - The corpus manifest records the date it was measured but not the toolchain that measured it.

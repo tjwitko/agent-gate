@@ -103,35 +103,34 @@ obviously.
 
 ## Known environmental differences
 
-The corpus passes on all eleven fixtures on macOS and does not yet pass end-to-end on Linux CI. The
-remaining differences are environmental rather than control regressions, and are recorded here
-instead of being suppressed.
+The corpus passes on all eleven fixtures on macOS. The differences below were found by running it
+on Linux CI and are recorded here rather than suppressed.
 
-**`go build` inside a container over a bind-mounted git repository.** `build_check` runs the Go
-toolchain in `golang:1.22` with the project bind-mounted. On a Linux runner the mounted tree is
-owned by the runner UID while the container runs as root, so git refuses it as dubious ownership,
-`go build` fails VCS stamping with `error obtaining VCS status: exit status 128`, and the result is
-reported as `go BUILD ERRORS` against code that compiles. Affects the Go fixtures (`webhook-haiku-6`,
-`-7`, `-8`) and cascades into their `tests` check. `-buildvcs=false` is the obvious lever; it has
-not been applied, because `build_check` should first learn to distinguish a toolchain that could not
-run from code that does not build (see below).
+**Fixed: `go build` inside a container over a bind-mounted git repository.** `build_check` runs the
+Go toolchain in `golang:1.22` with the project bind-mounted. On a Linux runner the mounted tree is
+owned by the runner UID while the container runs as root, so git refuses it as dubious ownership
+and `go build` fails VCS stamping with `error obtaining VCS status: exit status 128` before it
+compiles anything -- reported as the project's build errors. The build now passes `-buildvcs=false`,
+which a build check has no use for either way. The image is also pulled as its own step, so the
+pull transcript no longer lands inside the error text and "could not obtain the toolchain" is a
+different exit status from "the code does not build".
 
-**Docker pull progress captured as build output.** The same branch reports `go.stderr || go.stdout`
-verbatim, so on a cold runner the image pull transcript lands inside the "BUILD ERRORS" text and
-buries the real error.
+**Fixed: a blocking check that could not run reported code defects.** `build_check` treated a
+non-zero exit from `python3 -m py_compile` or `ruff` as evidence about the code, but `spawnSync`
+returns `status: null` when the binary is absent, so a machine without `ruff` failed a project
+whose code is fine. The Go branch had the mirror-image bug, emitting text that matched no blocking
+pattern, so an absent toolchain read as a pass. Both now report `COULD NOT RUN`, which is neither a
+finding nor a pass and routes to the same exit-3 path as an unreachable control.
 
-**`check_dependencies` finds less on CI.** Two fixtures (`webhook-haiku-2`, `webhook-haiku-6`) score
-one blocking dependency finding locally and none on CI. Run directly against the same vendored
-fixtures, `osv-scanner` reports 10 and 48 vulnerabilities locally. The cause is not established.
-One candidate worth checking first: `dep-audit-mcp` parses `JSON.parse(scan.stdout || "{}")` and
-only errors when there is no parseable JSON at all, so a scan that ran but could not reach the
-vulnerability database would report zero findings without reporting a problem — which would be the
-silent pass this control set exists to remove, in the control set itself.
+**Open: `check_dependencies` finds less on CI.** Two fixtures (`webhook-haiku-2`,
+`webhook-haiku-6`) score one blocking dependency finding locally and none on CI. Run directly
+against the same vendored fixtures, `osv-scanner` reports 10 and 48 vulnerabilities locally. The
+cause is not established. One candidate worth checking first: `dep-audit-mcp` parses
+`JSON.parse(scan.stdout || "{}")` and only errors when there is no parseable JSON at all, so a scan
+that ran but could not reach the vulnerability database would report zero findings without
+reporting a problem -- which would be the silent pass this control set exists to remove, in the
+control set itself.
 
-**A blocking check that cannot run reports code defects.** `build_check` treats a non-zero exit
-from `python3 -m py_compile` or `ruff` as evidence about the code, but `spawnSync` returns
-`status: null` when the binary is absent, so a machine without `ruff` fails a project whose code is
-fine. The Go branch has the mirror-image bug: it detects the missing toolchain correctly and emits
-text that matches none of the blocking patterns, so an absent Go toolchain reads as a pass. Both
-are wrong in the same way — "could not run" is neither a finding nor a pass, and belongs on the
-exit-3 path with unreachable controls.
+**Open: the manifest records when it was measured, not with what.** `corpus/manifest.json` carries a
+`measured` date but no toolchain. The scanner versions are pinned in the workflow, which is where
+the coupling currently lives; nothing checks that a corpus run is using them.

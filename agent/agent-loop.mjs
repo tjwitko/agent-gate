@@ -32,6 +32,7 @@ import { iamContractFailures } from "./iam-contract.mjs";
 import { artifactPresenceFailures, artifactInventory, artifactRegressions } from "./artifact-presence.mjs";
 import { codeQualityFailures, taskWantsTests } from "./code-quality.mjs";
 import { SKIP_DIRS } from "./skip-dirs.mjs";
+import { findsLockfile, NOT_AUTHORITATIVE_NOTE } from "./lockfiles.mjs";
 import { ensureGitignore, isArtifact, ensureRepo } from "./commit-gate.mjs";
 // Shared with bench/, not duplicated: one definition of how this repo talks to Langfuse means the
 // loop and the benchmark can never disagree about which instance or which credentials. Everything
@@ -1103,15 +1104,8 @@ async function pendingResourceRemovals(dir) {
   }
 }
 
-async function lockfilePresent(projectDir) {
-  const entry = path.join(path.resolve(__dirname, "..", ".."), "local-copilot-stack", "validate", "lockfiles.mjs");
-  if (!existsSync(entry)) return false;
-  try {
-    const { findsLockfile } = await import(pathToFileURL(entry).href);
-    return findsLockfile(projectDir);
-  } catch {
-    return false;
-  }
+function lockfilePresent(projectDir) {
+  return findsLockfile(projectDir);
 }
 
 // Carried across validation rounds within a single run. Module-level rather than threaded through
@@ -1326,16 +1320,23 @@ export async function validateProject(projectDir, toolRegistry, taskText = "") {
         // findings are advisory. This gate previously had no such check and failed a run over
         // exactly those phantoms — the same project was advisory at commit time and fatal
         // mid-run, which means one of the two was wrong.
-        const authoritative = await lockfilePresent(projectDir);
+        const authoritative = lockfilePresent(projectDir);
         const line = `check_dependencies: ${parsed.findings.length} finding(s) at or above high severity`;
         if (authoritative) {
           failures.push(`${line}:\n${result.slice(0, 1200)}`);
         } else {
-          console.log(`[gate] ${line} — advisory only (no lockfile)`);
+          // An advisory, not a console.log. This decides whether a security control blocks, and it
+          // was announced on a stream no report reads and no exit code reflects -- so a project
+          // with high-severity vulnerabilities and no lockfile produced a clean verdict with
+          // nothing anywhere saying why.
+          advisories.push(`${line} — NOT BLOCKING: ${NOT_AUTHORITATIVE_NOTE}`);
         }
       }
     } catch {
-      /* non-JSON output means the scan itself failed; not the model's problem to fix */
+      // Not the model's problem to fix, and not a pass either. Swallowed entirely before this, so
+      // a dependency scan that never produced a result was indistinguishable in the report from
+      // one that ran and found nothing.
+      couldNotRun.push("check_dependencies: the scan produced no parseable result, so no dependency was checked");
     }
   }
 
@@ -1624,7 +1625,9 @@ export async function validateProject(projectDir, toolRegistry, taskText = "") {
         );
       }
     } catch {
-      /* non-JSON output means the scan itself failed; not the model's problem to fix */
+      // Same reasoning as the dependency scan above: a secret scan that produced nothing readable
+      // has not cleared this project of hardcoded credentials.
+      couldNotRun.push("scan_path: the scan produced no parseable result, so no file was checked for credentials");
     }
   }
 

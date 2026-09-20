@@ -49,6 +49,14 @@ runs:
       shell: bash
       run: pipx install checkov==3.3.10
 
+    # build_check's Python static pass. No fixture in the corpus is Python today, which is exactly
+    # why it was missed -- the runner has never had it, and nothing said so until the corpus began
+    # reporting the toolchain it was measured with. Without it a Python project reports COULD NOT
+    # RUN and exits 3 here, which is correct and useless.
+    - name: ruff
+      shell: bash
+      run: pipx install ruff==0.16.2
+
     # Every install above is verified here rather than trusted. A missing scanner does not make the
     # gate quiet -- the servers report that they cannot run and the gate exits 3 -- but it turns a
     # job that was meant to verify behaviour into a job that verifies nothing, twenty minutes later
@@ -72,4 +80,5 @@ runs:
         check gitleaks    "8.30.1" version
         check osv-scanner "2.4.0"  --version
         check checkov     "3.3.10" --version
+        check ruff        "0.16.2" --version
         exit $fail

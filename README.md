@@ -1,277 +1,21 @@
-# local-delegate-mcp
+# agent-gate
 
-An MCP server that lets an LLM (Claude, or any MCP-capable client) delegate
-self-contained, low-skill subtasks to a locally-hosted model instead of doing
-the work itself — to save tokens on mechanical, easily-verified work.
+A set of deterministic security controls that run against a project directory and return one
+verdict, plus the MCP delegation server this repository grew out of.
 
-## Architecture
+The repository is published as [`agent-gate`](https://github.com/tjwitko/agent-gate); the package
+is still named `local-delegate-mcp` and the command it installs is `agent-gate`. That mismatch is
+historical: the delegation server came first, the control set grew inside it, and the control set
+is now the larger half.
 
-```
-Claude / any MCP client
-  │
-  └─ MCP tool "delegate_to_local_model" ──► local-delegate-mcp (Node/stdio)
-                                                  │
-                                                  └─ POST /v1/chat/completions {"model": <alias>}
-                                                         │
-                                                         ▼
-                                              llama-server, router mode (from local-copilot-stack)
-                                                    http://localhost:8080
-                                                         │
-                                                         ├─ "delegate-fast" (Qwen2.5-Coder-7B — default)
-                                                         └─ "Qwen3.5-9B-UD-Q4_K_XL.gguf" (same model VS Code uses)
-```
+The project exists to answer one question with evidence rather than assertion: **does a
+deterministic gate change what a model actually ships?** The measured answer, so far, is that
+advice in a prompt does not and a gate does — which is why enforcement lives in CI and not in
+wording.
 
-This project is **only the delegation client** — it does not run or manage any
-model itself. It expects an OpenAI-compatible chat completions endpoint to
-already be reachable (by default `http://localhost:8080`), running in
-**router mode** with both aliases above registered — i.e. the `llama-server`
-instance already set up and kept running by the separate
-[`local-copilot-stack`](../local-copilot-stack) project. If that project
-isn't installed and running, this server's tool calls will fail with a clear
-"could not reach the local model" error rather than crashing.
-
-## The tool
-
-**`delegate_to_local_model`** — one tool, one job. Takes:
-
-- `task` (required): a **fully self-contained** description of the work,
-  including any code/schema/examples/constraints it needs. The local model
-  has no memory of the calling conversation and cannot ask follow-up
-  questions, so everything relevant has to be in this string. Prefer
-  `context_files` (below) over pasting file contents in here — pasting costs
-  the calling model output tokens to transcribe them.
-- `context_files` (optional): a list of file paths, read on the server side
-  and handed to the local model as reference material instead of being
-  pasted into `task`. Paths are resolved against — and must stay within —
-  this server's working directory (override with `CONTEXT_ROOT`); anything
-  that escapes it, looks like a sensitive file (`.env`, `.ssh`, `*.pem`,
-  `*.key`, `credentials.json`, etc.), or whose content matches the same
-  credential scan applied to `task` is refused. Capped at 8000 bytes/file,
-  16000 bytes combined. If a task references a specific version of an
-  external library, framework, or infrastructure module, verify its real
-  current interface yourself (the local model can't tell when its own
-  knowledge is stale) and pass the verified reference here — don't give the
-  local model its own internet access to check; see `CLAUDE.md` for why.
-- `output_files` (optional): a list of paths the response should be written
-  to, server-side. **This is the highest-leverage parameter in the tool** —
-  see "Why `output_files` matters" below. For multiple files, instruct the
-  model in `task` to precede each with a line reading exactly
-  `===FILE: <path>===`; any path it emits that isn't in this list causes all
-  writes to be refused. Same containment and sensitive-filename rules as
-  `context_files`, plus: existing files are never overwritten unless
-  `allow_overwrite` is set, and validation happens for every file before any
-  file is written (so a violation partway through can't leave half the batch
-  on disk). When set, the tool returns a manifest — paths, byte and line
-  counts — instead of the content.
-- `allow_overwrite` (optional, default false): permit `output_files` to
-  replace files that already exist. Leave unset when generating new files.
-- `expected_output_lines` (**required**): honest estimate of the response
-  size. Enforced, not advisory — see "The gate" below.
-- `context_files_are_preexisting` (**required whenever `context_files` is
-  used**): true only if every listed file already existed independently of
-  this delegation. False raises the gate's threshold, because authoring a
-  context file costs the same as pasting its content.
-- `acknowledge_small_task` (optional): a written reason for bypassing the
-  gate. A string, not a boolean — the justification has to be articulated,
-  and every use is recorded.
-- `system_prompt` (optional): role/constraints/output-format guidance.
-- `max_tokens` (optional, default 2048).
-- `model` (optional, default `"fast"`): `"fast"` routes to the `delegate-fast`
-  alias (Qwen2.5-Coder-7B, no reasoning phase — reliably quick for bounded,
-  mechanical work); `"capable"` routes to the same 9B model VS Code Copilot
-  Chat uses, for the rare delegated task that genuinely needs more depth.
-  Default to `"fast"`; only ask for `"capable"` when a task has actually
-  failed on `"fast"` for reasons other than a `max_tokens` shortfall.
-  Note: the 9B model "thinks" before answering (a separate `reasoning_content`
-  field, not returned by this tool) — this can consume most or all of the
-  token budget on a `"capable"` call before it reaches the actual answer;
-  budget `max_tokens` generously if you use that tier, or a low value can
-  produce an empty result with `finish_reason: length`.
-
-The tool's own description (in `index.mjs`) is deliberately opinionated about
-*when* to use it — bounded, mechanical, easily-verified work only, not
-anything requiring judgment or high-stakes correctness — since that
-description is what actually shapes whether a calling model reaches for it
-appropriately. It also warns against two failure modes found empirically
-(not hypothetically — both were measured on real delegations, see git
-history): pasting large context into `task` instead of using
-`context_files`, and delegating a single small/isolated artifact where the
-spec costs more to write than the artifact itself. It recommends batching
-several small related asks into one `task` instead of one call per item —
-now backed by the ledger described below, which detects runs of small calls
-across separate invocations.
-
-**Ratio warning.** If a response comes back shorter than the `task` +
-`system_prompt` that produced it (only checked once the spec is long enough,
-300+ chars, for the overhead to actually matter), the tool appends a bracketed
-note to its own returned text flagging that this delegation likely wasn't
-worth it — real-time, visible feedback rather than something only findable
-later in the usage log.
+---
 
 ## The gate
-
-`expected_output_lines` is required, and calls below **150 lines** (or **300**
-when `context_files` were authored for the call) are refused before the local
-model is ever contacted. Both numbers come from the measured record: the one
-round that saved tokens produced ~230 lines across four files, and every round
-that lost produced well under 150.
-
-This is deliberately enforcement rather than advice, because advice was tried
-and observably failed — the `context_files` cost lesson was written into this
-repo's docs after one round and then violated in the very next one. A note the
-caller can skip isn't a guardrail.
-
-The escape hatch (`acknowledge_small_task`) takes a written reason rather than
-a boolean, and is logged. It exists because a hard wall with no exit would
-just push a legitimate edge case into not using the tool at all, but it's
-designed to cost more than a flag would.
-
-**The gate cannot make the spec cheap.** By the time this tool is invoked, the
-caller has already spent the output tokens writing `task` — a refusal doesn't
-refund them. The number is meant to be estimated *before* the spec is written;
-the refusal is a lesson for the next call, not a save on this one.
-
-## The ledger
-
-Every call — refused or completed — is appended to
-`~/Library/Application Support/local-delegate-mcp/ledger.json` (last 200
-entries, global rather than per-project, since it tracks the caller's habits
-rather than a codebase). Ledger I/O is wrapped so a bookkeeping failure can
-never lose a completed delegation.
-
-It exists to surface three things that a single call can't see, and it only
-speaks up when one of them fires — silence means nothing is wrong:
-
-- **Estimate calibration.** If a declared size clears the gate but the actual
-  output comes in under half of it, that's flagged. This is what stops the
-  gate from being trivially bypassed by optimistic numbers.
-- **Batching.** Three or more small results inside ten minutes get called out
-  as work that should have been one call.
-- **Overall trend.** When ≥30% of the last ten delegations produced less
-  output than the spec that requested them, it says so plainly.
-
-An earlier version of this README claimed batching *couldn't* be enforced
-server-side for lack of cross-call visibility. That was wrong — nothing stops
-a stdio server from persisting state, and this is that state.
-
-## Why `output_files` matters
-
-Across six measured delegation rounds during development, only one showed a
-real token saving (−65%); the rest ran between +118% and +257% *more*
-expensive than the orchestrator just doing the work itself. Reviewing why,
-the dominant factor wasn't spec quality or model choice — it was that the
-calling model **paid for the artifact twice**: once writing the spec, then
-again transcribing the returned text into its own `Write`/`Edit` call. That
-second payment is precisely the do-it-yourself baseline, which structurally
-caps savings near zero no matter how good the rest of the delegation is.
-
-The one round that won avoided the retype by accident — an external script
-split the response into files, so the orchestrator never transcribed the
-~8,700 characters it generated. `output_files` makes that the built-in path
-instead of a lucky accident: the server writes the files, the caller's cost
-drops to spec + review-and-fix only, and the artifact is never paid for
-twice.
-
-This does mean the content doesn't pass through the caller's output. **It
-still has to be reviewed** — read the files back (cheap, they're input
-tokens) before relying on them. "Written to disk" is not "verified correct."
-
-## Security & Guardrails
-
-- **Environment sanitization**: at startup, the server keeps only an explicit
-  allowlist of `process.env` variables (`PATH`, `HOME`, `LOCAL_LLM_URL`) and
-  deletes everything else, so it never inherits arbitrary secrets from
-  whatever process spawned it (an editor, a CLI, a shell).
-- **Credential scanning**: `task`, `system_prompt`, and any `context_files`
-  content are scanned for anything that looks like a credential (SSH/PGP
-  private key headers, AWS access keys, generic `key=value`/JSON
-  secret-looking assignments) before anything is forwarded to the local
-  model — the call is refused if something matches, rather than silently
-  sending it.
-- **File-read containment**: `context_files` paths must resolve within this
-  server's working directory (`CONTEXT_ROOT`) — no `../` escapes, no
-  absolute paths elsewhere on disk. Filenames matching a sensitive-file
-  denylist (`.env`, `.ssh`, `*.pem`, `*.key`, `credentials.json`, etc.) are
-  refused before the file is even opened, as a backstop for cases the
-  content scan might miss.
-- **File-write containment** (`output_files`): identical boundary to reads —
-  paths must resolve within `CONTEXT_ROOT`, and the sensitive-filename
-  denylist applies to writes too. Three further constraints, because writing
-  is the destructive direction: the caller declares the allowed paths up
-  front and **the local model's own emitted paths are checked against that
-  allowlist** (the model never chooses where bytes land); existing files are
-  refused unless `allow_overwrite` is explicitly set; and all paths are
-  validated before any file is written, so a violation in the middle of a
-  batch can't leave a partial write behind.
-- **Advisory output only**: the local model only ever returns text; this tool
-  never executes anything on its behalf. `output_files` writes that text to
-  disk, which is not the same as running it — but it does mean unreviewed
-  model output can land in your working tree, so read the files back before
-  relying on them. See the tool's own description in `index.mjs` for what
-  it's safe to delegate in the first place.
-
-## Known operational notes
-
-**Memory pressure — much better since `local-copilot-stack` moved to router
-mode, but not eliminated.** `llama-server` now loads each model tier on
-demand and sleeps it after a period of inactivity (releasing ~98% of its
-RSS), rather than keeping both permanently resident. On a 16GB Mac also
-running Docker (SearXNG) + VS Code + other apps, a brief window where both
-tiers are hot at once (~10GB combined) is still tight. The tool doesn't queue
-or rate-limit concurrent calls; delegating serially rather than firing
-several requests in parallel remains the safer default, especially if VS
-Code's interactive chat (the 9B tier) is also active at the same time.
-
-**Timeout scales with `max_tokens`.** The request timeout is
-`30s + max_tokens * 150ms`, not a fixed value — a fixed timeout was cutting
-off legitimately-still-running generations on larger requests. This also
-covers the ~1s a sleeping model needs to wake up before it starts generating.
-
-**Why `"fast"` is the default.** Qwen3.5-9B's "thinking" phase can consume an
-entire token budget on simple, well-specified coding tasks with zero tokens
-left for the actual answer (`finish_reason: length`, empty content) —
-observed repeatedly even at `max_tokens` up to 6000 for one task. The
-non-reasoning `"fast"` tier (Qwen2.5-Coder-7B) skipped straight to the answer
-on the identical task in under 100 completion tokens. Use `model: "capable"`
-deliberately, not as a first troubleshooting step.
-
-## Setup
-
-```bash
-cd local-delegate-mcp
-npm install
-```
-
-No build step — `index.mjs` is run directly by an MCP client via:
-
-```json
-{
-  "command": "node",
-  "args": ["/absolute/path/to/local-delegate-mcp/index.mjs"]
-}
-```
-
-Optional environment variables:
-
-- `LOCAL_LLM_URL` — base URL of the OpenAI-compatible endpoint (default `http://localhost:8080`)
-- `FAST_MODEL_ALIAS` — router-mode alias for the `"fast"` tier (default `delegate-fast`)
-- `CAPABLE_MODEL_ALIAS` — router-mode alias for the `"capable"` tier (default `Qwen3.5-9B-UD-Q4_K_XL.gguf`, matching `local-copilot-stack`'s interactive-chat alias)
-- `CONTEXT_ROOT` — directory `context_files` paths are resolved against and confined to (default: this process's working directory at startup)
-
-## Status
-
-Built and verified standalone (`tools/list` and `tools/call` round-trips
-tested directly against the running `llama-server`, including the
-unreachable-endpoint error path, `context_files` reads, and its
-path-traversal / sensitive-filename refusals). Registered as a
-project-scoped Claude Code MCP server via `/Users/tomwitkowski/LLM/.mcp.json`
-— not yet exercised through a live Claude Code chat turn, only through a
-direct JSON-RPC test harness.
-
-## agent-gate — running the controls against a project
-
-The validators live in this repository; the guard servers live in four others. `agent-gate` runs
-all of them against a project directory and reports one verdict.
 
 ```
 agent-gate <project-dir> [task-file] [--json]
@@ -287,8 +31,13 @@ agent-gate <project-dir> [task-file] [--json]
 **Exit 3 is the one that matters.** "Could not run" is not "passed", and anything consuming this
 result has to tell them apart. Two failures in this project's history were exactly that confusion:
 a runner that handed the validators an empty tool registry and printed `BLOCKING: none`, and a
-control that connected and was never asked anything through ten graded runs while a
-similarly-named check ran beside it. Never collapse 3 into 1, and never treat it as 0.
+control that connected and was never asked anything through ten graded runs while a similarly-named
+check ran beside it. Never collapse 3 into 1, and never treat it as 0.
+
+In `--json` mode stdout carries only the result document. The validators share code with the agent
+loop, which narrates to `console.log`, so narration is redirected to stderr for the duration of the
+run — one narration line in front of the JSON is enough to make it unparseable, and that is how the
+corpus once died on fixture five of eleven.
 
 ### Where the controls come from
 
@@ -296,7 +45,7 @@ Resolution runs in this order, and the run reports which rule won for each contr
 
 1. an environment variable — `TFGUARD_SERVER`, `DEPAUDIT_SERVER`, `SECRETGUARD_SERVER`, `IDENTITYGUARD_SERVER`
 2. `.agent-gate.json` in the project under test
-3. `node_modules`, so the controls can be ordinary npm dependencies
+3. `node_modules`, so the controls are ordinary npm dependencies
 4. a sibling checkout — how this repository has always worked, kept for local development
 
 ```json
@@ -317,3 +66,235 @@ quietly using a different one would hide that. A control that resolves from nowh
 Six checks are gated on what the task asked for — immutability, retention, secret rotation, tests,
 error distinction and required artifacts. Without a task file they report "not checked", which is
 accurate and much less useful. Pass one.
+
+---
+
+## The controls
+
+Four MCP guard servers, each in its own repository and each installable:
+
+| control | tool | backed by |
+|---|---|---|
+| [`@tjwitko/terraform-guard-mcp`](https://github.com/tjwitko/terraform-guard-mcp) | `terraform_plan` | `terraform`, plus `checkov` (advisory) |
+| [`@tjwitko/dep-audit-mcp`](https://github.com/tjwitko/dep-audit-mcp) | `check_dependencies` | `osv-scanner` |
+| [`@tjwitko/secret-guard-mcp`](https://github.com/tjwitko/secret-guard-mcp) | `scan_path` | `gitleaks` |
+| [`@tjwitko/identity-guard-mcp`](https://github.com/tjwitko/identity-guard-mcp) | `check_auth_posture` | pure JS, no external binary |
+
+Alongside them the gate runs its own validators in-process: `build_check`, `immutability`,
+`authentication`, `manifest_contract`, `k8s_manifest`, `secret_rotation`, `retention`, `tests`,
+`iam_contract`, `artifact_presence`, `code_quality`, `artifact_census` and `uncommitted_work`.
+
+**The `@tjwitko` scope is not cosmetic.** `dep-audit-mcp` is already taken on npm by a different
+author. Depending on these by their bare names would let npm install a stranger's package which
+this gate then *spawns as a trusted security control* — dependency confusion with arbitrary code
+execution, in the component whose entire job is to be trustworthy. They are depended on by pinned
+git commit, not by registry name.
+
+### Prerequisites
+
+Three of the four shell out to a scanner that `npm ci` does not carry:
+
+```bash
+brew install terraform gitleaks osv-scanner
+pipx install checkov
+```
+
+A missing scanner is an exit-3 condition, not a silent pass. CI installs and **version-checks**
+them before the jobs that need them; the versions are pinned to the ones the corpus was measured
+with, because the corpus compares finding counts and a newer scanner with one extra rule is
+indistinguishable from a control that regressed.
+
+---
+
+## Running it in CI
+
+The gate ships as a composite GitHub Action. See [`docs/ci.md`](docs/ci.md).
+
+```yaml
+- uses: tjwitko/agent-gate@main
+  with:
+    project: .
+    task-file: task.txt
+```
+
+It sets an `outcome` output of `clean`, `blocked` or `incomplete`, and `blocked` and `incomplete`
+must never render identically — both fail the build, but one means "we looked and found problems"
+and the other means "we did not finish looking." That distinction is asserted in this repository's
+own workflow against fixtures with known verdicts, because for a while it was quietly broken:
+GitHub runs composite steps under `bash -e`, `set -uo pipefail` does not clear an inherited `-e`,
+and the gate's non-zero exit killed the step before it could set `outcome` at all. The action could
+only ever report success.
+
+This repository's workflow runs three jobs: `unit` (Node 20/22/24), `corpus`, and `action`.
+
+---
+
+## The regression corpus
+
+Eleven real deliverables, frozen with the verdict each one scored, shipped as
+`corpus/fixtures.tar.gz`.
+
+```bash
+npm run corpus           # check against the frozen verdicts
+npm run corpus -- --update   # re-derive them, deliberately
+```
+
+It exists because **every control defect in this project's history was found by running real work
+through the controls, never by a unit test.** The unit tests are still there and still pass; they
+have never once caught one of these.
+
+Each fixture is copied to scratch, `git init`-ed and committed before the gate runs, so
+`terraform init` and `go build` cannot leave the vendored copies dirty. Drift prints the finding
+text, not just the count — a count tells you *which* check moved and never *why*, and on a machine
+that is not the one that recorded the expectations, why is the entire question.
+
+Two lessons are baked into `corpus/vendor.mjs`, both the same shape — an artifact frozen on one
+machine that silently only works on that machine:
+
+- **AppleDouble companions.** macOS `bsdtar` writes a `._name` file beside every entry to carry
+  extended attributes, and macOS `tar tzf` hides them again by merging them back on listing. The
+  archive read as 407 files while holding 814, half of them binary metadata. GNU tar does no such
+  merge: on Linux `._app.js` extracts as a real file, `node --check` reports a syntax error, and
+  `build_check` turns that into a blocking finding against code that is fine. The archive is now
+  built with `COPYFILE_DISABLE=1` and then *verified with Python's `tarfile`* rather than `tar` —
+  the platform that creates the problem is the one platform that cannot see it.
+- **Platform-specific provider locks.** `.terraform.lock.hcl` recorded one `h1:` hash, for the
+  machine that ran `terraform init`. On Linux terraform appends its own, modifying the file, and
+  `uncommitted_work` correctly reported a dirty tree. The fixtures are now locked for
+  `linux_amd64` and `darwin_arm64`.
+
+Neither was a control misbehaving. Both controls were reporting truthfully about a tree that really
+did contain binary junk and really did get modified. A corpus whose job is catching "works on my
+machine" had two instances of it committed into its own fixtures.
+
+---
+
+## Why enforcement is in CI and not in the prompt
+
+The evidence, from a webhook-receiver task run repeatedly against a frozen control set:
+
+- **Twelve Haiku runs produced zero passes; three frontier-model runs passed on first attempt.**
+- **The decisive control (`haiku-5`):** the identical gate, with the two lines naming the validator
+  removed from the prompt. Result: 0 validator runs, 0 commits, 6 blocking findings. The model did
+  not route around the gate — it never reached it.
+- **Delivering the rules via `AGENTS.md` worked 2 times out of 4**, and cleanly bimodally: 5
+  validator runs when the file was read, 0 when it was not.
+
+A mechanism that works half the time is a hint, not a control. That result is the entire argument
+for putting the gate in CI, where nothing has to choose to read it.
+
+Written up in [`docs/haiku-experiment.md`](docs/haiku-experiment.md). The `AGENTS.md` stanza is in
+[`templates/AGENTS.md.tmpl`](templates/AGENTS.md.tmpl) — useful as a hint, and explicitly not
+relied upon.
+
+---
+
+## The delegation server
+
+The original half of this repository: an MCP server that lets a calling model hand self-contained,
+mechanical subtasks to a locally-hosted model.
+
+```
+Claude / any MCP client
+  └─ MCP tool "delegate_to_local_model" ──► index.mjs (Node/stdio)
+        └─ POST /v1/chat/completions ──► llama-server, router mode (local-copilot-stack)
+```
+
+This is **only the delegation client** — it does not run or manage any model. It expects an
+OpenAI-compatible endpoint (default `http://localhost:8080`) in router mode, as set up by the
+separate [`local-copilot-stack`](../local-copilot-stack). If that is not running, tool calls fail
+with a clear "could not reach the local model" error.
+
+### What it measured
+
+Across six measured rounds, only one showed a real saving (−65%); the rest ran +118% to +257% *more*
+expensive than doing the work directly. The dominant factor was not spec quality or model choice —
+the calling model **paid for the artifact twice**, once writing the spec and again transcribing the
+result into its own `Write` call. That second payment is exactly the do-it-yourself baseline, which
+caps savings near zero however good the rest of the delegation is. `output_files` exists to remove
+it: the server writes the files, and the caller reads them back to review.
+
+Two further measured results worth keeping:
+
+- **Bigger and newer lost.** Qwen3.5-9B and Gemma 4 12B both lost to the 7B, decided by a reasoning
+  phase burning the token budget before producing output. Qwen3-8B with reasoning *off* tied the
+  7B almost exactly. Benchmark a candidate (`bench/run-benchmark.mjs`) rather than assuming size
+  predicts anything.
+- **The same validation-gate bug appeared in five independent generations across four models** —
+  an optional field's validation copying the required-field gate. That is a standing review
+  checkpoint for this task shape, not a model-quality signal.
+
+### The size gate and the ledger
+
+`expected_output_lines` is required, and calls under **150 lines** (300 when `context_files` were
+authored for the call) are refused before the local model is contacted. This is enforcement rather
+than advice because advice was tried and observably failed: the `context_files` cost lesson was
+written into this repo's docs after one round and violated in the very next one.
+
+**The gate cannot make the spec cheap.** By the time the tool is invoked the caller has already
+spent the tokens writing `task`; a refusal is a lesson for the next call, not a save on this one.
+`acknowledge_small_task` is the escape hatch and takes a written reason rather than a boolean.
+
+Every call is appended to `~/Library/Application Support/local-delegate-mcp/ledger.json`, which
+flags estimate miscalibration, three-plus small calls inside ten minutes, and a ≥30% losing rate
+over the last ten delegations. It speaks up only when something fires, so silence is meaningful.
+
+---
+
+## Security & guardrails
+
+- **Environment sanitization.** At startup the server keeps only `PATH`, `HOME`, `LOCAL_LLM_URL`,
+  `FAST_MODEL_ALIAS`, `CAPABLE_MODEL_ALIAS` and `CONTEXT_ROOT`, deleting everything else, so it
+  never inherits secrets from whatever spawned it.
+- **Credential scanning.** `task`, `system_prompt` and `context_files` content are scanned for
+  credential-shaped content and the call is refused on a match. The agent loop's `write_file`
+  handler uses `secret-guard`'s scanner as a *library* rather than over MCP, so the check runs
+  inside the synchronous write handler and the bytes never reach disk — a secret caught there never
+  enters git history, so there is nothing to rotate.
+- **Read and write containment.** `context_files` and `output_files` paths must resolve inside
+  `CONTEXT_ROOT`, with a sensitive-filename denylist on both. For writes the caller declares the
+  allowed paths up front and the model's own emitted paths are checked against that list — the
+  model never chooses where bytes land. Existing files need `allow_overwrite`, and all paths are
+  validated before any file is written.
+- **Advisory output only.** The local model returns text; nothing is executed on its behalf.
+  `output_files` writing text to disk is not running it, but unreviewed output can land in your
+  tree. Read the files back.
+- **The local model is never given internet access.** It has no instruction-hierarchy training, so
+  fetched content would become a second, less reviewable injection surface. When a task depends on
+  a versioned external interface, the *orchestrator* verifies it and passes the result through
+  `context_files`.
+
+---
+
+## Setup
+
+```bash
+npm install
+npm test          # unit tests
+npm run corpus    # regression corpus (needs the scanners above)
+```
+
+No build step. Registered as an MCP server via:
+
+```json
+{ "command": "node", "args": ["/absolute/path/to/local-delegate-mcp/index.mjs"] }
+```
+
+Optional environment variables: `LOCAL_LLM_URL`, `FAST_MODEL_ALIAS`, `CAPABLE_MODEL_ALIAS`,
+`CONTEXT_ROOT`.
+
+## Status
+
+The control set is the active half. The four guard servers are public and installable, the gate
+runs as a CLI and as a GitHub Action, and the corpus guards it against regression. Unit tests pass
+on Node 20, 22 and 24; the corpus passes locally on all eleven fixtures.
+
+Known open items, none of them silent:
+
+- The corpus does not yet pass end-to-end on Linux CI. The remaining differences are environmental
+  and are listed in `docs/ci.md`: `go build` inside a container over a bind-mounted git repository
+  fails VCS stamping, and `check_dependencies` finds fewer vulnerabilities on CI than locally.
+- `build_check` reports a *missing tool* as though it were a code defect — an absent `ruff` yields
+  "python STATIC ERRORS", which counts as blocking. That is a false positive in a blocking gate,
+  and the Go branch has the mirror-image bug, treating an unavailable toolchain as a pass.
+- The corpus manifest records the date it was measured but not the toolchain that measured it.

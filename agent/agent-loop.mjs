@@ -191,12 +191,56 @@ function containedPath(projectDir, rel) {
 // Paths that are build output, not work. The gate below ignores them when deciding whether the
 // tree is dirty, and the baseline .gitignore keeps them out of commits.
 //
+/**
+ * The directory holding the pre-commit hook, or null. Exported so the not-found branch is testable
+ * without deleting a checkout other work depends on -- that branch is the one that was wrong.
+ */
+export function resolveHooksDir(fromDir = __dirname, { env = process.env } = {}) {
+  const dir =
+    env.AGENT_GATE_HOOKS_PATH ||
+    path.join(path.resolve(fromDir, "..", ".."), "local-copilot-stack", "githooks");
+  return existsSync(path.join(dir, "pre-commit")) ? dir : null;
+}
+
+/**
+ * Where secret-guard's scanner library is, or null. Installed package first, then SECRETGUARD_LIB,
+ * then a sibling checkout. Exported for the same reason as resolveHooksDir.
+ */
+export function resolveSecretScannerEntry(fromDir = __dirname, { resolver, env = process.env } = {}) {
+  if (env.SECRETGUARD_LIB) return existsSync(env.SECRETGUARD_LIB) ? env.SECRETGUARD_LIB : null;
+  const require = resolver || createRequire(import.meta.url);
+  for (const spec of ["@tjwitko/secret-guard-mcp/lib/gitleaks.mjs", "secret-guard-mcp/lib/gitleaks.mjs"]) {
+    try {
+      return require.resolve(spec);
+    } catch {
+      /* not installed under that specifier */
+    }
+  }
+  const sibling = path.join(path.resolve(fromDir, "..", ".."), "secret-guard-mcp", "lib", "gitleaks.mjs");
+  return existsSync(sibling) ? sibling : null;
+}
+
 function protectRepo(projectDir) {
   const inRepo = spawnSync("git", ["rev-parse", "--is-inside-work-tree"], { cwd: projectDir, encoding: "utf8" });
   if (inRepo.status !== 0) return null;
 
-  const hooksDir = path.join(path.resolve(__dirname, "..", ".."), "local-copilot-stack", "githooks");
-  if (!existsSync(path.join(hooksDir, "pre-commit"))) return null;
+  // The hook belongs to local-copilot-stack, which is not a dependency of this package and cannot
+  // be, so a sibling checkout is a legitimate way to find it -- unlike the census and the lockfile
+  // list, which had installable homes. What was not legitimate was returning null in silence: the
+  // hook is the only enforcement boundary that survives outside this loop, the loop's own gate is
+  // a SUBSET of what it runs, and on any machine without that checkout commits were landing
+  // unvalidated with nothing anywhere saying so. AGENT_GATE_HOOKS_PATH names it elsewhere.
+  const hooksDir = resolveHooksDir();
+  if (!hooksDir) {
+    console.warn(
+      `[loop] NO COMMIT HOOK: no pre-commit hook at ${hooksDir}, so commits in this project are ` +
+        `NOT validated by the full check set. This loop's own gate is a subset of it — the ` +
+        `workload-identity scan and terraform-guard's source scan run only at commit time. Set ` +
+        `AGENT_GATE_HOOKS_PATH to a directory holding a pre-commit hook, or check out ` +
+        `local-copilot-stack beside this repository.`
+    );
+    return null;
+  }
 
   const existing = spawnSync("git", ["config", "--get", "core.hooksPath"], { cwd: projectDir, encoding: "utf8" });
   const current = (existing.stdout || "").trim();
@@ -218,10 +262,22 @@ function protectRepo(projectDir) {
 // unguarded, with a warning — if the sibling repo or the gitleaks binary is absent, because a
 // missing optional scanner should not take a run down.
 async function loadSecretScanner() {
-  const entry =
-    process.env.SECRETGUARD_LIB ||
-    path.join(path.resolve(__dirname, "..", ".."), "secret-guard-mcp", "lib", "gitleaks.mjs");
-  if (!existsSync(entry)) return null;
+  // secret-guard is a declared dependency now, so the installed package is the normal answer and
+  // the sibling checkout is the development one. It used to be the sibling alone: absent, this
+  // returned null and every write went unscanned, on every machine but one.
+  const entry = resolveSecretScannerEntry();
+  if (!entry) {
+    // Not fatal: the gate still runs scan_path across the whole tree afterwards, so this is the
+    // inner of two layers. It is said out loud anyway, because the layer that is missing is the
+    // one that stops a credential reaching disk at all -- and a secret caught only by the later
+    // scan is already in the working tree and may already be committed.
+    console.warn(
+      "[loop] WRITES UNGUARDED: secret-guard's scanner could not be resolved from node_modules, " +
+        "SECRETGUARD_LIB or a sibling checkout, so file writes are NOT scanned for credentials " +
+        "before they reach disk. The whole-tree scan still runs at validation time."
+    );
+    return null;
+  }
   try {
     const mod = await import(pathToFileURL(entry).href);
     if (!mod.checkGitleaksInstalled()) {

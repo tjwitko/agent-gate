@@ -11,6 +11,7 @@
 
 import { spawn, spawnSync } from "child_process";
 import { createHash } from "crypto";
+import { createRequire } from "module";
 import http from "http";
 import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync, unlinkSync } from "fs";
 import path from "path";
@@ -1093,14 +1094,50 @@ function checkovAdvisory(dir, projectDir) {
   );
 }
 
+/**
+ * The census belongs to terraform-guard, so the loop and the tool share one definition of what
+ * went missing rather than two that can disagree.
+ *
+ * Resolved the way the controls themselves are resolved -- an installed package first, the sibling
+ * checkout second -- because it used to be the sibling path alone, and returned an empty list when
+ * that directory was not there. Empty means "nothing went missing", so on every machine without
+ * that checkout the census reported a clean result it had never computed. Same defect as
+ * lockfilePresent, one severity lower only because this check is advisory.
+ *
+ * Returns { removals, unavailable }. `unavailable` is a string when the census could not run at
+ * all, and that is reported rather than being rendered as an empty census.
+ */
+/**
+ * Where the census module is, or null. Separated and exported so the not-found branch can be
+ * tested: it is the branch that was wrong, and reproducing it in place would mean deleting a
+ * sibling checkout that other work in this tree depends on.
+ */
+export function resolveCensusEntry(fromDir = __dirname, { resolver } = {}) {
+  const require = resolver || createRequire(import.meta.url);
+  for (const spec of [
+    "@tjwitko/terraform-guard-mcp/lib/resource-census.mjs",
+    "terraform-guard-mcp/lib/resource-census.mjs",
+  ]) {
+    try {
+      return require.resolve(spec);
+    } catch {
+      /* not installed under that specifier */
+    }
+  }
+  const sibling = path.join(path.resolve(fromDir, "..", ".."), "terraform-guard-mcp", "lib", "resource-census.mjs");
+  return existsSync(sibling) ? sibling : null;
+}
+
 async function pendingResourceRemovals(dir) {
-  const entry = path.join(path.resolve(__dirname, "..", ".."), "terraform-guard-mcp", "lib", "resource-census.mjs");
-  if (!existsSync(entry)) return [];
+  const entry = resolveCensusEntry();
+  if (!entry) {
+    return { removals: [], unavailable: "terraform-guard's resource census could not be resolved from node_modules or a sibling checkout" };
+  }
   try {
     const { pendingRemovals } = await import(pathToFileURL(entry).href);
-    return [...pendingRemovals(dir)];
-  } catch {
-    return [];
+    return { removals: [...pendingRemovals(dir)] };
+  } catch (err) {
+    return { removals: [], unavailable: `terraform-guard's resource census could not be loaded — ${err && err.message}` };
   }
 }
 
@@ -1483,15 +1520,27 @@ export async function validateProject(projectDir, toolRegistry, taskText = "") {
       ran.push(`checkov(${path.relative(projectDir, dir) || "."})`);
     }
 
-    const pending = await pendingResourceRemovals(dir);
-    if (pending.length) {
-      const rel = path.relative(projectDir, dir) || ".";
-      advisories.push(
-        `resource census (${rel}): these resources were declared earlier in this run and are now ` +
-          `gone: ${pending.join(", ")}. Renaming a resource looks identical to deleting one here, ` +
-          `so this is a question, not a verdict — check whether each was replaced or simply lost.`
-      );
+    const census = await pendingResourceRemovals(dir);
+    const rel = path.relative(projectDir, dir) || ".";
+    if (census.unavailable) {
+      // Reported once, however many Terraform roots there are: the reason is the same for all of
+      // them and repeating it buries the rest of the report.
+      if (!couldNotRun.some((c) => c.startsWith("resource_census:"))) {
+        couldNotRun.push(`resource_census: ${census.unavailable}`);
+      }
+    } else {
+      // Recorded whether or not anything was found. It used to be pushed only when there WERE
+      // removals, so a census that ran and found nothing was absent from the validators-run list
+      // in exactly the same way as one that never ran -- and `provides` is checked against that
+      // list.
       ran.push(`resource_census(${rel})`);
+      if (census.removals.length) {
+        advisories.push(
+          `resource census (${rel}): these resources were declared earlier in this run and are now ` +
+            `gone: ${census.removals.join(", ")}. Renaming a resource looks identical to deleting one here, ` +
+            `so this is a question, not a verdict — check whether each was replaced or simply lost.`
+        );
+      }
     }
   }
 

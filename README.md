@@ -290,13 +290,18 @@ runs as a CLI and as a GitHub Action, and the corpus guards it against regressio
 on Node 20, 22 and 24; the corpus passes locally on all eleven fixtures.
 
 A check that cannot run now says so everywhere it can happen: an unreachable MCP control, a control
-that connected and was never called, and — since `build_check` learned the difference — a checker
-whose toolchain is missing. All three route to exit 3 rather than to a finding or a pass.
+that connected and was never called, a checker whose toolchain is missing, a suite killed on a
+timeout, and a check that crashed. All of them route to exit 3 rather than to a finding or a pass.
 
-Known open items, none of them silent, all recorded in [`docs/ci.md`](docs/ci.md):
+The sharpest demonstration came from the corpus itself. Three Go deliverables carried a clean
+`tests` verdict measured on a machine with no Go toolchain; their suites had never compiled, and
+only a run on a machine that had Go could see it. The check had behaved correctly the whole time —
+it reported NOT EXECUTED as an advisory — and the corpus froze that non-answer as the answer.
+Saying "I could not check this" is not enough on its own; something downstream has to act on it.
+So `--update` now refuses to freeze an incomplete run, and the manifest records the toolchain that
+measured it, where a `null` means that language's checks could not run at all.
 
-- `check_dependencies` finds fewer vulnerabilities on Linux CI than locally, on two fixtures, and
-  the cause is not established. The first thing to rule out is `dep-audit-mcp` reporting zero
-  findings when it cannot reach the vulnerability database, which would be a silent pass inside the
-  control set.
-- The corpus manifest records the date it was measured but not the toolchain that measured it.
+One open item, recorded in [`docs/ci.md`](docs/ci.md): `check_dependencies` finds fewer
+vulnerabilities on Linux CI than locally, on two fixtures, and the cause is not established. The
+first thing to rule out is `dep-audit-mcp` reporting zero findings when it cannot reach the
+vulnerability database, which would be a silent pass inside the control set.

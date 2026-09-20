@@ -131,6 +131,21 @@ that ran but could not reach the vulnerability database would report zero findin
 reporting a problem -- which would be the silent pass this control set exists to remove, in the
 control set itself.
 
-**Open: the manifest records when it was measured, not with what.** `corpus/manifest.json` carries a
-`measured` date but no toolchain. The scanner versions are pinned in the workflow, which is where
-the coupling currently lives; nothing checks that a corpus run is using them.
+**Fixed: the manifest recorded when it was measured, not with what.** `corpus/manifest.json` now
+carries the toolchain -- node, go, terraform, gitleaks, osv-scanner, checkov, python3, ruff, docker
+-- and a checking run reports any difference from it before printing a verdict. A `null` is the
+informative value: it means the corpus was derived somewhere that could not run that language's
+checks at all.
+
+That gap hid a real defect. Three Go deliverables (`webhook-haiku-6`, `-7`, `-8`) carried a clean
+`tests` verdict recorded on a machine with no Go toolchain. Their suites had never compiled --
+unused imports and unused variables are compile errors in Go -- and only a run on a machine that
+had Go could see it. The check behaved correctly throughout: it reported NOT EXECUTED as an
+advisory. The corpus froze the non-answer as the answer.
+
+Two changes close it. A check prevented from measuring anything -- absent toolchain, a runner that
+will not start, a suite killed on a timeout, or a check that crashed -- now reports `COULD NOT RUN`
+and makes the run incomplete, without blaming the project. And `--update` refuses to freeze an
+incomplete run: it keeps the previous expectations, marks the entry `unmeasured`, and exits 3. A
+checking run reports such entries and compares nothing for them, because matching an expectation
+nobody measured confirms nothing.

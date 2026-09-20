@@ -245,3 +245,50 @@ test("a runner that could not start is advisory, not blocking", () => {
   assert.equal(r.failures.length, 0);
   assert.match(r.advisories[0], /NOT EXECUTED/);
 });
+
+// The distinction the Go fixtures exposed. A suite that could not be started produced an advisory
+// and nothing else, so the run still exited clean and the corpus froze that as the verdict. Three
+// deliverables recorded passing tests on a machine with no Go toolchain; their suites had never
+// compiled. Not blocking -- the project is not at fault for this machine -- but not a pass either.
+test("a suite that could not be started makes the run incomplete", () => {
+  const r = verdictFor({
+    ran: false,
+    environmental: true,
+    unavailable: "go test could not be started (spawn go ENOENT)",
+  });
+  assert.equal(r.failures.length, 0, "the project is not at fault for a missing toolchain");
+  assert.equal(r.couldNotRun.length, 1, "but the run did not measure anything");
+  assert.match(r.couldNotRun[0], /could not be started/);
+});
+
+test("a timed-out suite is also unmeasured rather than clean", () => {
+  const r = verdictFor({
+    ran: false,
+    environmental: true,
+    timedOut: true,
+    unavailable: "node --test did not finish within 120s and was killed",
+  });
+  assert.equal(r.failures.length, 0);
+  assert.equal(r.couldNotRun.length, 1);
+});
+
+// The other side: nothing was prevented from running, so nothing is unmeasured. A project with no
+// test files has an answer -- it has no tests -- and calling that "could not run" would make every
+// such project incomplete forever.
+test("having no tests is an answer, not a failure to measure", () => {
+  const r = verdictFor({ ran: false, unavailable: "no test files were found" });
+  assert.equal(r.failures.length, 0);
+  assert.ok(!r.couldNotRun || r.couldNotRun.length === 0);
+});
+
+// A runner the project declares and did not install stays blocking: that is the deliverable's own
+// claim failing, not a fact about the machine.
+test("a declared runner that is not installed still blocks", () => {
+  const r = verdictFor({
+    ran: false,
+    declaredRunnerMissing: true,
+    unavailable: "the suite is written for jest, which this project declares and did not install",
+  });
+  assert.equal(r.failures.length, 1);
+  assert.ok(!r.couldNotRun || r.couldNotRun.length === 0);
+});

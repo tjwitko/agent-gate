@@ -11,7 +11,7 @@
 // starts over-firing, and this project has shipped both: false positives that made a model rewrite
 // working code, and a check that sat unspawned through ten graded runs while a similarly-named one
 // ran beside it.
-import { execFileSync } from "child_process";
+import { execFileSync, spawnSync } from "child_process";
 import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
@@ -97,12 +97,71 @@ process.on("exit", () => { if (extracted) rmSync(extracted, { recursive: true, f
 // skipped the scratch copy and the git init, and every fixture read as drifted.
 const UPDATE = process.argv.includes("--update");
 
+// What measured these numbers, not just when. The manifest recorded a `measured` date and nothing
+// else, and that gap hid a real defect for three fixtures: this machine had no Go toolchain, so
+// `go test` never ran, the tests check reported NOT EXECUTED as an advisory, and the corpus froze
+// that non-answer as the expected verdict. Their suites had never compiled. A run on a machine
+// that HAD Go found it immediately -- and read as a regression in the control rather than as the
+// deliverable defect it was.
+//
+// A null here is the interesting value, not a missing one: it means the corpus was derived on a
+// machine that could not run that language's checks at all.
+function toolchain() {
+  const probe = (cmd, args, re) => {
+    const r = spawnSync(cmd, args, { encoding: "utf8" });
+    if (r.error || r.status === null) return null;
+    const m = re.exec(`${r.stdout || ""}${r.stderr || ""}`);
+    return m ? m[1] : null;
+  };
+  return {
+    node: process.version.replace(/^v/, ""),
+    go: probe("go", ["version"], /go(\d+\.\d+(?:\.\d+)?)/),
+    terraform: probe("terraform", ["version"], /Terraform v(\d+\.\d+\.\d+)/),
+    gitleaks: probe("gitleaks", ["version"], /(\d+\.\d+\.\d+)/),
+    "osv-scanner": probe("osv-scanner", ["--version"], /(\d+\.\d+\.\d+)/),
+    checkov: probe("checkov", ["--version"], /(\d+\.\d+\.\d+)/),
+    python3: probe("python3", ["--version"], /(\d+\.\d+\.\d+)/),
+    ruff: probe("ruff", ["--version"], /(\d+\.\d+\.\d+)/),
+    docker: probe("docker", ["--version"], /(\d+\.\d+\.\d+)/),
+  };
+}
+
+/** Differences between the toolchain that measured the manifest and the one running now. */
+function toolchainDrift(recorded, current) {
+  if (!recorded) return [];
+  const out = [];
+  for (const [name, was] of Object.entries(recorded)) {
+    const now = current[name] ?? null;
+    if (was === now) continue;
+    if (was && !now) out.push(`${name}: recorded ${was}, ABSENT here — checks needing it cannot run`);
+    else if (!was && now) out.push(`${name}: absent when recorded, ${now} here — checks that never ran then will run now`);
+    else out.push(`${name}: recorded ${was}, ${now} here`);
+  }
+  return out;
+}
+
+
 const manifestPath = path.join(__dirname, "manifest.json");
 const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
 console.log(`corpus: ${manifest.entries.length} deliverables${UPDATE ? " — RE-DERIVING expected values" : `, verdicts measured ${manifest.measured}`}\n`);
 
+const CURRENT_TOOLCHAIN = toolchain();
+if (!UPDATE) {
+  const drift = toolchainDrift(manifest.toolchain, CURRENT_TOOLCHAIN);
+  if (drift.length) {
+    console.log(`  the toolchain differs from the one that measured these verdicts:`);
+    for (const d of drift) console.log(`    ${d}`);
+    console.log(`  counts are compared against scanners, not against source alone, so a difference`);
+    console.log(`  here can look exactly like a control that changed behaviour.\n`);
+  }
+  if (!manifest.toolchain) {
+    console.log(`  this manifest records no toolchain, so nothing can be said about what measured it.\n`);
+  }
+}
+
 let failed = 0;
 let missing = 0;
+let unmeasured = 0;
 for (const entry of manifest.entries) {
   // Relative to the repository root, not to corpus/ — the fixtures are siblings of the repo.
   // From the archive the fixtures sit at their bare names; from a directory they sit where the
@@ -139,6 +198,22 @@ for (const entry of manifest.entries) {
   const counts = {};
   for (const f of r.findings) counts[findingId(f.message)] = (counts[findingId(f.message)] || 0) + 1;
   if (UPDATE) {
+    // An incomplete run measured nothing worth freezing. Recording it anyway is how three Go
+    // fixtures came to carry a clean `tests` verdict from a machine with no Go toolchain: the
+    // check honestly said NOT EXECUTED, and the corpus wrote that down as the answer. Expectations
+    // are left exactly as they were and the entry is marked, so the gap is visible on every run
+    // instead of looking like a measurement.
+    if (r.incomplete) {
+      entry.unmeasured = {
+        on: new Date().toISOString().slice(0, 10),
+        why: (r.couldNotRun || []).concat((r.unreachable || []).map((u) => `${u.name}: ${u.why}`)),
+      };
+      console.log(`  SKIPPED  ${entry.name} — the run was INCOMPLETE, expectations left unchanged`);
+      for (const w of entry.unmeasured.why) console.log(`      ${w}`);
+      unmeasured++;
+      continue;
+    }
+    delete entry.unmeasured;
     const wasBlocking = entry.expectedBlocking;
     entry.expectedBlocking = r.blocking;
     entry.expectedFindings = Object.fromEntries(Object.entries(counts).sort());
@@ -167,6 +242,18 @@ for (const entry of manifest.entries) {
   }
 
   const drift = diffCounts(entry.expectedFindings, counts);
+
+  // Expectations that were never measured are not a baseline, so there is nothing to compare
+  // against and no verdict to print. This returns rather than falling through deliberately: the
+  // first version printed UNMEASURED and then `ok (0 blocking)` for the same fixture, one line
+  // apart, which is the mixed message the whole exercise is about.
+  if (entry.unmeasured) {
+    console.log(`  UNMEASURED ${entry.name} — its expectations were never measured (${entry.unmeasured.on})`);
+    for (const w of entry.unmeasured.why) console.log(`      ${w}`);
+    console.log(`      Nothing is compared for this fixture; matching it would confirm nothing.`);
+    unmeasured++;
+    continue;
+  }
 
   // A control that could not run makes the verdict meaningless, so it fails regardless of counts.
   if (r.incomplete) {
@@ -201,8 +288,19 @@ for (const entry of manifest.entries) {
 
 if (UPDATE) {
   manifest.measured = new Date().toISOString().slice(0, 10);
+  manifest.toolchain = CURRENT_TOOLCHAIN;
   writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
-  console.log(`\nre-derived ${manifest.entries.length} verdicts into corpus/manifest.json`);
+  const absent = Object.entries(CURRENT_TOOLCHAIN).filter(([, v]) => v === null).map(([k]) => k);
+  console.log(`\nre-derived ${manifest.entries.length - unmeasured} verdicts into corpus/manifest.json`);
+  if (absent.length) {
+    console.log(`  NOT INSTALLED HERE: ${absent.join(", ")} — any check needing one of these measured nothing.`);
+  }
+  if (unmeasured) {
+    // Exit 3, matching the gate: part of this did not run. A re-derive that silently left some
+    // entries un-re-derived would be the same defect one level up.
+    console.log(`  ${unmeasured} entry(s) were SKIPPED as incomplete and keep their previous expectations.`);
+    process.exit(3);
+  }
   process.exit(0);
 }
 
@@ -217,6 +315,12 @@ if (missing) {
   console.log(`${missing} of ${manifest.entries.length} fixture(s) are not present — THE CORPUS DID NOT RUN.`);
   console.log(`Set CORPUS_FIXTURES to the directory holding them, or check them out beside this repo.`);
   console.log(`This is not a pass: nothing was verified about the ${missing} that are missing.`);
+  process.exit(3);
+}
+if (unmeasured) {
+  console.log(`${unmeasured} deliverable(s) carry expectations that were never measured.`);
+  console.log("Those are not a baseline, and a run that matches them has confirmed nothing.");
+  console.log("Re-derive on a machine that has the toolchain they need.");
   process.exit(3);
 }
 if (failed) {

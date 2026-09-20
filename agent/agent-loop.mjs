@@ -1189,9 +1189,16 @@ export async function validateProject(projectDir, toolRegistry, taskText = "") {
     try {
       const out = fn();
       ran.push(name);
+      // A check that ran but could not measure anything reports that upward rather than leaving an
+      // advisory to be totalled up by a reader who will not total it up.
+      for (const why of out?.couldNotRun ?? []) couldNotRun.push(`${name}: ${why}`);
       return { failures: out?.failures ?? [], advisories: out?.advisories ?? [] };
     } catch (err) {
       ran.push(`${name}(CRASHED)`);
+      // The advisory below already says "do not read its silence as a pass" -- and then the exit
+      // code read it as a pass anyway, because nothing carried it. A crashed check covers whatever
+      // it covers exactly as little as a control that never started.
+      couldNotRun.push(`${name}: the check itself crashed and did not run — ${err && err.message}`);
       return {
         failures: [],
         advisories: [

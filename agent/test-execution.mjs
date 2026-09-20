@@ -89,7 +89,9 @@ export function detectSuite(projectDir) {
 
   if (testFiles.some((f) => f.rel.endsWith(".py"))) {
     const probe = spawnSync("python3", ["-m", "pytest", "--version"], { cwd: projectDir, encoding: "utf8" });
-    if (probe.status !== 0) return { unavailable: "the tests are Python and pytest is not installed here" };
+    if (probe.status !== 0) {
+      return { environmental: true, unavailable: "the tests are Python and pytest is not installed here" };
+    }
     return { label: "pytest", cmd: "python3", args: ["-m", "pytest", "-q"], cwd: projectDir };
   }
 
@@ -186,7 +188,12 @@ export const failingNamesForTest = failingNames;
 export function runTests(projectDir, { timeoutMs = TIMEOUT_MS } = {}) {
   const suite = detectSuite(projectDir);
   if (suite.unavailable) {
-    return { ran: false, unavailable: suite.unavailable, declaredRunnerMissing: !!suite.declaredRunnerMissing };
+    return {
+      ran: false,
+      unavailable: suite.unavailable,
+      declaredRunnerMissing: !!suite.declaredRunnerMissing,
+      environmental: !!suite.environmental,
+    };
   }
 
   const r = spawnSync(suite.cmd, suite.args, {
@@ -209,10 +216,10 @@ export function runTests(projectDir, { timeoutMs = TIMEOUT_MS } = {}) {
 
   const output = `${r.stdout || ""}\n${r.stderr || ""}`;
   if (r.error && r.error.code === "ENOENT") {
-    return { ran: false, unavailable: `${suite.label} could not be started (${r.error.message})` };
+    return { ran: false, environmental: true, unavailable: `${suite.label} could not be started (${r.error.message})` };
   }
   if (r.signal || (r.error && /timed? ?out/i.test(r.error.message || ""))) {
-    return { ran: false, timedOut: true, label: suite.label, unavailable: `${suite.label} did not finish within ${timeoutMs / 1000}s and was killed` };
+    return { ran: false, timedOut: true, environmental: true, label: suite.label, unavailable: `${suite.label} did not finish within ${timeoutMs / 1000}s and was killed` };
   }
 
   return {
@@ -247,10 +254,23 @@ export function verdictFor(r) {
       `tests: NOT EXECUTED — ${r.unavailable}. Test files existing is not evidence that they pass, ` +
       `and the task asks for tests someone else can run.`;
     // A runner the project itself declared and did not install is the project's claim failing, so
-    // it blocks. Everything else here -- no pytest on this machine, a timeout, no runner
-    // identifiable at all -- is a fact about the environment, and blocking on those would fail work
-    // that may be correct.
-    return r.declaredRunnerMissing ? { failures: [line], advisories: [] } : { failures: [], advisories: [line] };
+    // it blocks. Everything else stays out of the findings, because blocking on a fact about this
+    // machine would fail work that may be correct -- which is how a gate gets switched off.
+    if (r.declaredRunnerMissing) return { failures: [line], advisories: [] };
+
+    // But "not blocking" is not "fine". A suite that could not be started, or was killed on a
+    // timeout, produced no verdict at all, and an advisory saying so sits in a list nobody totals
+    // up. It is reported as a check that could not run, which makes the RUN incomplete without
+    // making the PROJECT at fault -- the same standing as a control that could not be reached.
+    //
+    // This was not academic: three Go deliverables recorded a clean `tests` verdict on a machine
+    // with no Go toolchain, and their suites had never compiled. The corpus froze the non-answer
+    // as the answer, and only a run on a machine that HAD Go found the defect.
+    if (r.environmental) return { failures: [], advisories: [line], couldNotRun: [r.unavailable] };
+
+    // Everything left is a fact about the project, not the machine: no test files, no identifiable
+    // runner, an unparseable manifest. Nothing was prevented from running.
+    return { failures: [], advisories: [line] };
   }
 
   const c = r.counts;

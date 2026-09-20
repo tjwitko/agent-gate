@@ -1,5 +1,5 @@
 {
-  "measured": "2026-09-12",
+  "measured": "2026-09-20",
   "note": "Ten graded deliverables vendored as fixtures. webhook-haiku-5 and webhook-haiku-9 are excluded: both hold uncommitted work and look mid-run, so their verdicts are not stable ground truth. Expected values are derived from the VENDORED copies, which is what the corpus runs against; where that differs from the as-delivered grade, the entry says so and why.",
   "entries": [
     {
@@ -114,43 +114,46 @@
       "name": "webhook-haiku-6",
       "path": "corpus/fixtures/webhook-haiku-6",
       "taskFile": "agent/fixtures/webhook-receiver-task.txt",
-      "expectedBlocking": 6,
+      "expectedBlocking": 7,
       "expectedFindings": {
         "check_dependencies": 1,
+        "tests": 1,
         "workload identity": 5
       },
       "upstreamHead": "68a078c60c66",
       "digest": "7c7115f37424d7be",
       "upstream": "../webhook-haiku-6",
-      "asDelivered": 6,
+      "asDelivered": 7,
       "asDeliveredMeasured": "against the original deliverable, same gate"
     },
     {
       "name": "webhook-haiku-7",
       "path": "corpus/fixtures/webhook-haiku-7",
       "taskFile": "agent/fixtures/webhook-receiver-task.txt",
-      "expectedBlocking": 1,
+      "expectedBlocking": 2,
       "expectedFindings": {
+        "tests": 1,
         "workload identity": 1
       },
       "upstreamHead": "a5cc5f4797da",
       "digest": "a4bcaa7101adbccf",
       "upstream": "../webhook-haiku-7",
-      "asDelivered": 1,
+      "asDelivered": 2,
       "asDeliveredMeasured": "against the original deliverable, same gate"
     },
     {
       "name": "webhook-haiku-8",
       "path": "corpus/fixtures/webhook-haiku-8",
       "taskFile": "agent/fixtures/webhook-receiver-task.txt",
-      "expectedBlocking": 2,
+      "expectedBlocking": 3,
       "expectedFindings": {
+        "tests": 1,
         "workload identity": 2
       },
       "upstreamHead": "902418a005da",
       "digest": "9f19819a103cfed6",
       "upstream": "../webhook-haiku-8",
-      "asDelivered": 2,
+      "asDelivered": 3,
       "asDeliveredMeasured": "against the original deliverable, same gate"
     },
     {
@@ -180,5 +183,16 @@
   "archive": {
     "file": "corpus/fixtures.tar.gz",
     "digest": "964b21bbb3d44ec9"
+  },
+  "toolchain": {
+    "node": "26.5.1",
+    "go": "1.27.1",
+    "terraform": "1.15.8",
+    "gitleaks": "8.30.1",
+    "osv-scanner": "2.4.0",
+    "checkov": "3.3.10",
+    "python3": "3.14.6",
+    "ruff": "0.16.2",
+    "docker": "29.6.2"
   }
 }

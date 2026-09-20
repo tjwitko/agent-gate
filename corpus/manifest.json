@@ -1,6 +1,6 @@
 {
   "measured": "2026-09-20",
-  "note": "Ten graded deliverables vendored as fixtures. webhook-haiku-5 and webhook-haiku-9 are excluded: both hold uncommitted work and look mid-run, so their verdicts are not stable ground truth. Expected values are derived from the VENDORED copies, which is what the corpus runs against; where that differs from the as-delivered grade, the entry says so and why.",
+  "note": "Eleven graded deliverables vendored as fixtures. webhook-haiku-5 and webhook-haiku-9 are excluded: both hold uncommitted work and look mid-run, so their verdicts are not stable ground truth. Expected values are derived from the VENDORED copies, which is what the corpus runs against; where that differs from the as-delivered grade, the entry says so and why.",
   "entries": [
     {
       "name": "webhook-claude",

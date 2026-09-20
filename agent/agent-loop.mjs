@@ -247,6 +247,25 @@ const GUARD_CONFIG_FILES = [
   ".identity-exception",
 ];
 
+// The marker build_check uses to say a checker did not run, and the only thing that reads it.
+// Emitter and detector share this constant rather than agreeing on a spelling, because the whole
+// class of defect it exists to fix was a check whose outcome was inferred from the wording of a
+// message. "Could not run" is neither a finding nor a pass: a blocking gate that fabricates
+// defects from a missing binary destroys correct work, and one that reads an unavailable
+// toolchain as success is the silent pass this control set exists to remove. Both were live here
+// at the same time -- an absent `ruff` produced blocking "STATIC ERRORS" against code it never
+// read, while an absent Go toolchain produced a sentence matching no blocking pattern, so it
+// passed. It routes to the same exit-3 path as an unreachable MCP control.
+export const UNAVAILABLE = "COULD NOT RUN";
+
+/** The `COULD NOT RUN` lines in a build_check result, if any. */
+export function unavailableCheckers(buildCheckOutput) {
+  return String(buildCheckOutput)
+    .split("\n")
+    .filter((line) => line.startsWith(`${UNAVAILABLE}:`))
+    .map((line) => line.slice(`${UNAVAILABLE}:`.length).trim());
+}
+
 export function localTools(projectDir, secretScanner) {
   // A rejected commit returns the hook's full report, which is what makes it actionable the first
   // time and a context sink every time after. One run burned its entire window on 13 consecutive
@@ -435,17 +454,32 @@ export function localTools(projectDir, secretScanner) {
           // Two passes: py_compile catches syntax errors; ruff's F rules catch undefined names and
           // bad imports — the Python analogue of a compile error, which syntax checking alone misses.
           const compile = spawnSync("python3", ["-m", "py_compile", ...py], { encoding: "utf8" });
-          results.push(
-            compile.status === 0
-              ? `python syntax: OK (${py.length} files)`
-              : `python SYNTAX ERRORS:\n${(compile.stderr || "").slice(0, 1500)}`
-          );
+          if (compile.error || compile.status === null) {
+            results.push(`${UNAVAILABLE}: python3 is not installed or not on PATH, so ${py.length} Python file(s) were not syntax-checked.`);
+          } else {
+            results.push(
+              compile.status === 0
+                ? `python syntax: OK (${py.length} files)`
+                : `python SYNTAX ERRORS:\n${(compile.stderr || "").slice(0, 1500)}`
+            );
+          }
+
+          // ruff exits 1 for findings and 2 for its own errors, so the two are distinguished by
+          // exit status rather than by reading the message. Before this, a machine without ruff
+          // produced `status: null`, which is not 0, and the gate reported an empty list of
+          // "STATIC ERRORS" as a blocking finding against code it had never looked at.
           const ruff = spawnSync("ruff", ["check", "--select", "F", "--no-cache", projectDir], { encoding: "utf8" });
-          results.push(
-            ruff.status === 0
-              ? "python static check (ruff F): OK"
-              : `python STATIC ERRORS (undefined names, bad imports):\n${(ruff.stdout || ruff.stderr || "").slice(0, 2000)}`
-          );
+          if (ruff.error || ruff.status === null) {
+            results.push(`${UNAVAILABLE}: ruff is not installed or not on PATH, so the Python static check did not run.`);
+          } else if (ruff.status > 1) {
+            results.push(`${UNAVAILABLE}: ruff exited ${ruff.status} without checking the code — ${(ruff.stderr || "").slice(0, 400).trim() || "no detail"}`);
+          } else {
+            results.push(
+              ruff.status === 0
+                ? "python static check (ruff F): OK"
+                : `python STATIC ERRORS (undefined names, bad imports):\n${(ruff.stdout || ruff.stderr || "").slice(0, 2000)}`
+            );
+          }
         }
 
         if (js.length) {
@@ -460,19 +494,38 @@ export function localTools(projectDir, secretScanner) {
         }
 
         if (hasGo) {
-          const go = spawnSync(
-            "docker",
-            ["run", "--rm", "-v", `${projectDir}:/src`, "-w", "/src", "golang:1.22",
-             "sh", "-c", "export GOFLAGS=-mod=mod; go mod tidy >/dev/null 2>&1; go build ./..."],
-            { encoding: "utf8" }
-          );
-          results.push(
-            go.error
-              ? `go: could not run the Go toolchain (${go.error.message})`
-              : go.status === 0
-                ? "go build: OK"
-                : `go BUILD ERRORS:\n${(go.stderr || go.stdout || "").slice(0, 2000)}`
-          );
+          // Pulled as its own step, for two reasons. `docker run` streams the pull transcript to
+          // stderr, and reporting stderr verbatim on failure buried the real error under a screen
+          // of layer-download lines. And it separates "the image could not be obtained" -- no
+          // docker binary, no daemon, no network -- from "the code does not build", which the
+          // combined command could only express as the latter.
+          const image = "golang:1.22";
+          const pull = spawnSync("docker", ["pull", "-q", image], { encoding: "utf8" });
+          if (pull.error || pull.status === null) {
+            results.push(`${UNAVAILABLE}: docker is not installed or not on PATH, so the Go build did not run.`);
+          } else if (pull.status !== 0) {
+            results.push(`${UNAVAILABLE}: could not obtain ${image}, so the Go build did not run — ${(pull.stderr || "").slice(0, 400).trim() || "no detail"}`);
+          } else {
+            // -buildvcs=false because this is a build check, not a release. With stamping on, a
+            // bind-mounted repository owned by a different uid than the container user makes git
+            // refuse the directory, and `go build` fails with "error obtaining VCS status" before
+            // it compiles anything -- reported, until this change, as the project's build errors.
+            const go = spawnSync(
+              "docker",
+              ["run", "--rm", "-v", `${projectDir}:/src`, "-w", "/src", image,
+               "sh", "-c", "export GOFLAGS=-mod=mod; go mod tidy >/dev/null 2>&1; go build -buildvcs=false ./..."],
+              { encoding: "utf8" }
+            );
+            if (go.error || go.status === null) {
+              results.push(`${UNAVAILABLE}: the Go toolchain could not be started (${go.error ? go.error.message : "no exit status"}).`);
+            } else {
+              results.push(
+                go.status === 0
+                  ? "go build: OK"
+                  : `go BUILD ERRORS:\n${(go.stderr || go.stdout || "").slice(0, 2000)}`
+              );
+            }
+          }
         }
 
         return results.length ? results.join("\n\n") : "No source files found to check yet.";
@@ -1155,12 +1208,23 @@ export async function validateProject(projectDir, toolRegistry, taskText = "") {
   // Reported to the reviewer, never blocking. See the resource-census block below.
   const advisories = [];
   const ran = [];
+  // Checkers that could not run at all. Neither findings nor passes: they make the run incomplete,
+  // the same as an MCP control that could not be reached.
+  const couldNotRun = [];
 
   const buildCheck = toolRegistry.get("build_check");
   if (buildCheck) {
     const result = String(buildCheck.run({}));
     ran.push("build_check");
-    if (/ERRORS|SYNTAX ERROR|BUILD ERRORS/.test(result)) failures.push(`build_check:\n${result}`);
+    // Checkers that did not run are pulled out FIRST, so the blocking test never sees them. They
+    // make the run incomplete instead: the code was not checked, which is not the same as the code
+    // being fine, and not the same as the code being broken.
+    for (const why of unavailableCheckers(result)) couldNotRun.push(`build_check: ${why}`);
+    const judged = result
+      .split("\n")
+      .filter((line) => !line.startsWith(`${UNAVAILABLE}:`))
+      .join("\n");
+    if (/ERRORS|SYNTAX ERROR|BUILD ERRORS/.test(judged)) failures.push(`build_check:\n${judged}`);
   }
 
   // Every Terraform ROOT under the project. Child modules are excluded: see terraformRoots.
@@ -1557,7 +1621,7 @@ export async function validateProject(projectDir, toolRegistry, taskText = "") {
     }
   }
 
-  return { ran, failures, advisories };
+  return { ran, failures, advisories, couldNotRun };
 }
 
 // The pre-commit hook is the only boundary that runs the *full* check set -- the workload-identity

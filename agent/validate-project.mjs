@@ -130,5 +130,11 @@ if (r.advisories.length) {
 // Exit 3 covers both, because both mean the same thing to anything reading this result: part of the
 // gate produced no evidence. A silent control is if anything the worse of the two, since an
 // unreachable one at least announces itself the moment it fails to start.
-if (unreachable.length || silent.length) process.exit(3);
+// A checker that could not run makes this run incomplete for the same reason an unreachable
+// control does: the code was not checked, which is neither a finding nor a pass.
+if (r.couldNotRun?.length) {
+  console.log(`\n!! ${r.couldNotRun.length} CHECK(S) COULD NOT RUN — this run is INCOMPLETE`);
+  for (const c of r.couldNotRun) console.log(`   - ${c}`);
+}
+if (unreachable.length || silent.length || r.couldNotRun?.length) process.exit(3);
 process.exit(r.failures.length ? 1 : 0);

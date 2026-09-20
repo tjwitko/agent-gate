@@ -77,7 +77,13 @@ export async function runGate(projectDirArg, taskFile, { env = process.env } = {
     if (missing.length) silent.push({ name: c.name, provides: missing });
   }
 
-  const incomplete = unreachable.length > 0 || silent.length > 0 || Boolean(configError);
+  // A checker that could not run counts exactly as an unreachable control does. An in-process
+  // check is not more trustworthy than an MCP one for being in-process: `build_check` reported
+  // blocking "STATIC ERRORS" on any machine without ruff, and read a missing Go toolchain as a
+  // pass, and neither showed up here at all.
+  const couldNotRun = r.couldNotRun || [];
+  const incomplete =
+    unreachable.length > 0 || silent.length > 0 || couldNotRun.length > 0 || Boolean(configError);
   return {
     projectDir,
     taskFile: taskFile || null,
@@ -88,6 +94,7 @@ export async function runGate(projectDirArg, taskFile, { env = process.env } = {
     advisories: r.advisories,
     unreachable,
     silent,
+    couldNotRun,
     incomplete,
     exitCode: incomplete ? EXIT.INCOMPLETE : r.failures.length ? EXIT.BLOCKED : EXIT.CLEAN,
   };
@@ -115,6 +122,13 @@ function human(result) {
     for (const s of result.silent) out.push(`   - ${s.name} connected, but ${s.provides.join(", ")} was never called`);
     out.push("   A server that starts and is never asked anything reports nothing, which is");
     out.push("   indistinguishable from a server that found nothing.");
+    out.push("");
+  }
+
+  if (result.couldNotRun.length) {
+    out.push(`!! ${result.couldNotRun.length} CHECK(S) COULD NOT RUN — this run is INCOMPLETE`);
+    for (const c of result.couldNotRun) out.push(`   - ${c}`);
+    out.push("   The code was not checked. That is not the same as the code being fine.");
     out.push("");
   }
 
@@ -147,6 +161,7 @@ function machine(result) {
         error: c.error || null,
       })),
       validatorsRun: result.ran,
+      couldNotRun: result.couldNotRun,
       findings: result.failures.map((f) => ({ severity: "blocking", message: f })),
       advisories: result.advisories.map((a) => ({ severity: "advisory", message: a })),
     },

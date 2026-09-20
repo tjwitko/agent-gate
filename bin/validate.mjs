@@ -15,7 +15,7 @@
 // and printed "BLOCKING: none", and a control that connected and was never asked anything for ten
 // graded runs while a similarly-named check ran beside it.
 import path from "path";
-import { readFileSync } from "fs";
+import { readFileSync, realpathSync } from "fs";
 import { fileURLToPath } from "url";
 
 import { validateProject, localTools, McpClient } from "../agent/agent-loop.mjs";
@@ -201,6 +201,26 @@ async function main() {
   process.exit(result.exitCode);
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// Whether this file was executed rather than imported.
+//
+// This used `path.resolve(process.argv[1])`, which does not resolve symlinks -- and npm installs a
+// bin as a symlink, so `npx agent-gate` had argv[1] pointing at node_modules/.bin/agent-gate while
+// import.meta.url pointed at the real file. The comparison was false, main() never ran, and the
+// command exited 0 with no output. Silent success, from the entry point of a tool whose whole
+// subject is checks that quietly do not run.
+//
+// Nothing caught it because nothing ran the installed command: the corpus and the GitHub Action
+// both invoke `node bin/validate.mjs` by path, which is the one way it worked.
+function invokedDirectly() {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    // A path that cannot be resolved is not this file.
+    return false;
+  }
+}
+
+if (invokedDirectly()) {
   await main();
 }

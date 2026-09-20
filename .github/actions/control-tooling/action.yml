@@ -66,11 +66,19 @@ runs:
       run: |
         fail=0
         check() {
-          local name="$1" want="$2" got
+          local name="$1" want="$2" out got
           if ! command -v "$name" >/dev/null 2>&1; then
             echo "  MISSING  $name is not on PATH"; fail=1; return
           fi
-          got="$($name $3 2>&1 | head -1)"
+          # Read the whole output and take the first line afterwards, rather than piping into
+          # `head -1`. head closes the pipe as soon as it has its line, the tool writing anything
+          # after that takes SIGPIPE, and under the runner's `bash -e -o pipefail` that 141 kills
+          # the step -- with no output at all, so the step that exists to verify the tooling fails
+          # for a reason having nothing to do with the tooling. It is a race, which is why it
+          # survived three runs before firing. `|| true` because several of these exit non-zero
+          # while still printing their version.
+          out="$($name $3 2>&1 || true)"
+          got="${out%%$'\n'*}"
           case "$got" in
             *"$want"*) echo "  ok       $name -> $got" ;;
             *)         echo "  VERSION  $name -> '$got', expected to contain '$want'"; fail=1 ;;

@@ -70,10 +70,17 @@ export async function runGate(projectDirArg, taskFile, { env = process.env } = {
   // not be reached, and harder to see: identity-guard was spawned by nothing for ten graded runs
   // while every report printed a line called `authentication` -- the in-process route check, a
   // different thing. `provides` is an assertion, not documentation.
+  // A tool with nothing to examine did not fail to run. terraform_plan on a project with no
+  // Terraform is the common case, and counting it as silent made every such project INCOMPLETE.
+  const inapplicable = r.inapplicable || [];
+  const outOfScope = new Set(inapplicable.map((i) => i.tool));
+
   const silent = [];
   for (const c of controls) {
     if (!c.entry || unreachable.some((u) => u.name === c.name)) continue;
-    const missing = c.provides.filter((tool) => !r.ran.some((x) => x === tool || x.startsWith(`${tool}(`)));
+    const missing = c.provides.filter(
+      (tool) => !outOfScope.has(tool) && !r.ran.some((x) => x === tool || x.startsWith(`${tool}(`))
+    );
     if (missing.length) silent.push({ name: c.name, provides: missing });
   }
 
@@ -95,6 +102,7 @@ export async function runGate(projectDirArg, taskFile, { env = process.env } = {
     unreachable,
     silent,
     couldNotRun,
+    inapplicable,
     incomplete,
     exitCode: incomplete ? EXIT.INCOMPLETE : r.failures.length ? EXIT.BLOCKED : EXIT.CLEAN,
   };
@@ -132,6 +140,11 @@ function human(result) {
     out.push("");
   }
 
+  for (const i of result.inapplicable || []) {
+    out.push(`not applicable  : ${i.tool} — ${i.why}`);
+  }
+  if ((result.inapplicable || []).length) out.push("");
+
   const qualifier = result.incomplete ? " FROM THE CHECKS THAT RAN (see above)" : "";
   out.push(`BLOCKING        : ${result.failures.length ? result.failures.length : `none${qualifier}`}\n`);
   for (const f of result.failures) out.push(`  - ${f}\n`);
@@ -162,6 +175,7 @@ function machine(result) {
       })),
       validatorsRun: result.ran,
       couldNotRun: result.couldNotRun,
+      notApplicable: result.inapplicable,
       findings: result.failures.map((f) => ({ severity: "blocking", message: f })),
       advisories: result.advisories.map((a) => ({ severity: "advisory", message: a })),
     },

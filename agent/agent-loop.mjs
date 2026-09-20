@@ -1305,6 +1305,9 @@ export async function validateProject(projectDir, toolRegistry, taskText = "") {
   // Checkers that could not run at all. Neither findings nor passes: they make the run incomplete,
   // the same as an MCP control that could not be reached.
   const couldNotRun = [];
+  // Tools with nothing in scope: reported so the reader can see they were considered, but not
+  // counted as checks that could not run.
+  const inapplicable = [];
 
   const buildCheck = toolRegistry.get("build_check");
   if (buildCheck) {
@@ -1323,6 +1326,12 @@ export async function validateProject(projectDir, toolRegistry, taskText = "") {
 
   // Every Terraform ROOT under the project. Child modules are excluded: see terraformRoots.
   const tfDirs = terraformRoots(projectDir);
+  // A tool that had nothing to examine is not a tool that failed to run. Without this, a project
+  // with no Terraform -- which is most projects -- reported terraform_plan as a control that
+  // connected and was never called, and the whole run came back INCOMPLETE. That is a false
+  // could-not-run, and a gate that says INCOMPLETE on every ordinary project gets switched off,
+  // which costs more than the silent pass the check exists to catch.
+  if (!tfDirs.length) inapplicable.push({ tool: "terraform_plan", why: "no Terraform configuration was found" });
 
   const tfPlan = toolRegistry.get("terraform_plan");
   for (const dir of tfDirs) {
@@ -1401,6 +1410,9 @@ export async function validateProject(projectDir, toolRegistry, taskText = "") {
     manifestFound = hasManifest(projectDir);
   } catch {
     /* unreadable tree; nothing to scan */
+  }
+  if (!manifestFound) {
+    inapplicable.push({ tool: "check_dependencies", why: "no dependency manifest was found" });
   }
   if (depAudit && manifestFound) {
     const result = await depAudit.server.call("check_dependencies", { directory: ".", severity_threshold: "high" });
@@ -1736,7 +1748,7 @@ export async function validateProject(projectDir, toolRegistry, taskText = "") {
     }
   }
 
-  return { ran, failures, advisories, couldNotRun };
+  return { ran, failures, advisories, couldNotRun, inapplicable };
 }
 
 // The pre-commit hook is the only boundary that runs the *full* check set -- the workload-identity

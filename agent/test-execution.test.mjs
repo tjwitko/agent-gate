@@ -5,7 +5,7 @@ import { tmpdir } from "os";
 import path from "path";
 import { existsSync } from "fs";
 
-import { detectSuite, runTests, testExecutionReport, parseCountsForTest, failingNamesForTest } from "./test-execution.mjs";
+import { detectSuite, runTests, testExecutionReport, verdictFor, parseCountsForTest, failingNamesForTest } from "./test-execution.mjs";
 
 function run(files, fn) {
   const dir = mkdtempSync(path.join(tmpdir(), "testexec-"));
@@ -194,4 +194,54 @@ test("the spec format still works", () => {
   assert.deepEqual(failingNamesForTest("\u2716 a forged callback is rejected (1.2ms)"), [
     "a forged callback is rejected",
   ]);
+});
+
+// A suite that exits non-zero without a parseable summary used to produce a finding carrying no
+// evidence whatsoever: it told the reader to check the names above, and there were no names above,
+// because nothing could be extracted. The output was captured the whole time and thrown away.
+//
+// Found on CI, where three Go deliverables reported "the suite exited 1 and its summary could not
+// be parsed" and the log said nothing about why -- the difference between a test binary that would
+// not compile and a deliverable that is actually wrong, invisible.
+//
+// Driven through verdictFor rather than a real project: reproducing this end to end means breaking
+// a real toolchain in a specific way, and the thing under test is what the verdict does with a run
+// that already happened.
+test("an unparseable failure carries the runner's output as evidence", () => {
+  const r = verdictFor({
+    ran: true,
+    label: "go test",
+    exitCode: 1,
+    counts: null,
+    failing: [],
+    output: "# webhook/store\nstore/dynamo.go:4:2: no required module provides package widgets/thing\n",
+  });
+  assert.equal(r.failures.length, 1);
+  assert.match(r.failures[0], /summary could not be parsed/);
+  assert.match(r.failures[0], /Output \(last lines/);
+  assert.match(r.failures[0], /no required module provides package widgets\/thing/);
+});
+
+// The other half: when the summary DID parse, the failing names are the evidence and appending the
+// whole transcript on top of them is noise.
+test("a parseable failure does not append the transcript", () => {
+  const r = verdictFor({
+    ran: true,
+    label: "node --test",
+    exitCode: 1,
+    counts: { passed: 9, failed: 3, total: 12 },
+    failing: ["forged signature rejected"],
+    output: "lots and lots of transcript",
+  });
+  assert.equal(r.failures.length, 1);
+  assert.match(r.failures[0], /3 of 12 test\(s\) FAILED/);
+  assert.match(r.failures[0], /forged signature rejected/);
+  assert.doesNotMatch(r.failures[0], /Output \(last lines/);
+});
+
+// A run that never started is still an environment fact, not a finding.
+test("a runner that could not start is advisory, not blocking", () => {
+  const r = verdictFor({ ran: false, unavailable: "the tests are Python and pytest is not installed here" });
+  assert.equal(r.failures.length, 0);
+  assert.match(r.advisories[0], /NOT EXECUTED/);
 });

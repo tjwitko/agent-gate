@@ -232,9 +232,16 @@ export function runTests(projectDir, { timeoutMs = TIMEOUT_MS } = {}) {
  */
 export function testExecutionReport(projectDir, { wanted = false } = {}) {
   if (!wanted) return { failures: [], advisories: [] };
+  return verdictFor(runTests(projectDir));
+}
 
-  const r = runTests(projectDir);
-
+/**
+ * The verdict for one completed run. Separated from testExecutionReport so it can be exercised
+ * against a synthetic result: the interesting cases here are a suite that exits non-zero without a
+ * parseable summary and a runner that never started, and reproducing either through a real
+ * project means arranging for a real toolchain to be broken in a specific way.
+ */
+export function verdictFor(r) {
   if (!r.ran) {
     const line =
       `tests: NOT EXECUTED — ${r.unavailable}. Test files existing is not evidence that they pass, ` +
@@ -260,13 +267,29 @@ export function testExecutionReport(projectDir, { wanted = false } = {}) {
     ? `${c.failed} of ${c.total} test(s) FAILED`
     : `the suite exited ${r.exitCode} and its summary could not be parsed`;
 
+  // When the summary parsed, the failing names carry the evidence. When it did not, this finding
+  // used to carry NO evidence at all -- it asked the reader to check the names above, and there
+  // were no names above, because nothing could be extracted. The output was captured the whole
+  // time and discarded here. A suite that exits non-zero without a parseable summary is most often
+  // one that never ran: a test binary that would not compile, a missing module, an absent service.
+  // Those read identically to a real failure unless the output is shown.
+  const evidence =
+    !c && r.output
+      ? `\n\n  Output (last lines, the summary could not be parsed):\n${r.output
+          .trim()
+          .split("\n")
+          .slice(-25)
+          .map((l) => `    ${l}`)
+          .join("\n")}`
+      : "";
+
   return {
     failures: [
       `tests: ${headline} under ${r.label}.${named}\n` +
         `These are this project's own tests failing against this project's own code. Check the names ` +
         `above before changing anything: failures that all say the same thing about a connection are ` +
         `an environment this suite needs and does not have, while failures that name the task's ` +
-        `acceptance criteria are the deliverable being wrong.`,
+        `acceptance criteria are the deliverable being wrong.${evidence}`,
     ],
     advisories: [],
   };

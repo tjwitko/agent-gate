@@ -1,7 +1,7 @@
 {
-  "name": "local-delegate-mcp",
+  "name": "@tjwitko/agent-gate",
   "version": "1.0.0",
-  "description": "MCP server that lets an LLM delegate self-contained, low-skill subtasks to a locally-hosted model",
+  "description": "Deterministic security controls that run against a project and return one verdict: clean, blocked, or could-not-run.",
   "type": "module",
   "main": "index.mjs",
   "bin": {
@@ -31,5 +31,12 @@
     "@langfuse/tracing": "^5.10.1",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/sdk-node": "^0.221.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tjwitko/agent-gate.git"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

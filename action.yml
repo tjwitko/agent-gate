@@ -1,6 +1,6 @@
 name: "agent-gate"
 description: "Run the security control set against a project and fail the build on blocking findings or on a control that could not run."
-author: "local-delegate-mcp"
+author: "tjwitko"
 
 inputs:
   project:

@@ -166,7 +166,7 @@
         "tests": 1
       },
       "upstreamHead": "ad7dc2081089",
-      "digest": "029be271b76351b2",
+      "digest": "a35023c2075d88b4",
       "upstream": "../webhook-haiku-12",
       "asDelivered": 5,
       "differsFromAsDelivered": "the vendored copy scores 6 where the original scores 5, because node_modules is not vendored: the suite cannot run, so the tests check fires",
@@ -179,6 +179,6 @@
   },
   "archive": {
     "file": "corpus/fixtures.tar.gz",
-    "digest": "3a8d5c5ab59bb747"
+    "digest": "bb42b9ef7a35af4b"
   }
 }

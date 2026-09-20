@@ -164,7 +164,27 @@ if (check) {
 // commit each fixture's git repository as a gitlink. An archive is opaque to all three: the
 // scanners see one binary file, and the corpus extracts it to scratch space at run time, which is
 // where it was already running the gate.
-execFileSync("tar", ["-czf", ARCHIVE, "-C", STAGING, "."]);
+// COPYFILE_DISABLE is not optional on macOS. Without it bsdtar writes an AppleDouble companion
+// (`._name`) beside every entry to carry extended attributes, and `tar tzf` on macOS hides them
+// again by merging them back -- so the archive looked like 407 files here while actually holding
+// 814, half of them binary metadata. GNU tar on Linux has no such merge: it extracts `._app.js`
+// as a real file, `node --check` reads the AppleDouble magic number and reports a syntax error,
+// and build_check turns that into a blocking finding against a project whose code is fine. Four
+// fixtures failed that way on CI while passing here, which is the entire failure mode this corpus
+// exists to catch, committed into the corpus itself.
+execFileSync("tar", ["-czf", ARCHIVE, "-C", STAGING, "."], { env: { ...process.env, COPYFILE_DISABLE: "1" } });
+
+// Verified rather than trusted, because the platform that creates the problem is the one platform
+// that cannot see it.
+const entries = execFileSync("python3", ["-c", "import sys,tarfile;print('\\n'.join(tarfile.open(sys.argv[1]).getnames()))", ARCHIVE], { encoding: "utf8" }).split("\n");
+const appleDouble = entries.filter((n) => n.startsWith("._") || n.includes("/._"));
+if (appleDouble.length) {
+  rmSync(ARCHIVE, { force: true });
+  throw new Error(
+    `the archive contains ${appleDouble.length} AppleDouble entries (${appleDouble.slice(0, 3).join(", ")}...). ` +
+      "It would extract as binary junk on Linux. COPYFILE_DISABLE did not take effect."
+  );
+}
 rmSync(STAGING, { recursive: true, force: true });
 const archiveDigest = createHash("sha256").update(readFileSync(ARCHIVE)).digest("hex").slice(0, 16);
 manifest.archive = { file: "corpus/fixtures.tar.gz", digest: archiveDigest };

@@ -108,6 +108,7 @@ export function checkImmutability(projectDir, { required = false } = {}) {
   if (inMemory && appendsToIt) {
     stores.push({
       kind: "in-memory",
+      name: inMemory[1],
       evidence: `${inMemory[1]} = ${inMemory[2]}`,
       protected: false,
       missing:
@@ -298,15 +299,39 @@ export function immutabilityFailures(projectDir, { taskRequiresImmutability = fa
     return { failures: [], advisories: [`immutability: ${why}`] };
   }
 
-  const failures = report.stores
-    .filter((s) => !s.protected)
-    .map(
-      (s) =>
-        `immutability: the ${s.kind} store (${s.evidence}) has nothing preventing records from being ` +
-        `changed or deleted. Missing ${s.missing}.\n` +
-        `Not offering an UPDATE or DELETE endpoint is not a control — it describes this one client, ` +
-        `while the credential this service holds can do both from anywhere else. The requirement asks ` +
-        `for protections, so the protection has to live below the API.`
-    );
-  return { failures, advisories: [] };
+  // Every other store type is filtered by `inScope` at detection: an audit-shaped name, or the
+  // task asking for immutability. The in-memory store deliberately is not -- it is keyed on shape,
+  // because `callbacks = []` in a webhook receiver has the same defect and was being missed for
+  // being named wrong. Detecting it that way is right; what was missing is that the scope rule was
+  // never re-applied when the finding was made, so ANY module-level list with an append blocked,
+  // whatever the project was for, and told the reader "The requirement asks for protections" when
+  // no requirement had.
+  //
+  // A Python service holding received events in `EVENTS = []` drew a blocking finding from a task
+  // that never mentions records being unchangeable. That is this check's own stated failure mode --
+  // firing on every table is how a blocking check gets switched off -- and a false positive in a
+  // blocking gate destroys correct work rather than merely failing to catch bad work.
+  const unprotected = report.stores.filter((s) => !s.protected);
+  const isFinding = (s) => taskRequiresImmutability || !s.name || AUDIT_NAME.test(s.name);
+  const blocking = unprotected.filter(isFinding);
+  const noted = unprotected.filter((s) => !isFinding(s));
+
+  const failures = blocking.map(
+    (s) =>
+      `immutability: the ${s.kind} store (${s.evidence}) has nothing preventing records from being ` +
+      `changed or deleted. Missing ${s.missing}.\n` +
+      `Not offering an UPDATE or DELETE endpoint is not a control — it describes this one client, ` +
+      `while the credential this service holds can do both from anywhere else. The requirement asks ` +
+      `for protections, so the protection has to live below the API.`
+  );
+
+  // Still reported, because an unprotected store is worth a reader's attention -- it just is not
+  // this project's stated requirement being broken.
+  const advisories = noted.map(
+    (s) =>
+      `immutability: the ${s.kind} store (${s.evidence}) has nothing preventing records from being ` +
+      `changed or deleted (missing ${s.missing}). The task did not ask for records to be unchangeable ` +
+      `and the store is not named as a record of what happened, so this is not a finding against it.`
+  );
+  return { failures, advisories };
 }

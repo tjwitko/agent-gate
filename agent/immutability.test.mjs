@@ -519,3 +519,41 @@ for (const task of DOES_NOT_REQUIRE) {
     assert.equal(taskRequiresImmutability(task), false, task);
   });
 }
+
+// The task is what makes an unprotected store a finding. Without this gate the check blocked on any
+// store it could identify, whatever the project was for, and told the reader "The requirement asks
+// for protections" when no requirement had. A Python service holding received events in a list drew
+// a blocking finding from a task that never mentions records being unchangeable -- found by adding
+// the first non-webhook fixture to the corpus.
+//
+// This check's own design note is the argument: firing on every table is how a blocking check gets
+// switched off, and a false positive in a blocking gate destroys correct work rather than merely
+// failing to catch bad work.
+test("an unprotected store is advisory when the task never asked for immutability", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "immut-task-"));
+  try {
+    writeFileSync(path.join(dir, "app.py"), "EVENTS = []\n\ndef add(e):\n    EVENTS.append(e)\n");
+    const r = immutabilityFailures(dir, { taskRequiresImmutability: false });
+    assert.equal(r.failures.length, 0, "a requirement nobody made cannot be violated");
+    if (r.advisories.length) {
+      assert.doesNotMatch(
+        r.advisories.join("\n"),
+        /The requirement asks for protections/,
+        "the message must not assert a requirement that was never made"
+      );
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the same store blocks when the task does ask for immutability", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "immut-task-"));
+  try {
+    writeFileSync(path.join(dir, "app.py"), "EVENTS = []\n\ndef add(e):\n    EVENTS.append(e)\n");
+    const r = immutabilityFailures(dir, { taskRequiresImmutability: true });
+    assert.ok(r.failures.length > 0, "the gate must still fire when the requirement exists");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -1,0 +1,11 @@
+Build a service that receives event callbacks from a partner system.
+
+WHAT IT NEEDS TO DO
+- Accept event callbacks at an HTTP endpoint.
+- Let support look up a previously received event by its id.
+- Expose a health endpoint for the load balancer.
+- Provide helpers to sign and verify a payload, so a caller can establish that an event genuinely
+  came from the partner.
+
+REQUIREMENTS
+- Verification of a signature must not leak the expected value through timing.

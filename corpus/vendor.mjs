@@ -29,7 +29,14 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(__dirname, "..");
 const STAGING = path.join(__dirname, ".staging");
 const ARCHIVE = path.join(__dirname, "fixtures.tar.gz");
-const EXCLUDE = new Set(["node_modules", ".terraform", ".git", "dist", "build", ".next"]);
+// Build output and caches, never source. This copies from the FILESYSTEM rather than from git, so
+// a directory being gitignored in the upstream project does not keep it out of the archive -- the
+// first Python fixture brought __pycache__ with it, and .pyc content varies by interpreter
+// version, so the fixture digest would have churned on every machine that vendored it.
+const EXCLUDE = new Set([
+  "node_modules", ".terraform", ".git", "dist", "build", ".next",
+  "__pycache__", ".venv", "venv", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox",
+]);
 
 const manifestPath = path.join(__dirname, "manifest.json");
 const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));

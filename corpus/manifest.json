@@ -1,6 +1,6 @@
 {
-  "measured": "2026-09-20",
-  "note": "Eleven graded deliverables vendored as fixtures. webhook-haiku-5 and webhook-haiku-9 are excluded: both hold uncommitted work and look mid-run, so their verdicts are not stable ground truth. Expected values are derived from the VENDORED copies, which is what the corpus runs against; where that differs from the as-delivered grade, the entry says so and why.",
+  "measured": "2026-09-21",
+  "note": "Eleven graded deliverables vendored as fixtures. webhook-haiku-5 and webhook-haiku-9 are excluded: both hold uncommitted work and look mid-run, so their verdicts are not stable ground truth. Expected values are derived from the VENDORED copies, which is what the corpus runs against; where that differs from the as-delivered grade, the entry says so and why. Two entries named shape-* are not graded deliverables: they are minimal projects covering shapes the graded set does not have — a plain Node library with no infrastructure, and a Python service — because two real defects survived a corpus in which every fixture was a Terraform-bearing webhook receiver.",
   "entries": [
     {
       "name": "webhook-claude",
@@ -169,10 +169,36 @@
         "tests": 1
       },
       "upstreamHead": "ad7dc2081089",
-      "digest": "78188c01d10d2571",
+      "digest": "49c2d265acc16e2c",
       "upstream": "../webhook-haiku-12",
       "asDelivered": 5,
       "differsFromAsDelivered": "the vendored copy scores 6 where the original scores 5, because node_modules is not vendored: the suite cannot run, so the tests check fires",
+      "asDeliveredMeasured": "against the original deliverable, same gate"
+    },
+    {
+      "name": "shape-node-library",
+      "path": "corpus/fixtures/shape-node-library",
+      "taskFile": "agent/fixtures/node-library-task.txt",
+      "upstream": "../shape-node-library",
+      "upstreamHead": "58c1997f64be",
+      "digest": "31c54aba4ef9bbe2",
+      "expectedBlocking": 0,
+      "expectedFindings": {},
+      "asDelivered": 0,
+      "asDeliveredMeasured": "against the original deliverable, same gate"
+    },
+    {
+      "name": "shape-python-service",
+      "path": "corpus/fixtures/shape-python-service",
+      "taskFile": "agent/fixtures/python-service-task.txt",
+      "upstream": "../shape-python-service",
+      "upstreamHead": "481aafb7a196",
+      "digest": "23bdb946e9298b8e",
+      "expectedBlocking": 1,
+      "expectedFindings": {
+        "authentication": 1
+      },
+      "asDelivered": 1,
       "asDeliveredMeasured": "against the original deliverable, same gate"
     }
   ],
@@ -182,7 +208,7 @@
   },
   "archive": {
     "file": "corpus/fixtures.tar.gz",
-    "digest": "964b21bbb3d44ec9"
+    "digest": "7887c09544be5c10"
   },
   "toolchain": {
     "node": "26.5.1",

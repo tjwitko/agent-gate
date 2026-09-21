@@ -1,0 +1,13 @@
+Write a small utility library for formatting durations.
+
+WHAT IT NEEDS TO DO
+- Turn a duration in milliseconds into whole days, hours, minutes and seconds.
+- Render a duration as a short human-readable string, omitting units that are zero.
+- Reject a negative or non-finite duration rather than returning nonsense.
+
+REQUIREMENTS
+- Ship tests someone else can run without installing anything beyond the toolchain.
+- No runtime dependencies.
+
+This is a library. It has no HTTP endpoints, no infrastructure and no datastore, and nothing here
+asks for any. A check that reports those as "not applicable" is reporting correctly.

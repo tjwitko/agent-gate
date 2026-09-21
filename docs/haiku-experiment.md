@@ -167,6 +167,7 @@ loop, which does not ship, and into a required status check, which the model has
 
 ## Reproducing this
 
-The eleven stable deliverables are frozen in `corpus/fixtures.tar.gz` with their expected verdicts in
+The eleven stable deliverables are frozen in `corpus/fixtures.tar.gz` — alongside two `shape-*`
+fixtures that are not deliverables and are not graded here — with their expected verdicts in
 `corpus/manifest.json`; `npm run corpus` re-measures them and fails on drift in either direction.
 `bench/new-run.sh` scaffolds a fresh run and `bench/grade-run.sh` grades one.

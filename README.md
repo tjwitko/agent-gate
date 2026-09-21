@@ -246,14 +246,19 @@ git clone https://github.com/tjwitko/agent-gate
 cd agent-gate
 npm install
 npm test          # unit tests
-npm run corpus    # regression corpus — eleven frozen deliverables
+npm run corpus    # regression corpus — thirteen frozen projects
 ```
 
 The corpus is the important one. **Every control defect in this project's history was found by
-running real work through the controls, never by a unit test.** Eleven real deliverables are frozen
-with the verdict each one scored; `npm run corpus` re-measures them and fails on drift in either
-direction, because a control that stops firing is as much a regression as one that starts
-over-firing.
+running real work through the controls, never by a unit test.** `npm run corpus` re-measures
+thirteen frozen projects and fails on drift in either direction, because a control that stops
+firing is as much a regression as one that starts over-firing.
+
+Eleven are real deliverables, frozen with the verdict each one scored. The other two exist to cover
+shapes the graded set does not have — a plain Node library with no infrastructure, and a Python
+service — because a corpus in which every fixture was a Terraform-bearing webhook receiver could
+not see a check that fires on projects which never asked for what it checks. Adding them found a
+live false positive in a blocking validator the same afternoon.
 
 It also records the toolchain that measured it and reports any difference, since a finding count
 compared against a different scanner version looks exactly like a control that changed behaviour.

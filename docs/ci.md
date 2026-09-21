@@ -103,7 +103,7 @@ obviously.
 
 ## Known environmental differences
 
-The corpus passes on all eleven fixtures on macOS. The differences below were found by running it
+The corpus passes on all thirteen fixtures on macOS. The differences below were found by running it
 on Linux CI and are recorded here rather than suppressed.
 
 **Fixed: `go build` inside a container over a bind-mounted git repository.** `build_check` runs the

@@ -292,4 +292,4 @@ out of. It is independent of the gate and documented in [`CLAUDE.md`](CLAUDE.md)
 
 ## License
 
-ISC
+[MIT](LICENSE) © 2026 Tom Witkowski

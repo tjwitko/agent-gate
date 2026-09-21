@@ -13,7 +13,7 @@
     "corpus:vendor": "node corpus/vendor.mjs",
     "corpus:check": "node corpus/vendor.mjs --check"
   },
-  "license": "ISC",
+  "license": "MIT",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.117.1",
     "@modelcontextprotocol/sdk": "^1.30.0",

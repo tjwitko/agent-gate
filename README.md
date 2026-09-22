@@ -1,6 +1,8 @@
 # agent-gate
 
 [![gate](https://github.com/tjwitko/agent-gate/actions/workflows/gate.yml/badge.svg)](https://github.com/tjwitko/agent-gate/actions/workflows/gate.yml)
+[![release](https://img.shields.io/github/v/release/tjwitko/agent-gate)](https://github.com/tjwitko/agent-gate/releases/latest)
+[![license](https://img.shields.io/github/license/tjwitko/agent-gate)](LICENSE)
 
 Run a set of security and completeness controls against a project directory and get back one
 verdict: **clean**, **blocked**, or **could-not-run**.
@@ -45,13 +47,15 @@ is fine" are different facts, and collapsing them is how a gate quietly stops pr
 
 ### Install
 
+Latest release: **[v1.0.0](https://github.com/tjwitko/agent-gate/releases/tag/v1.0.0)**
+
 ```bash
 npm install --save-dev github:tjwitko/agent-gate#v1.0.0
 ```
 
 The four control servers come with it as dependencies — there is nothing else to clone or wire up.
 They are pinned to their own `v1.0.0` tags, so this installs the same five components every time.
-Drop the `#v1.0.0` to track `main` instead.
+Drop the `#v1.0.0` to track `main` instead, which moves.
 
 ### Run it
 

@@ -100,6 +100,14 @@ runs:
           const r = require(process.argv[1]);
           for (const c of r.controls) console.log(`control  : ${c.name.padEnd(16)} ${c.status.padEnd(14)} ${c.resolvedFrom || c.error}`);
           console.log(`validators: ${r.validatorsRun.join(", ")}`);
+          // Printed BEFORE the verdict, and printed at all. The result document carried these
+          // three all along and this renderer showed none of them, so in CI -- the place the gate
+          // is actually read -- a check that could not run, a tool with nothing in scope, and a
+          // directory the project exempted were indistinguishable from silence. That is the
+          // failure this control set exists to remove, in its own output.
+          for (const c of r.couldNotRun || []) console.log(`COULD NOT RUN : ${c}`);
+          for (const i of r.notApplicable || []) console.log(`not applicable: ${i.tool} — ${i.why}`);
+          for (const e of r.exempt || []) console.log(`exempt        : ${e.path} — ${e.reason} (${e.marker})`);
           console.log(`\nBLOCKING : ${r.blocking}${r.incomplete ? " FROM THE CHECKS THAT RAN" : ""}\n`);
           for (const f of r.findings) console.log(`  - ${f.message}\n`);
           for (const a of r.advisories) console.log(`  . ${a.message}\n`);

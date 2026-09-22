@@ -17,10 +17,10 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.117.1",
     "@modelcontextprotocol/sdk": "^1.30.0",
-    "@tjwitko/dep-audit-mcp": "git+https://github.com/tjwitko/dep-audit-mcp.git",
-    "@tjwitko/identity-guard-mcp": "git+https://github.com/tjwitko/identity-guard-mcp.git",
-    "@tjwitko/secret-guard-mcp": "git+https://github.com/tjwitko/secret-guard-mcp.git",
-    "@tjwitko/terraform-guard-mcp": "git+https://github.com/tjwitko/terraform-guard-mcp.git",
+    "@tjwitko/dep-audit-mcp": "git+https://github.com/tjwitko/dep-audit-mcp.git#v1.0.0",
+    "@tjwitko/identity-guard-mcp": "git+https://github.com/tjwitko/identity-guard-mcp.git#v1.0.0",
+    "@tjwitko/secret-guard-mcp": "git+https://github.com/tjwitko/secret-guard-mcp.git#v1.0.0",
+    "@tjwitko/terraform-guard-mcp": "git+https://github.com/tjwitko/terraform-guard-mcp.git#v1.0.0",
     "axios": "^1.19.0",
     "yaml": "^2.8.1",
     "zod": "^4.4.3"

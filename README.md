@@ -46,10 +46,12 @@ is fine" are different facts, and collapsing them is how a gate quietly stops pr
 ### Install
 
 ```bash
-npm install --save-dev github:tjwitko/agent-gate
+npm install --save-dev github:tjwitko/agent-gate#v1.0.0
 ```
 
 The four control servers come with it as dependencies — there is nothing else to clone or wire up.
+They are pinned to their own `v1.0.0` tags, so this installs the same five components every time.
+Drop the `#v1.0.0` to track `main` instead.
 
 ### Run it
 
@@ -120,7 +122,7 @@ jobs:
       - uses: hashicorp/setup-terraform@v3
         with: { terraform_version: "1.15.8", terraform_wrapper: false }
 
-      - uses: tjwitko/agent-gate@main
+      - uses: tjwitko/agent-gate@v1.0.0
         with:
           project: .
           task-file: task.txt

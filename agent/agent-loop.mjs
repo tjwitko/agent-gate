@@ -34,6 +34,7 @@ import { artifactPresenceFailures, artifactInventory, artifactRegressions } from
 import { codeQualityFailures, taskWantsTests } from "./code-quality.mjs";
 import { SKIP_DIRS } from "./skip-dirs.mjs";
 import { findsLockfile, NOT_AUTHORITATIVE_NOTE } from "./lockfiles.mjs";
+import { declaredFixtures, isDeclaredFixture } from "./fixture-markers.mjs";
 import { ensureGitignore, isArtifact, ensureRepo } from "./commit-gate.mjs";
 // Shared with bench/, not duplicated: one definition of how this repo talks to Langfuse means the
 // loop and the benchmark can never disagree about which instance or which credentials. Everything
@@ -1238,8 +1239,12 @@ export function terraformRoots(projectDir) {
       // ended the run outright.
       if (SKIP_DIRS.has(e.name)) continue;
       const full = path.join(dir, e.name);
-      if (e.isDirectory()) findTf(full);
-      else if (e.name.endsWith(".tf") && !dirs.includes(dir)) dirs.push(dir);
+      // A directory declared a fixture is not a Terraform root of this project. terraform-guard's
+      // own `fixtures/aws-insecure` is insecure on purpose -- it is what proves the scanner works --
+      // and planning it produced the finding it was written to produce. See fixture-markers.mjs.
+      if (e.isDirectory()) {
+        if (!isDeclaredFixture(full)) findTf(full);
+      } else if (e.name.endsWith(".tf") && !dirs.includes(dir)) dirs.push(dir);
     }
   };
   findTf(projectDir);
@@ -1748,7 +1753,11 @@ export async function validateProject(projectDir, toolRegistry, taskText = "") {
     }
   }
 
-  return { ran, failures, advisories, couldNotRun, inapplicable };
+  // Reported, never silent. A directory that opted out is a fact the reader needs; an exemption
+  // nobody can see is indistinguishable from a check that did not run.
+  const exempt = declaredFixtures(projectDir);
+
+  return { ran, failures, advisories, couldNotRun, inapplicable, exempt };
 }
 
 // The pre-commit hook is the only boundary that runs the *full* check set -- the workload-identity

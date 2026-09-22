@@ -21,6 +21,7 @@ import path from "path";
 import { parseAllDocuments } from "yaml";
 
 import { SKIP_DIRS } from "./skip-dirs.mjs";
+import { isDeclaredFixture } from "./fixture-markers.mjs";
 
 const MAX_FILE_BYTES = 512 * 1024;
 
@@ -61,7 +62,7 @@ function walk(dir, acc = [], root = dir) {
   for (const e of entries) {
     const full = path.join(dir, e.name);
     if (e.isDirectory()) {
-      if (!SKIP_DIRS.has(e.name)) walk(full, acc, root);
+      if (!SKIP_DIRS.has(e.name) && !isDeclaredFixture(full)) walk(full, acc, root);
       continue;
     }
     const ext = path.extname(e.name);

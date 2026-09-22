@@ -9,6 +9,7 @@ import { readdirSync, readFileSync, statSync } from "fs";
 import path from "path";
 
 import { SKIP_DIRS } from "./skip-dirs.mjs";
+import { isDeclaredFixture } from "./fixture-markers.mjs";
 
 // .go, .rb and .java were absent once, so a check could not read a Go deliverable's source at all —
 // it reported a project that HAD its control as having none, and no amount of fixing the pattern
@@ -32,7 +33,8 @@ export function walk(dir, acc = [], root = dir) {
   for (const e of entries) {
     const full = path.join(dir, e.name);
     if (e.isDirectory()) {
-      if (!SKIP_DIRS.has(e.name)) walk(full, acc, root);
+      // A declared fixture is deliberately unrepresentative; see fixture-markers.mjs.
+      if (!SKIP_DIRS.has(e.name) && !isDeclaredFixture(full)) walk(full, acc, root);
     } else if (READ_EXT.has(path.extname(e.name))) {
       try {
         if (statSync(full).size <= MAX_FILE_BYTES) {

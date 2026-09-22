@@ -103,6 +103,7 @@ export async function runGate(projectDirArg, taskFile, { env = process.env } = {
     silent,
     couldNotRun,
     inapplicable,
+    exempt: r.exempt || [],
     incomplete,
     exitCode: incomplete ? EXIT.INCOMPLETE : r.failures.length ? EXIT.BLOCKED : EXIT.CLEAN,
   };
@@ -143,7 +144,10 @@ function human(result) {
   for (const i of result.inapplicable || []) {
     out.push(`not applicable  : ${i.tool} — ${i.why}`);
   }
-  if ((result.inapplicable || []).length) out.push("");
+  for (const e of result.exempt || []) {
+    out.push(`exempt          : ${e.path} — ${e.reason} (${e.marker})`);
+  }
+  if ((result.inapplicable || []).length || (result.exempt || []).length) out.push("");
 
   const qualifier = result.incomplete ? " FROM THE CHECKS THAT RAN (see above)" : "";
   out.push(`BLOCKING        : ${result.failures.length ? result.failures.length : `none${qualifier}`}\n`);
@@ -176,6 +180,7 @@ function machine(result) {
       validatorsRun: result.ran,
       couldNotRun: result.couldNotRun,
       notApplicable: result.inapplicable,
+      exempt: result.exempt,
       findings: result.failures.map((f) => ({ severity: "blocking", message: f })),
       advisories: result.advisories.map((a) => ({ severity: "advisory", message: a })),
     },

@@ -45,6 +45,17 @@ outputs:
 runs:
   using: "composite"
   steps:
+    # An action checked out by `uses:` arrives as source with no node_modules, and nothing else
+    # installs them. This repository's own workflow runs `npm ci` and then `uses: ./`, which made
+    # the gap invisible from here: it worked in the only place it was ever tried. From any other
+    # repository the gate crashed with ERR_MODULE_NOT_FOUND before checking anything.
+    #
+    # --ignore-scripts because this installs a dependency tree in someone else's CI, and the four
+    # control servers are spawned as trusted code a moment later.
+    - name: install the gate's dependencies
+      shell: bash
+      run: npm ci --ignore-scripts --prefix "$GITHUB_ACTION_PATH"
+
     - id: gate
       shell: bash
       env:

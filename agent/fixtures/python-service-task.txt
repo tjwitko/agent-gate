@@ -8,4 +8,5 @@ WHAT IT NEEDS TO DO
   came from the partner.
 
 REQUIREMENTS
+- Ship tests someone else can run.
 - Verification of a signature must not leak the expected value through timing.

@@ -1,5 +1,5 @@
 {
-  "measured": "2026-09-21",
+  "measured": "2026-09-23",
   "note": "Eleven graded deliverables vendored as fixtures. webhook-haiku-5 and webhook-haiku-9 are excluded: both hold uncommitted work and look mid-run, so their verdicts are not stable ground truth. Expected values are derived from the VENDORED copies, which is what the corpus runs against; where that differs from the as-delivered grade, the entry says so and why. Two entries named shape-* are not graded deliverables: they are minimal projects covering shapes the graded set does not have — a plain Node library with no infrastructure, and a Python service — because two real defects survived a corpus in which every fixture was a Terraform-bearing webhook receiver.",
   "entries": [
     {
@@ -169,7 +169,7 @@
         "tests": 1
       },
       "upstreamHead": "ad7dc2081089",
-      "digest": "49c2d265acc16e2c",
+      "digest": "da6ebee30eb69d3d",
       "upstream": "../webhook-haiku-12",
       "asDelivered": 5,
       "differsFromAsDelivered": "the vendored copy scores 6 where the original scores 5, because node_modules is not vendored: the suite cannot run, so the tests check fires",
@@ -192,8 +192,8 @@
       "path": "corpus/fixtures/shape-python-service",
       "taskFile": "agent/fixtures/python-service-task.txt",
       "upstream": "../shape-python-service",
-      "upstreamHead": "481aafb7a196",
-      "digest": "23bdb946e9298b8e",
+      "upstreamHead": "9517b943a95c",
+      "digest": "9903ff123e28ba0d",
       "expectedBlocking": 1,
       "expectedFindings": {
         "authentication": 1
@@ -208,7 +208,7 @@
   },
   "archive": {
     "file": "corpus/fixtures.tar.gz",
-    "digest": "7887c09544be5c10"
+    "digest": "b374c37fa18f8d68"
   },
   "toolchain": {
     "node": "26.5.1",
@@ -219,6 +219,7 @@
     "checkov": "3.3.10",
     "python3": "3.14.6",
     "ruff": "0.16.2",
+    "pytest": "9.1.1",
     "docker": "29.6.2"
   }
 }

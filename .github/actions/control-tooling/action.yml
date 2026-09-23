@@ -49,13 +49,21 @@ runs:
       shell: bash
       run: pipx install checkov==3.3.10
 
-    # build_check's Python static pass. No fixture in the corpus is Python today, which is exactly
-    # why it was missed -- the runner has never had it, and nothing said so until the corpus began
-    # reporting the toolchain it was measured with. Without it a Python project reports COULD NOT
-    # RUN and exits 3 here, which is correct and useless.
+    # build_check's Python static pass. It was missing for a long time and nothing said so until
+    # the corpus began reporting the toolchain it was measured with. Without it a Python project
+    # reports COULD NOT RUN and exits 3 here, which is correct and useless.
     - name: ruff
       shell: bash
       run: pipx install ruff==0.16.2
+
+    # The `tests` validator runs a Python suite with `python3 -m pytest`, so pytest has to be
+    # IMPORTABLE by that interpreter -- a pipx install gives a binary and not an import, which is
+    # the whole reason this is pip and the others are pipx. Without it the corpus's Python fixture
+    # reports NOT EXECUTED, which the corpus then refuses to freeze, and the job fails as unmeasured
+    # rather than quietly recording a verdict nothing produced.
+    - name: pytest
+      shell: bash
+      run: python3 -m pip install --break-system-packages pytest==9.1.1
 
     # Every install above is verified here rather than trusted. A missing scanner does not make the
     # gate quiet -- the servers report that they cannot run and the gate exits 3 -- but it turns a
@@ -89,4 +97,12 @@ runs:
         check osv-scanner "2.4.0"  --version
         check checkov     "3.3.10" --version
         check ruff        "0.16.2" --version
+        # Not `check pytest`: the gate probes `python3 -m pytest`, and a console script on PATH is
+        # a different fact from the module being importable by that interpreter. Verify what the
+        # gate actually does.
+        out="$(python3 -m pytest --version 2>&1 || true)"
+        case "${out%%$'\n'*}" in
+          *"9.1.1"*) echo "  ok       python3 -m pytest -> ${out%%$'\n'*}" ;;
+          *)         echo "  VERSION  python3 -m pytest -> '${out%%$'\n'*}', expected 9.1.1"; fail=1 ;;
+        esac
         exit $fail

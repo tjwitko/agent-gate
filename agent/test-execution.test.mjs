@@ -77,13 +77,22 @@ test("a declared runner that is not installed BLOCKS", () => {
 
 // The boundary: an environment fact must still only advise. Blocking on a toolchain this machine
 // happens not to have would fail work that may be perfectly correct.
-test("a Python suite with no pytest here is advised, not blocked", () => {
-  run({ "tests/test_x.py": "def test_x():\n    assert True\n" }, (dir) => {
-    const r = testExecutionReport(dir, { wanted: true });
-    if (r.failures.length) return; // pytest is installed on this machine; nothing to assert
-    assert.equal(r.failures.length, 0);
-    assert.match(r.advisories[0], /NOT EXECUTED/);
+//
+// Driven through verdictFor, because whether pytest is installed is a property of the machine and
+// this test used to read that property instead of controlling it. Its guard anticipated the wrong
+// shape -- "pytest is here, so there will be failures" -- but a pytest that is present and passing
+// produces no failures, so the guard never fired and the assertion below it could not hold. It
+// passed for years by being run only where pytest was absent, and failed the moment one was
+// installed. The real pytest path is now covered end to end by the corpus's Python fixture.
+test("a Python suite with no pytest is advised, not blocked", () => {
+  const r = verdictFor({
+    ran: false,
+    environmental: true,
+    unavailable: "the tests are Python and pytest is not installed here",
   });
+  assert.equal(r.failures.length, 0, "a missing toolchain is not the project's defect");
+  assert.match(r.advisories[0], /NOT EXECUTED/);
+  assert.equal(r.couldNotRun.length, 1, "but nothing was measured, and the run must say so");
 });
 
 test("a project with no tests at all is reported as having none to run", () => {

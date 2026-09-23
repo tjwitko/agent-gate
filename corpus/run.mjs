@@ -122,6 +122,11 @@ function toolchain() {
     checkov: probe("checkov", ["--version"], /(\d+\.\d+\.\d+)/),
     python3: probe("python3", ["--version"], /(\d+\.\d+\.\d+)/),
     ruff: probe("ruff", ["--version"], /(\d+\.\d+\.\d+)/),
+    // `python3 -m pytest`, not the console script: that is what the tests validator probes, and a
+    // binary on PATH is a different fact from the module being importable by this interpreter.
+    // Recorded because it decides whether a Python fixture's suite runs at all -- the same thing
+    // the Go toolchain decided, unrecorded, while three fixtures carried a verdict nothing measured.
+    pytest: probe("python3", ["-m", "pytest", "--version"], /(\d+\.\d+\.\d+)/),
     docker: probe("docker", ["--version"], /(\d+\.\d+\.\d+)/),
   };
 }

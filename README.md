@@ -32,6 +32,7 @@ is fine" are different facts, and collapsing them is how a gate quietly stops pr
   ```bash
   brew install terraform gitleaks osv-scanner   # macOS
   pipx install checkov ruff
+  python3 -m pip install pytest      # only if your project has a Python test suite
   ```
 
   | tool | needed for | required? |
@@ -41,9 +42,14 @@ is fine" are different facts, and collapsing them is how a gate quietly stops pr
   | `terraform` | Terraform plan and policy checks | if the project has `.tf` files |
   | `checkov` | extra Terraform coverage | optional, advisory only |
   | `ruff` | Python static checks | if the project has Python |
+  | `pytest` | running a Python test suite | if the project has Python tests |
   | `docker`, `go` | Go build and test | if the project has Go |
 
   A missing tool is **never** silently skipped. The run reports it and exits 3.
+
+`pytest` is installed with `pip` rather than `pipx` on purpose: the gate runs a Python suite
+with `python3 -m pytest`, so the module has to be importable by that interpreter. A console
+script on `PATH` is a different fact and will not satisfy it.
 
 ### Install
 

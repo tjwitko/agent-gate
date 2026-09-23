@@ -101,10 +101,16 @@ quiet — the servers report that they could not run and the gate exits 3 — bu
 meant to verify behaviour into a job that verifies nothing, twenty minutes later and one level less
 obviously.
 
-## Known environmental differences
+## Environmental differences, and what they cost
 
-The corpus passes on all thirteen fixtures on macOS. The differences below were found by running it
-on Linux CI and are recorded here rather than suppressed.
+The corpus passes on all thirteen fixtures on macOS **and on Linux CI**. Every difference below is
+fixed. They are kept rather than deleted because the pattern is the point: each one was a control
+behaving correctly on the machine that wrote it and wrongly everywhere else, and none was caught by
+several hundred unit tests. Running the corpus somewhere other than where it was derived is what
+found all of them.
+
+The manifest now records the toolchain that measured it and a checking run reports any difference,
+so the next one of these announces itself rather than reading as a control regression.
 
 **Fixed: `go build` inside a container over a bind-mounted git repository.** `build_check` runs the
 Go toolchain in `golang:1.22` with the project bind-mounted. On a Linux runner the mounted tree is
@@ -122,14 +128,21 @@ whose code is fine. The Go branch had the mirror-image bug, emitting text that m
 pattern, so an absent toolchain read as a pass. Both now report `COULD NOT RUN`, which is neither a
 finding nor a pass and routes to the same exit-3 path as an unreachable control.
 
-**Open: `check_dependencies` finds less on CI.** Two fixtures (`webhook-haiku-2`,
-`webhook-haiku-6`) score one blocking dependency finding locally and none on CI. Run directly
-against the same vendored fixtures, `osv-scanner` reports 10 and 48 vulnerabilities locally. The
-cause is not established. One candidate worth checking first: `dep-audit-mcp` parses
-`JSON.parse(scan.stdout || "{}")` and only errors when there is no parseable JSON at all, so a scan
-that ran but could not reach the vulnerability database would report zero findings without
-reporting a problem -- which would be the silent pass this control set exists to remove, in the
-control set itself.
+**Fixed: `check_dependencies` found less on CI.** Two fixtures (`webhook-haiku-2`,
+`webhook-haiku-6`) scored one blocking dependency finding locally and none on CI, and the scanner
+was not the cause: it found five high-severity vulnerabilities on the runner and the gate discarded
+them.
+
+`lockfilePresent()` resolved `../../local-copilot-stack/validate/lockfiles.mjs` and returned `false`
+when that path did not exist — so on every machine except one developer's, every project counted as
+having no lockfile, every high-severity dependency finding was downgraded to advisory, and
+`check_dependencies` never blocked. The downgrade was announced with `console.log`, on a stream no
+report reads and no exit code reflects, so it appeared in no findings list, no advisories and no
+control list.
+
+Detection now lives in this repository, which is the thing other people install, and the downgrade
+is a visible advisory carrying its reason. Both affected fixtures have matched on Linux on every
+run since.
 
 **Fixed: the manifest recorded when it was measured, not with what.** `corpus/manifest.json` now
 carries the toolchain -- node, go, terraform, gitleaks, osv-scanner, checkov, python3, ruff, docker

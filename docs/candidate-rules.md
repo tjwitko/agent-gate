@@ -606,3 +606,78 @@ init-required error the tooling had manufactured, deleting working resources on 
 
 **Not fixed during the run**, per `RUN.md`: this is a validator the gate runs, so changing it would
 make `slack-sonnet-1` incomparable with any later run of the same task. It waits for the last one.
+
+## Open (found while scaffolding slack-opus-1)
+
+### The run can rewrite the file that defines what the run is
+
+`bench/new-run.sh` writes the control set into the run directory and commits it, force-adding past
+a global gitignore (line 173, with the reason at 170: here it is not personal configuration, it is
+the experiment). The committed file says:
+
+```json
+"enabledMcpjsonServers": ["terraform-guard", "dep-audit", "secret-guard", "identity-guard"]
+```
+
+Four servers, and the script's own header states why a fifth is absent: *local-delegate is omitted.
+The local model takes no part in these runs.*
+
+Launching `claude --model opus` in `slack-opus-1` prompted **"Continue without using this MCP
+server"**, which should not happen in a directory whose `.mcp.json` defines exactly the servers its
+settings enable. `git diff` showed the session had rewritten the committed file:
+
+```diff
+-  "enabledMcpjsonServers": ["terraform-guard", "dep-audit", "secret-guard", "identity-guard"]
++  "enabledMcpjsonServers": [
++    "local-delegate"
+```
+
+The four controls were gone and a server not defined in that run's `.mcp.json` had taken their
+place. Nothing asked for this and nothing announced it.
+
+**Why this is worse than a config error.** It moves in both directions at once. Subtracting the
+four means a run executes with no terraform-guard, no dep-audit, no secret-guard and no
+identity-guard — the treatment condition silently becomes the control condition. Adding
+local-delegate means the model can hand work to the local 7B, which is a different experiment
+entirely and the one thing every run of this series is defined as excluding. A run that did both is
+not a weaker version of the intended run; it is a run of something else, reported under the
+intended run's name.
+
+**Nothing downstream can see it.** `bench/grade-run.sh` contains zero references to `.mcp.json`,
+`settings.local.json` or `enabledMcpjsonServers` — it never asks what the session was configured
+with. And it cannot infer it, because the gate does not read that configuration either:
+`bin/validate.mjs:54` spawns its own four servers from `resolve-controls`, so **the grade always
+runs with four controls no matter how many the session had**. The grading step is structurally
+incapable of detecting that the thing it is grading was produced under different conditions. A run
+stripped to zero controls mid-flight would grade, pass or fail, and read as a clean data point.
+
+This is the estate's own recurring shape pointed at the harness rather than at a validator: a check
+that cannot run does not announce itself, it just stops appearing. Here the check never even
+reaches the stage where it could fail — it is absent from the session, and the report is written by
+a process that was never told.
+
+**What made it visible was luck.** Claude Code happens to prompt interactively when enabled servers
+and defined servers disagree, and the run had not started yet. Had the rewrite dropped a server
+that *was* defined, or landed mid-run, or had the prompt been accepted to get on with the run,
+there would have been no signal at all — only a `RUN.md` asserting five frozen control SHAs that
+the run did not use.
+
+**What a fix needs.**
+1. `grade-run.sh` reads `.mcp.json` and `.claude/settings.local.json` as they stand at grade time,
+   compares them against the scaffold commit that pinned them, and reports any divergence. Both
+   files are tracked, so `git diff --exit-code <commit> -- .mcp.json .claude/settings.local.json`
+   is the whole check.
+2. Divergence is **blocking for the comparison, not for the deliverable**. The code may be fine;
+   what is not fine is filing it beside runs whose conditions held. The grade should print the
+   control set it can prove was configured, and say so plainly when it cannot.
+3. Report the enabled set on every grade, clean or not, for the same reason exemptions are reported
+   on every scan in `identity-guard-mcp`: a configuration that is only mentioned when it is wrong
+   is a configuration nobody reads.
+4. Consider pinning the same way `RUN.md` pins control SHAs — the enabled server list recorded at
+   scaffold time, verified at grade time, so the two can be checked against each other rather than
+   against an assumption.
+
+**Not fixed during the run.** `grade-run.sh` grades the run in flight; changing it now would make
+`slack-opus-1` incomparable with `slack-sonnet-1`, the same reason
+[the retention false negative](#a-parameterised-retention-period-reads-as-no-retention-at-all--retentionmjs)
+is waiting. The settings file was reverted by hand before the run started, and the tree is clean.

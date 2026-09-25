@@ -79,6 +79,60 @@ Six checks are gated on what the task asked for — immutability, retention, sec
 error distinction, and required artifacts. Without a task file they report "not checked", which is
 honest and much less useful.
 
+### What goes in the task file
+
+Prose, not configuration. It is the requirements as you would write them for a person, and the
+checks read ordinary English — there are no keys, fields or front matter to fill in.
+
+```text
+Build and deploy a service that receives our Slack workspace's message events.
+
+WHAT IT NEEDS TO DO
+- Receive message events from Slack as they happen, and keep receiving them across a working week.
+- Keep every message event received, so that a question raised weeks later can be settled.
+
+REQUIREMENTS
+- Once a message event has been recorded, its contents must stay exactly as received.
+- Records are retained for three years.
+- Both Slack tokens must be rotatable without redeploying the application.
+
+HOW WE WILL JUDGE IT
+- Automated tests that someone else can run, covering an event being acknowledged.
+- Errors distinguished from faults: Slack refusing our token is not our service failing.
+
+DEPLOYMENT
+- AWS, single region. Terraform for all infrastructure. Kubernetes manifests. A Dockerfile.
+```
+
+Each gated check is looking for the shape of a requirement, not a topic:
+
+| check | switched on by | stays off for |
+| --- | --- | --- |
+| immutability | "must not change once written", "an immutable audit log" | "store the events" |
+| retention | "retained for three years", "keep every event for 90 days" | a period with no number |
+| secret rotation | "the API key must be rotated every 90 days", "tokens must be rotatable" | "use an API key" |
+| tests | "automated tests that someone else can run", "include unit tests" | "make it work" |
+| error distinction | "a client error must not be reported as a 500" | "handle errors" |
+| required artifacts | naming them: "Terraform", "Kubernetes manifests", "a Dockerfile" | "deploy it somehow" |
+
+Two rules follow from that:
+
+**State the requirement, don't gesture at the topic.** The retention check compares a configured
+period against the one the task states, so it needs a number to compare against; "keep the records"
+gives it nothing and the check stays off.
+
+**Never write a requirement you don't have.** A fabricated one switches a check on and then reports
+against a standard nobody asked for, which is worse than the check being off. The parsers are built
+to resist it from their side too: "Keep the log short; rotate it every 7 days" once produced a
+seven-day retention requirement, and the span a phrase may cross now stops at a semicolon so it no
+longer does. That is the direction of the whole design — a check that stays quiet costs you a
+finding, and a check that fires on a requirement nobody stated costs you working code.
+
+If a check reports "not checked" and you expected it to run, the task text is where to look. The
+four control repositories each keep one of these at `.github/gate-task.txt` if you want a smaller
+worked example: they state tests and error distinction, and deliberately state nothing about
+retention or immutability, because they store no records.
+
 ### What you get
 
 ```

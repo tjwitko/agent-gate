@@ -691,3 +691,77 @@ it (a treatment run silently becoming a control run) was not observed and remain
 make that run incomparable with `slack-sonnet-1`, the same reason
 [the retention false negative](#a-parameterised-retention-period-reads-as-no-retention-at-all--retentionmjs)
 is waiting.
+
+## Open (found by slack-opus-1)
+
+### Two S3 rules match a companion resource by module, not by the bucket it names — `rules/aws.mjs`
+
+`slack-opus-1` was refused with:
+
+```
+CRITICAL storage.immutability aws_s3_bucket.audit (aws):
+  an object lock configuration targets this bucket, but the bucket is not
+  created with object_lock_enabled = true
+```
+
+No lock configuration targeted `aws_s3_bucket.audit`. The only
+`aws_s3_bucket_object_lock_configuration` in the project named `aws_s3_bucket.archive`, which does
+set `object_lock_enabled = true`. The run diagnosed the cause correctly from the message alone, and
+the code confirms it — `rules/aws.mjs:532`:
+
+```js
+.filter((bucket) => configs.some((c) => c.module_address === bucket.module_address))
+```
+
+The association is by **module address**. Any lock configuration anywhere in a module makes every
+bucket in that module "targeted". The comment above it is honest about being a simplification: a
+new bucket's `id` is unknown at plan time, so `bucket = aws_s3_bucket.archive.id` has no literal
+value to match on.
+
+**The same shortcut is at line 182, in `aws.storage.s3-public-access-block-missing`, and there it
+fails the other way.** `pabs.find((p) => p.module_address === bucket.module_address)` returns the
+*first* public-access-block in the module and evaluates the bucket against it. A bucket with no
+public-access-block of its own inherits a sibling's and passes.
+
+Both reproduced directly against the rule functions, with a control:
+
+| Case | Configuration | Flagged | Correct |
+| --- | --- | --- | --- |
+| A | 2 buckets, 1 lock config naming the one that has the flag | `aws_s3_bucket.audit` | nothing |
+| B | 2 buckets, 1 PAB covering only the first | **nothing** | the uncovered bucket |
+| C | 2 buckets, no PAB at all | both | both |
+
+Case C matters: it shows the rule works when nothing shadows it, so B is not a dead rule but a rule
+that a correctly-configured neighbour switches off.
+
+**The comment at line 176 argues the safety of this and gets the direction wrong.** It says the
+simplification "will never wrongly flag a correctly-configured same-module setup, which is the safer
+failure direction for a blocking tool." That is true and it is not the risk. It reasons about
+wrongly *flagging* and says nothing about wrongly *passing* — and case B is a critical blocking rule
+returning clean for a bucket with no public-access protection at all. The false positive in case A
+was found in minutes because it stopped a run; case B has been in the tree unmeasured because a
+check that passes produces no evidence that it ran. That is this estate's oldest lesson arriving in
+its own code.
+
+**Severity is asymmetric between the two.** Case A cost a run some time and, as it happens, produced
+a better configuration — the audit bucket now carries its own COMPLIANCE lock. Case B would ship a
+publicly-exposable bucket under a clean scan.
+
+**What a fix needs.**
+1. Resolve the companion resource through the reference it actually declares. The plan JSON carries
+   this in `configuration.root_module.resources[].expressions.bucket.references`, which survives the
+   value being unknown at plan time — the precise gap the module shortcut was working around.
+2. **The engine currently discards it.** Nothing under `lib/` or `rules/` reads `plan.configuration`;
+   only `resource_changes` is consumed. So this is a plumbing change to the plan reader before it is
+   a rule change, and both rules consume it.
+3. Where a reference genuinely cannot be resolved, say so rather than guessing a neighbour. An
+   unresolvable association is not evidence of compliance, which is the same distinction
+   [the retention rule needs](#a-parameterised-retention-period-reads-as-no-retention-at-all--retentionmjs)
+   between *unreadable* and *absent*.
+4. Tests for all three cases above. Case B is the one that must exist; A is the visible one and
+   would have been written anyway.
+
+**Not fixed during the run**, per `RUN.md`. The run recorded case A in its own
+`docs/candidate-rules.md` and changed its configuration rather than the control, which is the
+instruction working as intended. Case B is added here — the run could not have seen it, because
+nothing in its own configuration was shaped like it.

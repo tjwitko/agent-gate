@@ -70,7 +70,17 @@ echo "---- validators ------------------------------------------------------"
 # PIPESTATUS, not $? -- after a pipeline $? is grep's status, so a run with blocking findings
 # exited 0 and would have passed anything checking this script's result.
 set +e
-node "$CONTROLS/agent/validate-project.mjs" "$DIR" "$TASK" 2>&1 | grep -v "running on stdio"
+# bin/validate.mjs, not agent/validate-project.mjs. They are two implementations of the same
+# decision and they disagreed: on a project with no Terraform and no dependency manifest, the
+# packaged one returns 1 (blocked, having run in full) and the old one returns 3 (INCOMPLETE,
+# claiming two controls never ran). Exit 1 against exit 3 is the distinction this whole control set
+# exists to protect, and the grader had it backwards.
+#
+# It mattered methodologically too: new-run.sh tells the model to validate with bin/validate.mjs, so
+# a run optimised against one program and was scored by another. The old script never learned about
+# tools with nothing in scope, deliberate-fixture exemptions, or half of the could-not-run
+# reporting, all of which the packaged entry point has.
+node "$CONTROLS/bin/validate.mjs" "$DIR" "$TASK" 2>&1 | grep -v "running on stdio"
 VERDICT=${PIPESTATUS[0]}
 set -e
 

@@ -3,10 +3,25 @@
   "version": "1.1.1",
   "description": "Deterministic security controls that run against a project and return one verdict: clean, blocked, or could-not-run.",
   "type": "module",
-  "main": "index.mjs",
+  "main": "./bin/validate.mjs",
+  "exports": {
+    ".": "./bin/validate.mjs",
+    "./delegate": "./index.mjs",
+    "./package.json": "./package.json"
+  },
   "bin": {
     "agent-gate": "./bin/validate.mjs"
   },
+  "files": [
+    "bin/",
+    "lib/",
+    "agent/",
+    "bench/langfuse-tracing.mjs",
+    "index.mjs",
+    "action.yml",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "test": "node --test agent/*.test.mjs",
     "corpus": "node corpus/run.mjs",
@@ -16,21 +31,21 @@
   "license": "Apache-2.0",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.117.1",
-    "@modelcontextprotocol/sdk": "^1.30.0",
     "@tjwitko/dep-audit-mcp": "git+https://github.com/tjwitko/dep-audit-mcp.git#v1.0.0",
     "@tjwitko/identity-guard-mcp": "git+https://github.com/tjwitko/identity-guard-mcp.git#v1.0.0",
     "@tjwitko/secret-guard-mcp": "git+https://github.com/tjwitko/secret-guard-mcp.git#v1.0.0",
-    "@tjwitko/terraform-guard-mcp": "git+https://github.com/tjwitko/terraform-guard-mcp.git#v1.0.0",
-    "axios": "^1.19.0",
-    "yaml": "^2.8.1",
-    "zod": "^4.4.3"
+    "@tjwitko/terraform-guard-mcp": "git+https://github.com/tjwitko/terraform-guard-mcp.git#v1.1.0",
+    "yaml": "^2.8.1"
   },
   "devDependencies": {
     "@langfuse/client": "^5.10.1",
     "@langfuse/otel": "^5.10.1",
     "@langfuse/tracing": "^5.10.1",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@opentelemetry/api": "^1.9.1",
-    "@opentelemetry/sdk-node": "^0.221.0"
+    "@opentelemetry/sdk-node": "^0.221.0",
+    "axios": "^1.19.0",
+    "zod": "^4.4.3"
   },
   "repository": {
     "type": "git",

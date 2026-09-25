@@ -765,3 +765,11 @@ publicly-exposable bucket under a clean scan.
 `docs/candidate-rules.md` and changed its configuration rather than the control, which is the
 instruction working as intended. Case B is added here — the run could not have seen it, because
 nothing in its own configuration was shaped like it.
+
+**Case B is fixed** in terraform-guard-mcp `52de228`, once the series closed with no Haiku run.
+`lib/plan-references.mjs` reads `configuration.root_module` and pairs each bucket with the public
+access block that names it. Three of the five new tests fail against the old rule; both fixtures and
+`slack-opus-1`'s 134-resource configuration are unchanged. **Case A is still open** — the object
+lock rule at `rules/aws.mjs:532` still pairs by module address, so it still flags a bucket no lock
+configuration targets. The resolver it needs now exists, which makes it a rule change rather than a
+plumbing one.

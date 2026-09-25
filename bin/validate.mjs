@@ -18,7 +18,7 @@ import path from "path";
 import { readFileSync, realpathSync } from "fs";
 import { fileURLToPath } from "url";
 
-import { validateProject, localTools, McpClient } from "../agent/agent-loop.mjs";
+import { validateProject, localTools, McpClient } from "../lib/gate-core.mjs";
 import { resolveControls, readConfig, CONFIG_FILE } from "../lib/resolve-controls.mjs";
 
 const EXIT = { CLEAN: 0, BLOCKED: 1, USAGE: 2, INCOMPLETE: 3 };

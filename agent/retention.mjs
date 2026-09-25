@@ -41,6 +41,74 @@ function toDays(count, unit) {
   return count * (UNIT_DAYS[unit.toLowerCase().replace(/s$/, "")] ?? 0);
 }
 
+/**
+ * A retention period as written in HCL, resolved to a number of days, or null when this cannot
+ * read it.
+ *
+ * `hclNumber` matches a literal and returns null for everything else, which is how a correct
+ * configuration came to be reported as having no retention at all: two graded runs wrote
+ * `days = var.retention_days` and `days = var.retention_days + 365`, the parse returned null, null
+ * was treated as "no expiration found", and the check told both of them "nothing here deletes the
+ * records". Parameterising the period is the better practice and doing it switched the check off.
+ *
+ * Deliberately a small subset — a number, a variable, and sums and products of those. That covers
+ * how a retention period is actually written, including the `var.years * 365` form a day count
+ * takes when the variable is in years. Anything else (a function call, a ternary, a `local.`, a
+ * variable declared with no default) returns null and is reported as unreadable by the caller,
+ * never as absent.
+ */
+export function evalDurationExpr(expr, vars = new Map()) {
+  const text = String(expr ?? "").split("#")[0].split("//")[0].trim().replace(/^"([^"]*)"$/, "$1");
+  // Parentheses, brackets, subtraction and division are not evaluated rather than guessed at.
+  if (!text || !/^[\w.\s*+]+$/.test(text)) return null;
+  let total = 0;
+  for (const term of text.split("+")) {
+    let product = 1;
+    for (const factor of term.split("*")) {
+      const f = factor.trim();
+      if (!f) return null;
+      let value;
+      if (/^\d+(?:\.\d+)?$/.test(f)) {
+        value = Number(f);
+      } else {
+        const v = /^var\.(\w+)$/.exec(f);
+        if (!v) return null;
+        const d = vars.get(v[1]);
+        // A variable with no default is unreadable here, not zero. `hclVariableDefaults` returns
+        // nothing for both "declared without a default" and "no such variable", and neither is a
+        // retention period this can state.
+        if (d === undefined) return null;
+        value = Number(d);
+        if (!Number.isFinite(value)) return null;
+      }
+      product *= value;
+    }
+    total += product;
+  }
+  return Number.isFinite(total) ? total : null;
+}
+
+/**
+ * Reads `attr = <expression>` and reports which of three things happened: the attribute is absent,
+ * present but unreadable, or resolved to a number of days.
+ *
+ * The three-way answer is the point. Collapsing "unreadable" into "absent" is the defect above;
+ * collapsing it into a violation would be worse, because a deleter with a null horizon blocks, and
+ * blocking a correct configuration over an expression this could not parse destroys working code.
+ * Unreadable is reported and never credited, never blocked.
+ */
+export function readDuration(text, attrs, vars = new Map()) {
+  for (const attr of [].concat(attrs)) {
+    const m = new RegExp(`\\b${attr}\\s*=\\s*([^\\n#]+)`).exec(text);
+    if (!m) continue;
+    const days = evalDurationExpr(m[1], vars);
+    return days === null
+      ? { state: "unreadable", attr, expression: m[1].trim() }
+      : { state: "resolved", attr, days };
+  }
+  return { state: "absent" };
+}
+
 // Longest first, so "seventeen" is not read as "seven" with a stray "teen".
 const AMOUNT = `(\\d+|${Object.keys(WORD_NUMBERS).sort((a, b) => b.length - a.length).join("|")})`;
 const UNIT = "(day|week|month|year)s?";
@@ -210,6 +278,9 @@ export function checkRetention(projectDir, { requiredDays } = {}) {
     };
   }
   const tfText = uncommented(tf.map((f) => f.text).join("\n"));
+  // Read once, up here, because every duration in this function may be written as a variable. It
+  // used to be built two thirds of the way down, next to the only rule that used it.
+  const vars = hclVariableDefaults(tfText);
 
   const deleters = [];
   const credits = [];
@@ -248,12 +319,20 @@ export function checkRetention(projectDir, { requiredDays } = {}) {
   for (const rule of s3Lifecycle) {
     if (NOT_A_RECORD_STORE.test(rule.label)) continue;
     for (const exp of [...hclBlocks(rule.body, "expiration"), ...hclBlocks(rule.body, "noncurrent_version_expiration")]) {
-      const days = hclNumber(exp, "days") ?? hclNumber(exp, "noncurrent_days");
-      if (days !== null) {
+      const read = readDuration(exp, ["days", "noncurrent_days"], vars);
+      if (read.state === "resolved") {
         deleters.push({
           what: `S3 lifecycle expiration on "${rule.label}"`,
-          horizonDays: days,
-          detail: `objects are deleted after ${humanDays(days)}`,
+          horizonDays: read.days,
+          detail: `objects are deleted after ${humanDays(read.days)}`,
+        });
+      } else if (read.state === "unreadable") {
+        // Reported, not credited and not blocked. An expiry this cannot read is not evidence that
+        // records are kept, and not evidence that they are destroyed either.
+        unnamed.push({
+          what: `S3 lifecycle expiration on "${rule.label}"`,
+          horizonDays: null,
+          detail: `its ${read.attr} is \`${read.expression}\`, which could not be resolved to a number here`,
         });
       }
     }
@@ -271,8 +350,16 @@ export function checkRetention(projectDir, { requiredDays } = {}) {
     const name = hclAttr(r.body, "name") || "";
     const identity = `${r.label} ${name}`;
     if (NOT_A_RECORD_STORE.test(identity) || INFRA_LOG_GROUP.test(identity)) continue;
-    const days = hclNumber(r.body, "retention_in_days");
-    if (days === null || days <= 0) continue;
+    const read = readDuration(r.body, ["retention_in_days"], vars);
+    if (read.state === "unreadable" && RECORD_STORE_NAME.test(identity)) {
+      unnamed.push({
+        what: `CloudWatch log group "${r.label}"`,
+        horizonDays: null,
+        detail: `its retention_in_days is \`${read.expression}\`, which could not be resolved to a number here`,
+      });
+    }
+    if (read.state !== "resolved" || read.days <= 0) continue;
+    const days = read.days;
     const entry = {
       what: `CloudWatch log group "${r.label}"`,
       horizonDays: days,
@@ -288,11 +375,21 @@ export function checkRetention(projectDir, { requiredDays } = {}) {
     ...hclResources(tfText, /^aws_s3_bucket$/),
   ]) {
     for (const dr of hclBlocks(r.body, "default_retention")) {
-      const years = hclNumber(dr, "years");
-      const days = hclNumber(dr, "days");
-      const held = years !== null ? years * 365 : days;
+      // Same three-way read as the lifecycle rule above. `years = var.retention_years` is the form
+      // that made a COMPLIANCE-mode hold invisible to this check.
+      const years = readDuration(dr, ["years"], vars);
+      const days = readDuration(dr, ["days"], vars);
+      const held =
+        years.state === "resolved" ? years.days * 365 : days.state === "resolved" ? days.days : null;
       if (held !== null) {
         credits.push({ what: `S3 Object Lock on "${r.label}"`, horizonDays: held });
+      } else if (years.state === "unreadable" || days.state === "unreadable") {
+        const read = years.state === "unreadable" ? years : days;
+        unnamed.push({
+          what: `S3 Object Lock on "${r.label}"`,
+          horizonDays: null,
+          detail: `its ${read.attr} is \`${read.expression}\`, which could not be resolved to a number here`,
+        });
       }
     }
   }
@@ -303,40 +400,41 @@ export function checkRetention(projectDir, { requiredDays } = {}) {
   // validation block refusing anything shorter -- and this check, knowing only TTLs, lifecycle
   // rules and Object Lock, told the reader "nothing here establishes it either". Not a false block,
   // since it is advisory, but a confident statement about a requirement the project had met.
-  const vars = hclVariableDefaults(tfText);
-  const resolveDays = (raw) => {
-    if (raw === null || raw === undefined) return null;
-    if (typeof raw === "number") return raw;
-    const v = /^var\.(\w+)$/.exec(String(raw).trim());
-    if (v) {
-      const d = vars.get(v[1]);
-      return d === undefined ? null : Number(d);
-    }
-    const n = Number(raw);
-    return Number.isFinite(n) ? n : null;
-  };
+  // `resolveDays` used to live here, handling a bare `var.x` and nothing else, reached through a
+  // regex that looked for `delete_after = var.NAME` specifically. It was wired to aws_backup_plan
+  // alone; the S3 paths above called `hclNumber` directly and so could not read a variable at all.
+  // One capability at one call site and absent at two others -- the same shape as the two lists
+  // disagreeing about what a credential is called. `readDuration` is now the single reader for all
+  // of them, and it handles the arithmetic forms the bare-variable version could not.
   for (const plan of hclResources(tfText, /^aws_backup_plan$/)) {
     for (const rule of hclBlocks(plan.body, "rule")) {
       for (const lc of hclBlocks(rule, "lifecycle")) {
-        const raw = hclNumber(lc, "delete_after") ?? (/\bdelete_after\s*=\s*(var\.\w+)/.exec(lc) || [])[1];
-        const days = resolveDays(raw);
+        const read = readDuration(lc, ["delete_after"], vars);
         const name = hclAttr(rule, "rule_name") || plan.label;
-        if (days === null) {
+        if (read.state === "resolved") {
+          credits.push({ what: `AWS Backup plan rule "${name}"`, horizonDays: read.days });
+        } else if (read.state === "unreadable") {
           // A horizon that cannot be resolved is not a horizon. Reported, never credited.
           unnamed.push({
             what: `AWS Backup plan rule "${name}"`,
             horizonDays: null,
-            detail: "its delete_after could not be resolved to a number here",
+            detail: `its delete_after is \`${read.expression}\`, which could not be resolved to a number here`,
           });
-        } else {
-          credits.push({ what: `AWS Backup plan rule "${name}"`, horizonDays: days });
         }
       }
     }
   }
   for (const lock of hclResources(tfText, /^aws_backup_vault_lock_configuration$/)) {
-    const days = resolveDays(hclNumber(lock.body, "min_retention_days") ?? (/\bmin_retention_days\s*=\s*(var\.\w+)/.exec(lock.body) || [])[1]);
-    if (days !== null) credits.push({ what: `AWS Backup vault lock on "${lock.label}"`, horizonDays: days });
+    const read = readDuration(lock.body, ["min_retention_days"], vars);
+    if (read.state === "resolved") {
+      credits.push({ what: `AWS Backup vault lock on "${lock.label}"`, horizonDays: read.days });
+    } else if (read.state === "unreadable") {
+      unnamed.push({
+        what: `AWS Backup vault lock on "${lock.label}"`,
+        horizonDays: null,
+        detail: `its min_retention_days is \`${read.expression}\`, which could not be resolved to a number here`,
+      });
+    }
   }
 
   // --- settings that are about restoring a database, not keeping a record --
@@ -423,6 +521,22 @@ export function retentionFailures(projectDir, { requiredDays } = {}) {
         : `retention: ${u.what} — ${u.detail}, which is shorter than the ${need} the task requires. ` +
             `Not blocking, because nothing here says whether this holds the records or only this ` +
             `service's own logs. If the records are in it, this deletes them.`
+    );
+  }
+
+  // An expiry that meets the requirement is a finding too, and saying nothing about it left the
+  // sentence below to claim the opposite. A literal `days = 1095` against a three-year requirement
+  // produced no failure, no advisory, and then "nothing here deletes the records" -- about a
+  // configuration that deletes them, on schedule, exactly as asked. Latent while few expirations
+  // parsed; reachable the moment they did, which is what surfaced it.
+  if (!failures.length && report.deleters.length) {
+    const line = report.deleters
+      .map((d) => `${d.what} (${humanDays(d.horizonDays)})`)
+      .filter((v, i, a) => a.indexOf(v) === i)
+      .join(", ");
+    advisories.push(
+      `retention: ${line} — each at or beyond the ${need} the task requires, so records are kept ` +
+        `for the period and then deleted, rather than kept indefinitely.`
     );
   }
 

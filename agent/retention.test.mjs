@@ -504,3 +504,190 @@ test("a protected KMS key draws no finding", () => {
     }
   );
 });
+
+// --- a retention period written as an expression --------------------------------------------
+//
+// The defect these cover: `hclNumber` reads a literal and returns null for anything else, and null
+// was treated as "no expiration found". Two graded runs wrote `days = var.retention_days` and
+// `days = var.retention_days + 365`, and both were told "nothing here deletes the records — no
+// TTL, no lifecycle expiration, no log retention". Parameterising the period is the better
+// practice, one variable driving both the Object Lock window and the expiry so the two cannot
+// drift, and doing it switched the check off.
+import { evalDurationExpr, readDuration } from "./retention.mjs";
+
+const THREE_YEARS = 3 * 365;
+const VARS = new Map([["retention_days", "1095"], ["retention_years", "3"], ["no_default", undefined]]);
+
+test("evalDurationExpr: reads the forms a retention period is actually written in", () => {
+  const cases = [
+    ["1095", 1095],
+    ["var.retention_days", 1095],
+    ["var.retention_years * 365", 1095],
+    ["365 * var.retention_years", 1095],
+    ["var.retention_days + 365", 1460],
+    ['"90"', 90],
+    ["var.retention_days # three years", 1095],
+  ];
+  for (const [expr, expected] of cases) {
+    assert.equal(evalDurationExpr(expr, VARS), expected, expr);
+  }
+});
+
+test("evalDurationExpr: returns null for what it cannot read, rather than a guess", () => {
+  // Each of these must be reported as unreadable by the caller. A number invented here would be
+  // worse than no answer: it would be credited as a retention period nobody wrote.
+  for (const expr of [
+    "var.missing",            // not declared, or declared with no default
+    "local.retention",        // not a variable
+    "max(var.retention_days, 90)",
+    "var.strict ? 2555 : 90",
+    "var.retention_days - 30",
+    "var.retention_days / 2",
+    "",
+  ]) {
+    assert.equal(evalDurationExpr(expr, VARS), null, expr);
+  }
+});
+
+test("readDuration: absent, unreadable and resolved are three different answers", () => {
+  assert.deepEqual(readDuration("rule {}", ["days"], VARS), { state: "absent" });
+
+  const unreadable = readDuration("days = local.whatever", ["days"], VARS);
+  assert.equal(unreadable.state, "unreadable");
+  assert.equal(unreadable.expression, "local.whatever", "the expression is quoted back to the reader");
+
+  assert.deepEqual(readDuration("days = var.retention_days", ["days"], VARS), {
+    state: "resolved",
+    attr: "days",
+    days: 1095,
+  });
+});
+
+const parameterised = (expr) => ({
+  "terraform/main.tf": `
+variable "retention_days" { default = 1095 }
+variable "retention_years" { default = 3 }
+resource "aws_s3_bucket" "audit_archive" { bucket = "audit-archive" }
+resource "aws_s3_bucket_lifecycle_configuration" "audit_archive" {
+  rule {
+    id     = "expire"
+    status = "Enabled"
+    expiration { days = ${expr} }
+  }
+}
+`,
+});
+
+test("a parameterised S3 expiration is read, not reported as no retention at all", () => {
+  for (const expr of ["var.retention_days", "var.retention_years * 365", "365 * var.retention_years"]) {
+    run(parameterised(expr), (dir) => {
+      const r = checkRetention(dir, { requiredDays: THREE_YEARS });
+      assert.equal(r.deleters.length, 1, expr);
+      assert.equal(r.deleters[0].horizonDays, 1095, expr);
+      const { failures, advisories } = retentionFailures(dir, { requiredDays: THREE_YEARS });
+      assert.deepEqual(expiryFindings({ failures }), [], `${expr} meets the requirement`);
+      assert.ok(
+        !advisories.some((a) => /nothing here deletes the records/.test(a)),
+        `${expr} must not be reported as having no retention`
+      );
+    });
+  }
+});
+
+test("an expiration shorter than the requirement is still caught when written as a variable", () => {
+  // The fix must not only stop the false negative; the rule has to keep working through it.
+  run(
+    {
+      "terraform/main.tf": `
+variable "retention_days" { default = 30 }
+resource "aws_s3_bucket" "audit_archive" { bucket = "audit-archive" }
+resource "aws_s3_bucket_lifecycle_configuration" "audit_archive" {
+  rule { id = "expire" status = "Enabled" expiration { days = var.retention_days } }
+}
+`,
+    },
+    (dir) => {
+      const r = retentionFailures(dir, { requiredDays: THREE_YEARS });
+      assert.equal(expiryFindings(r).length, 1);
+      assert.match(expiryFindings(r)[0], /destroys records before/);
+    }
+  );
+});
+
+test("an unreadable expiration is reported and never blocks", () => {
+  // The direction that matters. A deleter with a null horizon blocks, so an expression this cannot
+  // parse must not become one -- blocking a correct configuration over an unparsed expression
+  // destroys working code, which is worse than the silence it replaced.
+  run(
+    {
+      "terraform/main.tf": `
+variable "retention_days" {}
+resource "aws_s3_bucket" "audit_archive" { bucket = "audit-archive" }
+resource "aws_s3_bucket_lifecycle_configuration" "audit_archive" {
+  rule { id = "expire" status = "Enabled" expiration { days = var.retention_days } }
+}
+`,
+    },
+    (dir) => {
+      const report = checkRetention(dir, { requiredDays: THREE_YEARS });
+      assert.deepEqual(report.deleters, [], "an unreadable expiry is not a deleter");
+      assert.equal(report.unnamed.length, 1, "it is reported");
+      assert.equal(report.unnamed[0].horizonDays, null);
+
+      const r = retentionFailures(dir, { requiredDays: THREE_YEARS });
+      assert.deepEqual(expiryFindings(r), [], "and never blocks");
+      assert.ok(
+        r.advisories.some((a) => /could not be established here/.test(a)),
+        "the reader is told the period could not be read, not that there is none"
+      );
+      assert.ok(
+        !r.advisories.some((a) => /nothing here deletes the records/.test(a)),
+        "unreadable must not be reported as absent"
+      );
+    }
+  );
+});
+
+test("a parameterised Object Lock window is credited", () => {
+  run(
+    {
+      "terraform/main.tf": `
+variable "retention_years" { default = 3 }
+resource "aws_s3_bucket_object_lock_configuration" "audit_archive" {
+  bucket = "audit-archive"
+  rule { default_retention { mode = "COMPLIANCE" years = var.retention_years } }
+}
+`,
+    },
+    (dir) => {
+      const r = checkRetention(dir, { requiredDays: THREE_YEARS });
+      assert.equal(r.credits.length, 1);
+      assert.equal(r.credits[0].horizonDays, 1095);
+    }
+  );
+});
+
+test("an expiry that meets the requirement is stated, not reported as no retention", () => {
+  // Latent before parameterised periods parsed: with no expiry finding and no advisory, the
+  // fallback sentence claimed nothing deleted the records about a configuration that deletes them
+  // on the requested schedule. A literal reaches it too.
+  run(
+    {
+      "terraform/main.tf": `
+resource "aws_s3_bucket" "audit_archive" { bucket = "audit-archive" }
+resource "aws_s3_bucket_lifecycle_configuration" "audit_archive" {
+  rule { id = "expire" status = "Enabled" expiration { days = 1095 } }
+}
+`,
+    },
+    (dir) => {
+      const r = retentionFailures(dir, { requiredDays: THREE_YEARS });
+      assert.deepEqual(expiryFindings(r), []);
+      assert.ok(
+        !r.advisories.some((a) => /nothing here deletes the records/.test(a)),
+        "it deletes them, on the requested schedule"
+      );
+      assert.ok(r.advisories.some((a) => /at or beyond the 3 year\(s\)/.test(a)));
+    }
+  );
+});

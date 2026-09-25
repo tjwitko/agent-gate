@@ -112,9 +112,21 @@ cat > "$DIR/.claude/settings.local.json" <<'JSON'
       }
     ]
   },
-  "enabledMcpjsonServers": ["terraform-guard", "dep-audit", "secret-guard", "identity-guard"]
+  "enabledMcpjsonServers": ["terraform-guard", "dep-audit", "secret-guard", "identity-guard"],
+  "enableAllProjectMcpServers": false
 }
 JSON
+
+# enableAllProjectMcpServers is written explicitly, and false. Absent already behaves as false, so
+# this states the baseline rather than changing it: the run carries its own record that a standing
+# yes was not intended, and grade-run.sh compares against a value that is present rather than
+# inferred.
+#
+# It does NOT prevent one forming. Answering "use this and all future MCP servers in this project"
+# at startup rewrites this file and sets it true, which is what slack-sonnet-1 carries. What stops
+# that is the answer given at the prompt -- "Continue without using this MCP server", which
+# slack-opus-1 took and which records an explicit refusal instead. Detection is the backstop:
+# grade-run.sh reports the flag and the enabled set on every grade.
 
 # The gate spans five repositories, not one. Recording only local-delegate-mcp meant two runs could
 # carry the same "controls @" line while dep-audit or terraform-guard had changed underneath them --

@@ -551,3 +551,58 @@ internals to the caller.
 
 Detectable in principle: a broad `except Exception` enclosing a `raise HTTPException`. Not yet built,
 and it competes for attention with the two above.
+
+## Open (found by slack-sonnet-1)
+
+### A parameterised retention period reads as no retention at all — `retention.mjs`
+
+`slack-sonnet-1` was told records are retained for three years. It wrote:
+
+```hcl
+resource "aws_s3_bucket_lifecycle_configuration" "events" {
+  rule {
+    expiration { days = var.retention_years * 365 }   # retention_years default = 3
+  }
+}
+
+resource "aws_s3_bucket_object_lock_configuration" "events" {
+  rule { default_retention { mode = "COMPLIANCE", years = var.retention_years } }
+}
+```
+
+That is correct, and better than a literal: one variable drives both the Object Lock window and the
+expiry, so the two cannot drift apart. The check reported:
+
+> retention: nothing here deletes the records — no TTL, no lifecycle expiration, no log retention
+
+**Cause.** `retention.mjs:251` reads the expiry with `hclNumber(exp, "days")`, which parses a
+literal and returns `null` for an expression. A `null` is treated as "no expiration found" rather
+than "a value I could not read", so the rule is skipped and the project reads as having nothing.
+The Object Lock path has the same shape against `years = var.retention_years`.
+
+**The machinery already exists and is wired to one resource type.** `resolveDays()` at line 307
+resolves `var.NAME` against the variable defaults, and only `aws_backup_plan` calls it — lines
+318-338. The S3 paths never do. So this is not a missing capability; it is a capability present at
+one call site and absent at two others, which is the same shape as
+[the two lists disagreeing about what a credential is called](#two-lists-in-one-file-disagreeing-about-what-a-credential-is-called).
+
+Even `resolveDays` would not be enough on its own: it handles a bare `var.x` and not `var.x * 365`.
+
+**Why it matters more than an advisory usually would.** Parameterising a retention period is the
+better practice, and doing it makes the check say you have none. The remediation then tells the
+model to add a lifecycle expiration it already wrote. Every run that has thrashed in this project
+thrashed on feedback that was wrong — a model once rewrote `main.tf` three times chasing an
+init-required error the tooling had manufactured, deleting working resources on the way.
+
+**What a fix needs.**
+1. Route the S3 lifecycle and Object Lock reads through `resolveDays` rather than bare `hclNumber`.
+2. Teach it `var.x * N` and `N * var.x`, which is how a day count is written when the variable is
+   in years.
+3. Distinguish **unreadable** from **absent**. A value the parser cannot resolve is not evidence of
+   no retention, and saying "nothing here deletes the records" about a project that does is the
+   false-negative direction — the one this estate keeps finding and keeps deciding is the worse one.
+4. Tests covering: a literal, `var.x`, `var.x * 365`, `365 * var.x`, and a variable with no default
+   (which must report unreadable, not absent).
+
+**Not fixed during the run**, per `RUN.md`: this is a validator the gate runs, so changing it would
+make `slack-sonnet-1` incomparable with any later run of the same task. It waits for the last one.

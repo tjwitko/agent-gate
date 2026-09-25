@@ -609,75 +609,85 @@ make `slack-sonnet-1` incomparable with any later run of the same task. It waits
 
 ## Open (found while scaffolding slack-opus-1)
 
-### The run can rewrite the file that defines what the run is
+### A run inherits servers from the directory above it, and the approval is written into the run
 
-`bench/new-run.sh` writes the control set into the run directory and commits it, force-adding past
-a global gitignore (line 173, with the reason at 170: here it is not personal configuration, it is
-the experiment). The committed file says:
+Launching `claude --model opus` in a freshly scaffolded `slack-opus-1` prompted:
 
-```json
-"enabledMcpjsonServers": ["terraform-guard", "dep-audit", "secret-guard", "identity-guard"]
-```
+> New MCP server found in this project: local-delegate
 
-Four servers, and the script's own header states why a fifth is absent: *local-delegate is omitted.
-The local model takes no part in these runs.*
+That should be impossible in a directory whose `.mcp.json` defines exactly the servers its settings
+enable. It happens because **`bench/new-run.sh` cannot isolate a server set by writing `.mcp.json`**.
+Run directories are created under `~/LLM/`, `~/LLM/.mcp.json` exists and defines five servers, and
+the parent file is discovered too. The scaffold's four-server file adds to that; it does not replace
+it. Every run ever created under `~/LLM/` has had a fifth server offered to it at startup, and
+`new-run.sh` — whose header states *local-delegate is omitted, the local model takes no part in
+these runs* — has no way to know.
 
-Launching `claude --model opus` in `slack-opus-1` prompted **"Continue without using this MCP
-server"**, which should not happen in a directory whose `.mcp.json` defines exactly the servers its
-settings enable. `git diff` showed the session had rewritten the committed file:
+**Answering the prompt rewrites the committed control set.** From `slack-sonnet-1`, scaffold commit
+`08c5816` to deliverable commit `2fe1b62`:
 
 ```diff
--  "enabledMcpjsonServers": ["terraform-guard", "dep-audit", "secret-guard", "identity-guard"]
 +  "enabledMcpjsonServers": [
++    "terraform-guard", "dep-audit", "secret-guard", "identity-guard",
 +    "local-delegate"
++  ],
++  "enableAllProjectMcpServers": true
+-  "enabledMcpjsonServers": ["terraform-guard", "dep-audit", "secret-guard", "identity-guard"]
 ```
 
-The four controls were gone and a server not defined in that run's `.mcp.json` had taken their
-place. Nothing asked for this and nothing announced it.
+That is the signature of *Use this and all future MCP servers in this project*. The four guards are
+appended to, not replaced, and the change was swept into the model's own deliverable commit
+alongside application code, where nothing would look for it.
 
-**Why this is worse than a config error.** It moves in both directions at once. Subtracting the
-four means a run executes with no terraform-guard, no dep-audit, no secret-guard and no
-identity-guard — the treatment condition silently becomes the control condition. Adding
-local-delegate means the model can hand work to the local 7B, which is a different experiment
-entirely and the one thing every run of this series is defined as excluding. A run that did both is
-not a weaker version of the intended run; it is a run of something else, reported under the
-intended run's name.
+**`enableAllProjectMcpServers: true` is the part that lasts.** The prompt is a one-time question;
+that flag turns the answer into a standing yes. Any server added to `~/LLM/.mcp.json` afterwards
+enables itself in that run directory with no prompt at all. A run scaffolded today inherits a
+decision made during an unrelated run weeks ago, and the first opportunity to notice is a `git
+diff` nobody runs.
 
-**Nothing downstream can see it.** `bench/grade-run.sh` contains zero references to `.mcp.json`,
-`settings.local.json` or `enabledMcpjsonServers` — it never asks what the session was configured
-with. And it cannot infer it, because the gate does not read that configuration either:
-`bin/validate.mjs:54` spawns its own four servers from `resolve-controls`, so **the grade always
-runs with four controls no matter how many the session had**. The grading step is structurally
-incapable of detecting that the thing it is grading was produced under different conditions. A run
-stripped to zero controls mid-flight would grade, pass or fail, and read as a clean data point.
+**The grader cannot see any of it.** `bench/grade-run.sh` contains zero references to `.mcp.json`,
+`settings.local.json` or `enabledMcpjsonServers`. It cannot infer them either: `bin/validate.mjs:54`
+spawns its own four servers from `resolve-controls`, so **the grade always runs with four controls
+regardless of what the session had**. A run whose server set changed mid-flight grades, passes or
+fails, and reads as a clean data point. That is the finding; the rest is how it got there.
 
-This is the estate's own recurring shape pointed at the harness rather than at a validator: a check
-that cannot run does not announce itself, it just stops appearing. Here the check never even
-reaches the stage where it could fail — it is absent from the session, and the report is written by
-a process that was never told.
+**What it did not cost, checked rather than assumed.**
 
-**What made it visible was luck.** Claude Code happens to prompt interactively when enabled servers
-and defined servers disagree, and the run had not started yet. Had the rewrite dropped a server
-that *was* defined, or landed mid-run, or had the prompt been accepted to get on with the run,
-there would have been no signal at all — only a `RUN.md` asserting five frozen control SHAs that
-the run did not use.
+- *`slack-sonnet-1` is still valid.* It ran with `local-delegate` enabled, but the delegation ledger
+  at `~/Library/Application Support/local-delegate-mcp/ledger.json` holds 17 entries whose most
+  recent is `2026-08-21T16:46Z` — over a month before the run, and zero in September 2026. The
+  server was reachable and never called. All four guards stayed enabled throughout. No re-run.
+- *Containment never depended on the winning definition.* The parent's guard entries omit
+  `SCAN_ROOT` and `TF_WORKING_ROOT`, so a merge favouring them looked like it would uncontain the
+  scanners. `index.mjs:63` resolves `process.env.TF_WORKING_ROOT || process.cwd()`, and the servers
+  are spawned with the run directory as cwd. Verified directly by spawning terraform-guard with
+  neither variable set: `terraform_validate` resolved normally. Containment lands in the same place
+  either way.
 
 **What a fix needs.**
-1. `grade-run.sh` reads `.mcp.json` and `.claude/settings.local.json` as they stand at grade time,
-   compares them against the scaffold commit that pinned them, and reports any divergence. Both
-   files are tracked, so `git diff --exit-code <commit> -- .mcp.json .claude/settings.local.json`
-   is the whole check.
-2. Divergence is **blocking for the comparison, not for the deliverable**. The code may be fine;
-   what is not fine is filing it beside runs whose conditions held. The grade should print the
-   control set it can prove was configured, and say so plainly when it cannot.
-3. Report the enabled set on every grade, clean or not, for the same reason exemptions are reported
-   on every scan in `identity-guard-mcp`: a configuration that is only mentioned when it is wrong
-   is a configuration nobody reads.
-4. Consider pinning the same way `RUN.md` pins control SHAs — the enabled server list recorded at
-   scaffold time, verified at grade time, so the two can be checked against each other rather than
-   against an assumption.
+1. `grade-run.sh` diffs `.mcp.json` and `.claude/settings.local.json` against the scaffold commit
+   that pinned them. Both are tracked, so `git diff --exit-code <commit> -- <both>` is the check.
+2. Report the enabled set on **every** grade, clean or not — the same reason `identity-guard-mcp`
+   reports exemptions on every scan. A configuration mentioned only when it is wrong is one nobody
+   reads.
+3. Treat divergence as blocking for the *comparison*, not the deliverable. The code may be fine;
+   filing it beside runs whose conditions held is what is not.
+4. Decide what the scaffold should do about the parent file, since it cannot out-write it. Creating
+   runs outside `~/LLM/` would end the inheritance; so would scaffolding
+   `"enableAllProjectMcpServers": false` explicitly, which at least keeps the standing yes from
+   forming. Neither is free and both change the apparatus, so this wants deciding, not patching.
 
-**Not fixed during the run.** `grade-run.sh` grades the run in flight; changing it now would make
-`slack-opus-1` incomparable with `slack-sonnet-1`, the same reason
+**Correction to the first version of this entry.** It claimed the four controls "were gone", that a
+server had "taken their place", and that "nothing asked for this and nothing announced it". All
+three are wrong. The guards were retained, `local-delegate` was appended, and Claude Code asked
+plainly before writing anything. The error came from reading a truncated `git diff` hunk in which
+the removed line scrolled past the added ones, and inferring substitution from their adjacency —
+a conclusion drawn from the shape of a diff rather than from its content, which is the same failure
+mode as the empty greps that made thirteen good bundles look corrupt. The severity claim built on
+it (a treatment run silently becoming a control run) was not observed and remains hypothetical; what
+*was* observed is a standing yes, an unread config, and a grader that checks neither.
+
+**Not fixed during the run.** `grade-run.sh` grades `slack-opus-1` in flight; changing it now would
+make that run incomparable with `slack-sonnet-1`, the same reason
 [the retention false negative](#a-parameterised-retention-period-reads-as-no-retention-at-all--retentionmjs)
-is waiting. The settings file was reverted by hand before the run started, and the tree is clean.
+is waiting.

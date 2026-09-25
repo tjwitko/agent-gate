@@ -102,6 +102,27 @@ that rotates correctly. Fixed by matching only real managed-store APIs, and by r
 identifier to be the same identifier assigned near the fetch. A conditional guarding something else
 is not evidence of a cache.
 
+### Retention verified against the period the task states — `retention.mjs` (was open item 3)
+
+Built, and the concern that kept it open was the thing that shaped it. The period lives in the task
+text, so `taskRetentionRequirement()` parses it out and `agent-loop.mjs` passes it to
+`retentionFailures()`; nothing assumes seven years. Verified against the three cases that matter:
+
+```
+"Records are retained for three years."  -> 1095 days
+"kept for seven years"                   -> 2555 days
+"no statement here"                      -> null, and the check stays off
+```
+
+That last line is the point. A project nobody asked to retain anything is not defective for not
+retaining it, and a check that fired regardless would be the benchmark-hardcoding this file exists
+to catch.
+
+The entry stayed under **Open** after it was built, which is its own small lesson: a backlog that
+lists finished work as outstanding wastes exactly the attention it is meant to direct, and the
+stale direction is the expensive one. Found while answering "what is left?" rather than by anything
+that checks.
+
 ### Timing-unsafe comparison of a non-signature credential — `authentication.mjs` (was open item 2)
 
 `leakySignatureCheck` covered signatures only. Kept as a separate finding rather than folded in, for
@@ -531,18 +552,7 @@ literal string `region` where the region belongs. Neither is currently checked e
 **Shape to test, not spelling:** a statement key that is not in the IAM grammar, and a condition
 key that no statement in the document actually uses. Both are cheap once the semantics are known.
 
-### 3. Retention is never verified against the stated period
-
-The task says "records are retained for seven years". Nothing checks that a configured retention
-matches the requirement. webhook-5 got this right (Object Lock COMPLIANCE, 2555 days) and so did
-webhook-1 — but by inspection, not because anything verified it.
-
-Harder than it looks, and the reason it is still open: the period lives in the task text, so this
-needs the requirement parsed out and compared against a plan value, which is a different kind of
-check from everything else here. A version that assumed seven years universally would be
-benchmark-hardcoding of exactly the kind this file exists to catch.
-
-### 4. Client errors surfacing as 500
+### 3. Client errors surfacing as 500
 
 webhook-5 wraps its handler body in `except Exception`, which catches the `HTTPException(400)` it
 raises itself and re-raises it as a 500 carrying `"400: Missing event ID"` — leaking the intended
@@ -552,7 +562,7 @@ internals to the caller.
 Detectable in principle: a broad `except Exception` enclosing a `raise HTTPException`. Not yet built,
 and it competes for attention with the two above.
 
-## Open (found by slack-sonnet-1)
+## Resolved (found by slack-sonnet-1)
 
 ### A parameterised retention period reads as no retention at all — `retention.mjs`
 
@@ -703,7 +713,7 @@ make that run incomparable with `slack-sonnet-1`, the same reason
 [the retention false negative](#a-parameterised-retention-period-reads-as-no-retention-at-all--retentionmjs)
 is waiting.
 
-## Open (found by slack-opus-1)
+## Resolved (found by slack-opus-1)
 
 ### Two S3 rules match a companion resource by module, not by the bucket it names — `rules/aws.mjs`
 

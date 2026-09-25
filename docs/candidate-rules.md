@@ -604,8 +604,19 @@ init-required error the tooling had manufactured, deleting working resources on 
 4. Tests covering: a literal, `var.x`, `var.x * 365`, `365 * var.x`, and a variable with no default
    (which must report unreadable, not absent).
 
-**Not fixed during the run**, per `RUN.md`: this is a validator the gate runs, so changing it would
-make `slack-sonnet-1` incomparable with any later run of the same task. It waits for the last one.
+**Fixed** in `902fd12`, once the series closed with no Haiku run. `readDuration` replaces
+`hclNumber` for every duration in the file and answers three ways — absent, unreadable, resolved —
+with unreadable reported and never credited, and deliberately never blocking. It evaluates numbers,
+variables, and sums and products of those, covering `var.years * 365` and `var.days + 365`.
+
+Writing the tests turned up a second defect the first one had been hiding: an expiry that **meets**
+the requirement produced no failure and no advisory, so the fallback sentence claimed nothing
+deleted the records about a configuration that deletes them exactly as asked. A literal reaches it
+too, so it predates the parameterised case — it was simply unreachable while so few expirations
+parsed. Fixed in the same commit.
+
+Nine tests, five of which fail against the old call sites. Both graded runs re-scan
+`BLOCKING: none` and now report their retention correctly.
 
 ## Open (found while scaffolding slack-opus-1)
 

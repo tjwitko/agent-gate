@@ -202,7 +202,7 @@ PROMPT
   echo
   echo "  3. when it says it is done:"
   echo
-  echo "       $CONTROLS/bench/grade-run.sh $NAME"
+  echo "       $CONTROLS/bench/grade-run.sh $PREFIX-$NAME"
   echo
   exit 0
 fi
@@ -219,7 +219,7 @@ PROMPT
   echo
   echo "  3. when it says it is done:"
   echo
-  echo "       $CONTROLS/bench/grade-run.sh $NAME"
+  echo "       $CONTROLS/bench/grade-run.sh $PREFIX-$NAME"
   echo
   exit 0
 fi
@@ -240,5 +240,5 @@ PROMPT
 echo
 echo "  3. when it says it is done:"
 echo
-echo "       $CONTROLS/bench/grade-run.sh $NAME"
+echo "       $CONTROLS/bench/grade-run.sh $PREFIX-$NAME"
 echo

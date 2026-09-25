@@ -22,11 +22,18 @@ set -euo pipefail
 
 LLM_ROOT="${LLM_ROOT:-$HOME/LLM}"
 CONTROLS="$LLM_ROOT/local-delegate-mcp"
+# The webhook task is the default because eleven graded runs used it and a comparison against them
+# has to be against the same task. A different task is an explicit choice, and it carries its own
+# directory prefix so a run directory always says which task produced it.
 TASK="$CONTROLS/agent/fixtures/webhook-receiver-task.txt"
+PREFIX="webhook"
 
 if [ $# -lt 1 ]; then
-  echo "usage: $(basename "$0") <run-name> [model] [--agents-md|--inline-stanza]" >&2
+  echo "usage: $(basename "$0") <run-name> [model] [--task <file>] [--prefix <str>] [--agents-md|--inline-stanza]" >&2
   echo "example: $(basename "$0") haiku-2 haiku" >&2
+  echo "example: $(basename "$0") sonnet-1 sonnet --task agent/fixtures/slack-socket-task.txt --prefix slack" >&2
+  echo "  --task    task fixture to build (default: the webhook receiver the graded runs used)" >&2
+  echo "  --prefix  run directory prefix (default: webhook). Use one that names the task." >&2
   echo "  --agents-md      write AGENTS.md from templates/, and print the CONTROL prompt (which says" >&2
   echo "                   nothing about validating) so the file is what has to carry it" >&2
   echo "  --inline-stanza  put the stanza text in the prompt itself. Use this to test what a CLAUSE" >&2
@@ -41,14 +48,19 @@ MODEL=""
 AGENTS_MD=0
 INLINE_STANZA=0
 shift
-for a in "$@"; do
-  case "$a" in
+while [ $# -gt 0 ]; do
+  case "$1" in
     --agents-md) AGENTS_MD=1 ;;
     --inline-stanza) INLINE_STANZA=1 ;;
-    *) MODEL="$a" ;;
+    --task) shift; [ $# -gt 0 ] || { echo "--task needs a file" >&2; exit 2; }
+            case "$1" in /*) TASK="$1" ;; *) TASK="$CONTROLS/$1" ;; esac ;;
+    --prefix) shift; [ $# -gt 0 ] || { echo "--prefix needs a value" >&2; exit 2; }
+              PREFIX="$1" ;;
+    *) MODEL="$1" ;;
   esac
+  shift
 done
-DIR="$LLM_ROOT/webhook-$NAME"
+DIR="$LLM_ROOT/$PREFIX-$NAME"
 
 [ -f "$TASK" ] || { echo "no task fixture at $TASK" >&2; exit 1; }
 
@@ -125,12 +137,13 @@ for r in $CONTROL_REPOS; do
   git -C "$LLM_ROOT/$r" diff --quiet 2>/dev/null || GATE_DIRTY=" (UNCOMMITTED CHANGES — this run is not reproducible)"
 done
 
+TASK_REL="$(python3 -c 'import os,sys;print(os.path.relpath(sys.argv[1], sys.argv[2]))' "$TASK" "$CONTROLS" 2>/dev/null || basename "$TASK")"
 cat > "$DIR/RUN.md" <<MD
-# webhook-$NAME
+# $PREFIX-$NAME
 
 - started: $(date -u +"%Y-%m-%dT%H:%MZ")
 - model: ${MODEL:-unspecified}
-- task: agent/fixtures/webhook-receiver-task.txt @ $(git -C "$CONTROLS" log -1 --format=%h -- agent/fixtures/webhook-receiver-task.txt 2>/dev/null || echo unknown)
+- task: $TASK_REL @ $(git -C "$CONTROLS" log -1 --format=%h -- "$TASK" 2>/dev/null || echo unknown)
 
 ## Controls
 $(gate_lines)
@@ -148,11 +161,16 @@ if [ "$AGENTS_MD" = "1" ]; then
   sed "s#{{VALIDATE_COMMAND}}#$VALIDATE_COMMAND#" "$CONTROLS/templates/AGENTS.md.tmpl" > "$DIR/AGENTS.md"
 fi
 
+# The run records the task it was built for. Grading used to hardcode the webhook fixture, so
+# grading a different task would have re-validated it against the wrong requirements and reported
+# task-gated checks as "not checked" on a project that was asked for exactly those things.
+printf '%s\n' "$TASK" > "$DIR/.bench-task"
+
 git -C "$DIR" init -q
 # -f because a global gitignore excludes .claude/settings.local.json. Here it is not personal
 # preference but part of the apparatus: without it in the repository the terraform hook is silently
 # inactive and the run is not the run you think it is.
-git -C "$DIR" add -f .mcp.json .claude/settings.local.json RUN.md
+git -C "$DIR" add -f .mcp.json .claude/settings.local.json RUN.md .bench-task
 [ "$AGENTS_MD" = "1" ] && git -C "$DIR" add -f "$DIR/AGENTS.md"
 git -C "$DIR" -c user.name="bench" -c user.email="bench@localhost" \
   commit -q -m "Pin the security controls to this project before the run starts

@@ -12,6 +12,9 @@ set -euo pipefail
 
 LLM_ROOT="${LLM_ROOT:-$HOME/LLM}"
 CONTROLS="$LLM_ROOT/local-delegate-mcp"
+# Default only. The real answer comes from the run itself, below: a run built for one task and
+# graded against another reports its task-gated checks as "not checked" on a project that was asked
+# for exactly those things, which reads as the model omitting them.
 TASK="$CONTROLS/agent/fixtures/webhook-receiver-task.txt"
 
 [ $# -ge 1 ] || { echo "usage: $(basename "$0") <run-name|path> [--install]" >&2; exit 2; }
@@ -20,11 +23,30 @@ ARG="$1"; shift
 INSTALL=0
 for a in "$@"; do [ "$a" = "--install" ] && INSTALL=1; done
 
-if [ -d "$ARG" ]; then DIR="$(cd "$ARG" && pwd)"; else DIR="$LLM_ROOT/webhook-$ARG"; fi
+# A bare name may be a run of any task now. Try it as given first, then the webhook prefix the
+# eleven graded runs used, so `grade-run.sh haiku-2` keeps working.
+if [ -d "$ARG" ]; then DIR="$(cd "$ARG" && pwd)"
+elif [ -d "$LLM_ROOT/$ARG" ]; then DIR="$LLM_ROOT/$ARG"
+else DIR="$LLM_ROOT/webhook-$ARG"; fi
 [ -d "$DIR" ] || { echo "no such run: $DIR" >&2; exit 1; }
+
+# Written by new-run.sh. Absent for a run scaffolded before this existed, which is every graded run
+# so far -- those are all the webhook task, which is the default.
+if [ -f "$DIR/.bench-task" ]; then
+  RECORDED="$(head -1 "$DIR/.bench-task")"
+  if [ -f "$RECORDED" ]; then
+    TASK="$RECORDED"
+  else
+    echo "  !! $DIR/.bench-task names $RECORDED, which does not exist." >&2
+    echo "     Grading against $TASK instead; task-gated checks may not match what was asked." >&2
+  fi
+fi
 
 echo "===================================================================="
 echo " run      : $DIR"
+# Printed because a grader that silently used a different task than the run was built for is the
+# mismatch .bench-task exists to prevent, and a reader cannot tell from the verdict alone.
+echo " task     : $(basename "$TASK")"
 # All five control repos, because the gate is not one repository. Two runs once carried identical
 # "controls @" lines while dep-audit had changed between them.
 for r in local-delegate-mcp terraform-guard-mcp dep-audit-mcp secret-guard-mcp identity-guard-mcp; do

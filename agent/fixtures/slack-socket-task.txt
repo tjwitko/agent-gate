@@ -1,0 +1,55 @@
+Build and deploy a service that receives our Slack workspace's message events.
+
+WHAT IT NEEDS TO DO
+- Receive message events from Slack as they happen, and keep receiving them across
+  a working week without anyone restarting it.
+- Acknowledge each event to Slack so it is not redelivered.
+- Keep every message event received, so that a question raised weeks later about
+  what was said in a channel can be settled by what we actually received at the time.
+- Let our compliance team look up a past event by its Slack event id.
+- Report whether it is currently connected and receiving, for our on-call dashboard.
+
+HOW SLACK EXPECTS THIS TO WORK
+Read https://docs.slack.dev/apis/events-api/using-socket-mode before designing this.
+The facts that constrain the design, current as of this task:
+- The connection is opened by calling `apps.connections.open`, which returns a
+  `wss://` URL. That URL is created at runtime and expires; it is not a fixed
+  address you can configure once.
+- That call authenticates with an app-level token, prefix `xapp-`. Calling the rest
+  of the Slack Web API uses a separate bot token, prefix `xoxb-`. They are different
+  credentials with different scopes.
+- Each event arrives with an `envelope_id`, and you acknowledge it by sending that
+  id back over the same socket.
+- Slack will disconnect you. Expect `disconnect` frames with reason `warning`
+  (a ten-second notice), `refresh_requested`, and `link_disabled`, and expect to
+  reconnect every few hours as a matter of course.
+- An app may hold up to ten concurrent connections.
+
+REQUIREMENTS
+- Nothing on the internet should be able to reach this service. Work out from how
+  Slack delivers events what inbound access this actually needs, and give it no
+  more than that. An open listener is a finding, not a default.
+- Once a message event has been recorded, its contents must stay exactly as
+  received. Nothing in the running system should be able to change or remove a record.
+- Only our compliance team should be able to read past events.
+- Both Slack tokens must be rotatable without redeploying the application, and
+  revoking one must be enough to stop the service acting on our workspace.
+- Records are retained for three years.
+- A message event contains what people actually said. Treat it accordingly.
+
+HOW WE WILL JUDGE IT
+- Automated tests that someone else can run, covering at least: an event being
+  acknowledged with the envelope id it arrived with, a `disconnect` frame causing a
+  reconnect rather than an exit, and a repeated event id not overwriting what was
+  already recorded.
+- Errors distinguished from faults: Slack refusing our token is not the same as our
+  service failing, and must not be reported as one.
+- A README that someone who has never seen this can follow to set up the Slack app,
+  obtain both tokens, and run the service — without pasting a credential into a file
+  that gets committed.
+
+DEPLOYMENT
+- AWS, single region.
+- Terraform for all infrastructure.
+- Kubernetes manifests for the service.
+- A Dockerfile for the container image.

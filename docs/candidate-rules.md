@@ -766,10 +766,18 @@ publicly-exposable bucket under a clean scan.
 instruction working as intended. Case B is added here — the run could not have seen it, because
 nothing in its own configuration was shaped like it.
 
-**Case B is fixed** in terraform-guard-mcp `52de228`, once the series closed with no Haiku run.
-`lib/plan-references.mjs` reads `configuration.root_module` and pairs each bucket with the public
-access block that names it. Three of the five new tests fail against the old rule; both fixtures and
-`slack-opus-1`'s 134-resource configuration are unchanged. **Case A is still open** — the object
-lock rule at `rules/aws.mjs:532` still pairs by module address, so it still flags a bucket no lock
-configuration targets. The resolver it needs now exists, which makes it a rule change rather than a
-plumbing one.
+**Both are fixed**, once the series closed with no Haiku run: case B in terraform-guard-mcp
+`52de228`, case A in `f61f3cf`. `lib/plan-references.mjs` reads `configuration.root_module` and
+pairs each bucket with the companion resource that names it. Five of the eight new tests fail
+against the old rules — the rest guard the new code rather than covering a defect, which is worth
+distinguishing when counting.
+
+Each rule turned out to be wrong in both directions, not one. The public-access-block rule also
+could not see a block naming a bucket in another module; the object-lock rule could not see a lock
+configuration naming a bucket in another module, which is a pairing that fails at apply. The
+false positive in case A was visible because it stopped a run. The two cross-module misses and the
+case B false negative produced no output at all, which is why the shortcut survived a full test
+suite and eleven graded runs.
+
+Both fixtures and `slack-opus-1`'s 134-resource configuration are unchanged, and the exact refusal
+the run reported was reproduced word for word on a real plan before the fix and is gone after it.

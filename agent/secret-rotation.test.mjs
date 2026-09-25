@@ -143,3 +143,40 @@ test("a wider vocabulary does not invent a rotation requirement", () => {
     assert.equal(taskRequiresRotation(task), false, task);
   }
 });
+
+// A requirement stated as an adjective, which is how the Slack benchmark task states it:
+// "Both Slack tokens must be rotatable without redeploying the application." ROTATION_PHRASES
+// listed rotate/rotates/rotated/rotating/rotation and not rotatable, so that fell through and
+// secret_rotation was gated off for two graded runs -- neither ever checked for caching a token
+// forever. Nothing reported it, because a gated-off check says "not checked", which reads as
+// unremarkable rather than as a requirement nobody looked at.
+test("taskRequiresRotation reads the requirement however English states it", () => {
+  for (const task of [
+    "Both Slack tokens must be rotatable without redeploying the application.",
+    "The API key must be rotated every 90 days.",
+    "Tokens must support rotation without redeploying.",
+    "Token rotations must not drop traffic.",
+    "Token rotatability is a requirement.",
+  ]) {
+    assert.equal(taskRequiresRotation(task), true, task);
+  }
+});
+
+test("the wider net does not catch words that merely start the same way", () => {
+  // `rotat\w*` would have been the lazy fix and would swallow both of these. The forms are listed
+  // rather than stemmed for exactly this reason.
+  for (const task of [
+    "The token feeds a rotator cuff exercise tracker.",
+    "Credentials are rotationally symmetric, whatever that would mean.",
+  ]) {
+    assert.equal(taskRequiresRotation(task), false, task);
+  }
+});
+
+test("a rotation word still needs a secret to act on", () => {
+  // Bare "key" is not a secret noun -- a sort key, a partition key, a primary key -- so the
+  // SECRET_WORD conjunction is what keeps this from firing on ordinary schema talk.
+  assert.equal(taskRequiresRotation("Key rotations must not drop traffic."), false);
+  assert.equal(taskRequiresRotation("API key rotations must not drop traffic."), true);
+  assert.equal(taskRequiresRotation("Rotate the log files weekly."), false);
+});

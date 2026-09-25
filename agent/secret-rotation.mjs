@@ -29,8 +29,16 @@ const SECRET_NOUN = /(?:secrets?|signing\s+keys?|api\s+keys?|credentials?|tokens
 
 // Words that mean rotation on their own. In a requirements document these have no other reading,
 // so they need no proximity constraint beyond the SECRET_WORD conjunction below.
+// `able` is in this list because it was missing from it. The Slack benchmark task states
+// "Both Slack tokens must be rotatable without redeploying the application" -- as plain a rotation
+// requirement as the webhook task's "rotated every 90 days" -- and the adjective form fell straight
+// through, so secret_rotation was gated off for two graded runs. Neither was ever checked for
+// caching a token forever, and nothing said so: a gated-off check reports "not checked", which
+// reads as unremarkable rather than as a requirement nobody looked at. Stemming the whole word
+// (`rotat\w*`) would also swallow "rotator" and "rotationally", so the forms are still listed;
+// the list was just wrong about which ones a requirements document uses.
 const ROTATION_PHRASES = [
-  /\brotat(?:e|es|ed|ing|ion)\b/i,
+  /\brotat(?:e|es|ed|ing|ion|ions|able|ability)\b/i,
   /\bre-?issues?\b/i,
   /\brenew(?:s|ed|al|ing)?\b/i,
 ];

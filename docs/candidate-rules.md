@@ -628,7 +628,7 @@ parsed. Fixed in the same commit.
 Nine tests, five of which fail against the old call sites. Both graded runs re-scan
 `BLOCKING: none` and now report their retention correctly.
 
-## Open (found while scaffolding slack-opus-1)
+## Resolved, in part (found while scaffolding slack-opus-1)
 
 ### A run inherits servers from the directory above it, and the approval is written into the run
 
@@ -697,6 +697,24 @@ fails, and reads as a clean data point. That is the finding; the rest is how it 
    runs outside `~/LLM/` would end the inheritance; so would scaffolding
    `"enableAllProjectMcpServers": false` explicitly, which at least keeps the standing yes from
    forming. Neither is free and both change the apparatus, so this wants deciding, not patching.
+
+**1 to 3 are done** in `ca9ea03`. `bench/control-set.mjs` reduces a run's configuration to what
+decides comparability — servers defined, servers enabled, a standing yes, hooks wired — and
+`grade-run.sh` compares that against the scaffold commit and prints it on every grade. Drift is
+blocking for the comparison and not for the deliverable: the exit code stays the validator's
+verdict.
+
+**The comparison is semantic, and that was not the first attempt.** The first version diffed the
+files and reported drift on `slack-opus-1`, whose only changes were pretty-printing and an explicit
+refusal of the inherited server — a narrowing, and the outcome the prompt is meant to produce.
+Claude Code rewrites `settings.local.json` on any interaction, so byte comparison would have fired
+on nearly every run. A check that always fires is one nobody reads, which is how `.gitleaksignore`
+stopped meaning anything, and it would have been this file's own lesson landing in the tool built to
+apply it. Caught by running it against the two real runs before trusting it.
+
+**4 is still open**, and is a decision about the apparatus rather than a defect to fix. Detection
+now exists either way: a run that inherits a server is reported at grade time whether or not the
+scaffold is changed to prevent it.
 
 **Correction to the first version of this entry.** It claimed the four controls "were gone", that a
 server had "taken their place", and that "nothing asked for this and nothing announced it". All

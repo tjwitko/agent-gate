@@ -462,28 +462,6 @@ async function chat(model, messages, tools, maxTokens, provider = "local") {
 // called check_dependencies or web_search at all. A tool the model may or may not invoke is not a
 // guardrail. Note the gate is on validators *passing*, not on tools having been *called* — a model
 // can call a validator, receive errors, and finish anyway, which is exactly what happened in one run.
-// Loaded from local-copilot-stack so the loop and the git hook cannot disagree about what makes
-// a dependency scan authoritative. Absent sibling repo => treat as not authoritative, which is
-// the advisory (non-blocking) direction.
-// Loaded from terraform-guard so the loop and the tool share one definition of what went
-// missing. Absent sibling repo => no findings, the non-blocking direction.
-// Checkov, advisory only. It earns its place for one reason: it parses HCL directly, so it runs
-// on configurations that cannot produce a plan — which was six out of six generated deliverables.
-// Every plan-based check (this project's rule engine, and OPA/Conftest equally) had nothing to
-// evaluate on any of them.
-//
-// Three things it does that would mislead an agent if passed through raw:
-//
-//  1. Without --download-external-modules it silently skips files whose modules it cannot resolve.
-//  2. WITH that flag it reports findings inside the downloaded modules — 9 of 11 on one real
-//     config. Those are not the caller's to fix, and this project has already watched a model
-//     rewrite its own working files ten times chasing errors that lived in vendored code.
-//  3. A file that fails to parse is skipped, and unless parsing_errors is read back the result of
-//     a broken config is few findings, which reads as a clean one.
-//
-// So: the flag is on, vendored findings are dropped (and counted, never silently), coverage is
-// reported against the .tf files actually present, and parsing errors are named.
-
 async function main() {
   const opts = parseArgs();
   mkdirSync(opts.project, { recursive: true });
@@ -497,6 +475,7 @@ async function main() {
   const candidates = [
     {
       name: "terraform-guard",
+      envVar: "TFGUARD_SERVER",
       // The interesting one: it can refuse, and its refusals come back as structured violations
       // the model can parse and act on.
       entry: process.env.TFGUARD_SERVER || path.join(siblings, "terraform-guard-mcp", "index.mjs"),
@@ -504,11 +483,13 @@ async function main() {
     },
     {
       name: "dep-audit",
+      envVar: "DEPAUDIT_SERVER",
       entry: process.env.DEPAUDIT_SERVER || path.join(siblings, "dep-audit-mcp", "index.mjs"),
       env: { SCAN_ROOT: opts.project },
     },
     {
       name: "identity-guard",
+      envVar: "IDENTITYGUARD_SERVER",
       entry: process.env.IDENTITYGUARD_SERVER || path.join(siblings, "identity-guard-mcp", "index.mjs"),
       env: { SCAN_ROOT: opts.project },
     },
@@ -517,6 +498,7 @@ async function main() {
       // half of the secret protection: the half that actually holds is the write_file
       // interception above, which does not depend on the model choosing to call anything.
       name: "secret-guard",
+      envVar: "SECRETGUARD_SERVER",
       entry: process.env.SECRETGUARD_SERVER || path.join(siblings, "secret-guard-mcp", "index.mjs"),
       env: { SCAN_ROOT: opts.project },
     },
@@ -529,8 +511,12 @@ async function main() {
       // real either way, so it stays something you turn on deliberately. Empirically the model
       // also never called it across three runs where it was available.
       name: "web-search",
+      envVar: "WEBSEARCH_SERVER",
       entry:
         process.env.WEBSEARCH_SERVER ||
+        // The author's checkout. Any MCP server exposing a `web_search` tool works, and unlike
+        // the four controls this one has no published home, so WEBSEARCH_SERVER is the path
+        // anyone else will take.
         path.join(siblings, "local-copilot-stack", "mcp-web-search", "index.mjs"),
       env: {},
       optIn: true,
@@ -543,7 +529,12 @@ async function main() {
   for (const c of candidates) {
     if (c.optIn && !opts.webSearch) continue;
     if (!existsSync(c.entry)) {
-      console.error(`[loop] skipping ${c.name}: no server at ${c.entry}`);
+      // Name the override. The sibling default is a convenience, not a requirement -- web-search
+      // defaults into local-copilot-stack, which is not published, so without this the message
+      // reads as "you are missing something you cannot get" rather than "tell me where yours is".
+      console.error(
+        `[loop] skipping ${c.name}: no server at ${c.entry}. Set ${c.envVar} to its entry point.`
+      );
       continue;
     }
     servers.push(new McpClient(c.name, "node", [c.entry], c.env));

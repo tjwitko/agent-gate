@@ -6,7 +6,6 @@
   "main": "./bin/validate.mjs",
   "exports": {
     ".": "./bin/validate.mjs",
-    "./delegate": "./index.mjs",
     "./package.json": "./package.json"
   },
   "bin": {
@@ -16,8 +15,10 @@
     "bin/",
     "lib/",
     "agent/",
-    "bench/langfuse-tracing.mjs",
-    "index.mjs",
+    "!agent/*.test.mjs",
+    "!agent/agent-loop.mjs",
+    "!agent/anthropic-adapter.mjs",
+    "!agent/README.md",
     "action.yml",
     "README.md",
     "LICENSE"

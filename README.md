@@ -53,15 +53,15 @@ script on `PATH` is a different fact and will not satisfy it.
 
 ### Install
 
-Latest release: **[v1.1.1](https://github.com/tjwitko/agent-gate/releases/latest)**
+Latest release: **[v1.1.2](https://github.com/tjwitko/agent-gate/releases/latest)**
 
 ```bash
-npm install --save-dev github:tjwitko/agent-gate#v1.1.1
+npm install --save-dev github:tjwitko/agent-gate#v1.1.2
 ```
 
 The four control servers come with it as dependencies — there is nothing else to clone or wire up.
 They are pinned to their own `v1.0.0` tags, so this installs the same five components every time.
-Drop the `#v1.1.1` to track `main` instead, which moves.
+Drop the `#v1.1.2` to track `main` instead, which moves.
 
 ### Run it
 
@@ -186,7 +186,7 @@ jobs:
       - uses: hashicorp/setup-terraform@v3
         with: { terraform_version: "1.15.8", terraform_wrapper: false }
 
-      - uses: tjwitko/agent-gate@v1.1.1
+      - uses: tjwitko/agent-gate@v1.1.2
         with:
           project: .
           task-file: task.txt

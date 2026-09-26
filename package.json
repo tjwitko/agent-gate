@@ -1,6 +1,6 @@
 {
   "name": "@tjwitko/agent-gate",
-  "version": "1.1.2",
+  "version": "1.1.3",
   "description": "Deterministic security controls that run against a project and return one verdict: clean, blocked, or could-not-run.",
   "type": "module",
   "main": "./bin/validate.mjs",

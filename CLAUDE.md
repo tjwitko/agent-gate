@@ -5,11 +5,12 @@ deterministic security controls that run against a project and return one verdic
 or could-not-run. It is a CLI, a GitHub Action and a library, and it is what the repository is
 named, versioned and released as.
 
-It is *also* still `local-delegate-mcp`, the MCP server in `index.mjs` that delegates subtasks to a
-locally-hosted model. That came first and the repository grew around it. The two share nothing at
-runtime: the gate never calls the local model, and the delegation server never runs a validator.
-Keep them apart when reading and when changing things — packaging defects from exactly this
-confusion are recorded below.
+It used to be `local-delegate-mcp` as well — an MCP server that delegates subtasks to a
+locally-hosted model. That came first and the gate grew around it. It now lives in
+[delegate-mcp](https://github.com/tjwitko/delegate-mcp), extracted at `6e08218`, because keeping
+both here cost three releases' worth of packaging defects: `main` resolved to the delegation server,
+and a security package listed `axios` as a runtime dependency. Nothing in this repository calls a
+model.
 
 ## The gate
 
@@ -43,11 +44,10 @@ the CLI, the pre-commit hook, and CI.
   not run was indistinguishable from one that found nothing. Two renderers of the same document
   disagreeing about what matters is a bug in one of them.
 - `corpus/` — fixtures with known verdicts, frozen, so a rule change that moves a verdict is caught.
-- `bench/` — the benchmark harness and `grade-run.sh`, which grades a run and verifies what it was
-  actually configured with. Not shipped to consumers except `bench/langfuse-tracing.mjs`, which
-  `agent/agent-loop.mjs` imports.
-- `index.mjs` — the delegation MCP server. Reachable as the `./delegate` subpath export; nothing in
-  the gate imports it.
+- `bench/` — `new-run.sh` scaffolds a run, `grade-run.sh` grades one and verifies what it was
+  actually configured with, `control-set.mjs` decides whether two runs are comparable. Not shipped,
+  except `bench/langfuse-tracing.mjs`, which `agent/agent-loop.mjs` imports. The model benchmark
+  that used to live here went to delegate-mcp with the server it drives.
 
 ### The agent loop
 
@@ -103,68 +103,6 @@ partial cases: 5 for 5.
 Both test files run per-file (`node --test agent/immutability.test.mjs`). Note the path must be the
 file: `node --test agent/` tries to load the directory as a module and fails.
 
-There is no other test directory in this repo. Ad-hoc testing during
-development has used a throwaway harness script (spawn `index.mjs` as a
-child process, drive raw MCP JSON-RPC over its stdin/stdout: `initialize` →
-`notifications/initialized` → `tools/call`) — the same logic is now built
-into `bench/run-benchmark.mjs` rather than living only in a scratchpad.
-
-## The delegation server (`index.mjs`)
-
-Calling model → MCP tool `delegate_to_local_model` → this server (Node/stdio) →
-`POST /v1/chat/completions {"model": <alias>}` → `llama-server` in router mode at
-`http://localhost:8080`, run and kept alive by the separate
-[`local-copilot-stack`](../local-copilot-stack) project. This repo is **only the delegation
-client** — it doesn't run or manage any model itself, and its tool calls fail with a clear error if
-`local-copilot-stack` isn't installed and running.
-
-Two router aliases:
-- `delegate-fast` (Qwen2.5-Coder-7B) — default, no reasoning phase
-- `Qwen3.5-9B-UD-Q4_K_XL.gguf` — same model VS Code Copilot Chat uses, opt-in via `model: "capable"`
-
-`axios`, `zod` and `@modelcontextprotocol/sdk` are **devDependencies**, because only this file uses
-them. The gate must never import them.
-
-- `bench/` — reusable benchmark for deciding whether a candidate local model is worth adopting
-  into `local-copilot-stack`'s `presets.ini`. `bench/run-benchmark.mjs --model <alias>` runs a
-  standardized codegen task through the real delegation tool, escalating `max_tokens`
-  automatically on truncation, then reports attempts/tokens/wall-clock/pass-fail. Two task shapes,
-  each fully self-describing via its own JSON (`taskType`, `referenceDir`, `requiredMarkers`,
-  `verify`) — the harness has no hardcoded task shape:
-  - `task.json` / `task-no-think.json` (`taskType: "node-rest"`) — verified by the reference
-    project's test suite.
-  - `task-iac.json` (`taskType: "iac"`) — a Terraform/Docker task, verified by `terraform
-    validate` + `docker build` (needs both on `PATH`; missing either is reported as skipped, not
-    failed). Added after a real delegated round shipped Terraform with a duplicate provider
-    block, an invalid resource attribute, and undeclared variables, plus a Dockerfile that
-    shelled out to `docker build` from inside its own image build. Confirmed working on first
-    real run: caught a 7B-generated `aws_sqs_queue.this.queue_url` (real attribute is `.url`)
-    that would otherwise have shipped silently. **Does not catch live-cloud-semantics
-    bugs** — the same round's worst two bugs (a storage class that silently breaks reads on real
-    S3, a per-object API field that only a real S3-compatible endpoint rejects) only surfaced
-    against an actual MinIO container and were deliberately not folded into this generic harness;
-    check that class by hand, per task.
-  Regardless of task shape, every run also flags any `import`/`require` of a package never
-  declared in the generated project's `package.json` (`missingDependencies` in the report) — a
-  real bug from the same round (a model used `ajv` without declaring it) that isn't specific to
-  either task shape. See `bench/README.md`. `bench/runs/` is gitignored scratch output.
-  `bench/run-experiment.mjs --models a,b --tasks task.json,task-iac.json` compares several
-  candidates across several tasks in one Langfuse experiment. It is a thin layer over
-  `run-benchmark.mjs` — each grid cell is a real child-process invocation of it, so the real
-  delegation path and every existing check still apply — and it runs strictly sequentially
-  because parallel runs contend for one `llama-server` and would corrupt the wall-clock and
-  token numbers being compared.
-- `bench/langfuse-tracing.mjs` — optional tracing to the sibling
-  [`../langfuse-local`](../langfuse-local) self-hosted Langfuse stack. Records one generation per
-  attempt (with the model's own token counts), spans for the verification phases, and the report's
-  numbers as scores, so model comparisons survive `bench/runs/` being overwritten. Two design
-  points worth not undoing: **tracing can never fail a benchmark** (it probes
-  `/api/public/health` first and falls back to no-op objects with the same shape as real
-  observations, so with the stack down the harness produces identical stdout, report and exit
-  code), and **it instruments the harness, not `index.mjs`** — tracing from inside the server
-  would mean widening its five-key env allowlist to carry Langfuse credentials into a process
-  whose whole point is a minimal environment, and the harness already parses the `[usage]` line
-  and owns the timing.
 
 ## Common commands
 
@@ -173,7 +111,6 @@ npm install
 node bin/validate.mjs <project-dir> <task-file>   # the gate, against a project
 npm test                                          # node --test agent/*.test.mjs
 npm run corpus                                    # the frozen-verdict fixtures
-node --check index.mjs                            # the delegation server, no server needed
 ```
 
 Tests run per-file (`node --test agent/immutability.test.mjs`). The path must be the file:
@@ -181,12 +118,6 @@ Tests run per-file (`node --test agent/immutability.test.mjs`). The path must be
 
 ## Things to know
 
-This repository is two projects sharing a directory, and the bullets below are grouped by which one
-they belong to. Everything under **the gate** applies to `agent-gate`. Everything under
-**delegating to a local model** applies to `index.mjs`, a separate tool that happens to live here
-and that the gate never calls.
-
-### The gate
 - **The commit gate must fail when it cannot run, not disappear.** The uncommitted-work check was
   wrapped in `if (status.status === 0)`, and `git status` exits non-zero outside a repository — so
   a run into a plain directory made 26 `write_file` calls, got `Not a git repository` from all four
@@ -208,167 +139,3 @@ and that the gate never calls.
   had staged, under a message describing only the first. Nothing warns about this. Use
   `git commit -- <paths>` when anything else might be working in the tree, and read the
   `N files changed` line afterwards — that line is what caught it, one commit late.
-
-### Delegating to a local model (`index.mjs`)
-
-None of the following affects `agent-gate`. It is the `delegate_to_local_model` tool, kept because
-it works and is still used, and documented at length because the knowledge was expensive to get.
-- **`task` must be fully self-contained.** The local model has no memory of
-  the calling conversation and can't ask follow-up questions.
-- **Use `context_files` instead of pasting file contents into `task` — but
-  only when the file already exists for other reasons.** Pasting costs
-  output tokens to transcribe; empirically this made one real delegation
-  (CLAUDE.md drafting) cost ~160% more Claude output tokens than just doing
-  it directly. `context_files` is only actually free under that same
-  precondition though: authoring a *new* file specifically to use this
-  parameter costs the same as pasting would have — measured directly on a
-  dep-audit-mcp delegation where a schema-reference file had to be created
-  from scratch, contributing roughly half of a ~173% overhead. If you need
-  to demonstrate a real external schema that isn't a file yet, derive one
-  with a short script from data you can already fetch, rather than
-  hand-composing the example — you pay for the script, not its output.
-  Confined to `CONTEXT_ROOT` (default: cwd), refused if a path escapes it,
-  matches a sensitive-filename denylist, or its content trips the same
-  credential scan as `task`/`system_prompt`.
-- **`expected_output_lines` is required and enforced.** Under 150 lines (300
-  if `context_files` were authored for the call) the tool refuses before the
-  model is contacted. Estimate the number *before* writing the spec — the
-  spec's tokens are already spent by the time a refusal comes back, so the
-  refusal saves nothing on the call it blocks, only on the next one. If the
-  estimate is under the bar, don't write the spec at all: write the code.
-  - `context_files_are_preexisting` is required alongside `context_files`.
-  - `acknowledge_small_task` bypasses the gate but takes a written reason and
-    is logged. Reaching for it repeatedly means the gate is right and the
-    usage pattern is wrong.
-  - Don't inflate the estimate to get through. The ledger compares declared
-    against actual and flags anything off by more than half.
-- **A cross-call ledger lives at `~/Library/Application Support/local-delegate-mcp/ledger.json`.**
-  It flags estimate miscalibration, three-plus small calls inside ten
-  minutes, and a ≥30% losing rate over the last ten delegations. It only
-  emits a note when something fires, so silence is meaningful. (It also
-  disproves an earlier claim in these docs that the server had no cross-call
-  visibility — it does, via this file.)
-- **Pass `output_files` whenever the result is destined for files.** Taking
-  the returned text and writing it out yourself pays output tokens a *second*
-  time for content the model already produced — that second payment is
-  exactly the do-it-yourself baseline, so it structurally caps savings near
-  zero. This was the dominant factor across six measured rounds: the only one
-  that won (−65%) happened to avoid the retype via an external splitting
-  script, and a later round that hand-integrated its result landed at +173%
-  with the retype alone accounting for the entire baseline. The server writes
-  the files; you get back a manifest and read them to review.
-  - For multiple files, tell the model in `task` to precede each with a line
-    reading exactly `===FILE: <path>===`.
-  - The model's emitted paths are checked against your declared list, so it
-    can't choose where bytes land. Existing files need `allow_overwrite`.
-  - Markdown code fences are stripped automatically — the models emit them
-    despite instructions often enough that unstripped fences would routinely
-    corrupt written files.
-- **Don't restate in prose what `context_files` already shows structurally,
-  and don't re-derive in English the logic of code you've already written.**
-  Both are redundant spec cost. Reserve prose for what an example can't
-  convey (thresholds, ordering rules, edge cases), and reference an existing
-  helper by name instead of describing what it does.
-- **Never put real secrets in `task`/`system_prompt`/`context_files`.** All
-  three are scanned for credential-shaped content and the call is refused if
-  something matches — use placeholders and substitute real values into the
-  result afterward.
-- **Don't delegate a single small/isolated artifact (roughly under 20 lines).**
-  Empirically, writing a precise-enough spec for something that small costs
-  more Claude output tokens than just writing it directly — measured at
-  ~257% overhead for two ~8-line utility functions delegated separately.
-  **Batch several small related asks into one `task` instead of one call per
-  item** — this is stated in the tool's own description, but the server
-  can't enforce it (no visibility across separate calls), so it's on
-  whichever model is calling this tool to actually do it.
-- **The tool self-reports when a delegation likely wasn't worth it.** If the
-  response comes back shorter than the `task`/`system_prompt` that produced
-  it (checked only once the spec is 300+ chars, so trivial cases don't
-  trigger noise), a bracketed warning is appended to the returned text —
-  read it, it's real-time signal, not just something in the usage log.
-- **`model: "capable"` (9B) can silently burn its whole budget on "thinking"**
-  with zero actual answer content (`finish_reason: length`, empty `content`)
-  if `max_tokens` is too low — budget generously for that tier, or just
-  don't reach for it. Default to `"fast"`.
-- **Request timeout scales with `max_tokens`**: `30s + max_tokens * 150ms`,
-  not fixed — a fixed timeout was cutting off legitimately-still-running
-  generations.
-- **Delegate serially, not in parallel.** The tool doesn't queue/rate-limit
-  concurrent calls, and a 16GB Mac running both model tiers hot at once
-  (~10GB combined) is still tight.
-- **Env sanitization allowlist**: `PATH`, `HOME`, `LOCAL_LLM_URL`,
-  `FAST_MODEL_ALIAS`, `CAPABLE_MODEL_ALIAS`. Everything else in
-  `process.env` is deleted at startup, so this server never inherits
-  secrets from whatever spawned it.
-- **Bigger/newer isn't better for this tool's workload; reasoning is what
-  matters.** Qwen3.5-9B and Gemma 4 12B both lost to the 7B — a reasoning
-  phase burning the token budget before producing real output, not size,
-  decided both. Qwen3-8B run with its `/no_think` flag (see
-  `bench/task-no-think.json`) tied the 7B almost exactly (3,707 vs 3,618
-  tokens, 110s vs 118s, 1 attempt each) — the first candidate beyond the
-  original 7B that didn't lose, and it won by having reasoning off, not by
-  being small. Benchmark any new candidate (`bench/run-benchmark.mjs`)
-  rather than assuming size predicts the outcome either way; see
-  `local-copilot-stack`'s README for the full checklist.
-- **Expect the same validation-gate bug regardless of which model you use.**
-  Five independent generations across four different models (7B twice,
-  Qwen3.5-9B, Gemma, Qwen3-8B) all made the identical mistake: an optional
-  field's validation copied the required-field gate (`!partial || field !==
-  undefined`) instead of `field !== undefined`, incorrectly rejecting a
-  create request that omits the field. This isn't a model-quality signal —
-  it's a standing review checkpoint for this specific task pattern. Check
-  optional-field validation first when a generated resource's create
-  endpoint fails unexpectedly.
-- **Verify versioned external interfaces yourself before delegating against
-  them — don't give the local model internet access to do it.** A throwaway
-  test (an immutable audit-log service with Kubernetes/Terraform deployment
-  artifacts) surfaced 8 real bugs across two delegated calls, but only one —
-  wrong field names for a pinned `terraform-aws-modules/eks/aws` version
-  (`node_groups` instead of `eks_managed_node_groups`, `instance_type`
-  instead of `instance_types`, `desired_capacity` instead of `desired_size`,
-  plus the module referencing its own output as its own input) — was a
-  stale/versioned-knowledge problem. The other seven (Express route
-  shadowing, a `node:test`/`assert` import that doesn't exist, Docker
-  `USER`/`COPY` ordering, an unpaired code fence, an Express default-status
-  assumption, an immutable store's tests assuming reset semantics it can't
-  have) were reasoning errors internet access wouldn't touch. For the one
-  category it would help, giving the *local* model live fetch access is the
-  wrong fix: it has no instruction-hierarchy training (same reason
-  `context_files` content is scanned for secrets and Read containment
-  exists), so fetched content becomes a second, less reviewable injection
-  surface; it also has no reliable sense of when its own knowledge is stale,
-  so it wouldn't know when to bother looking something up; and this
-  project's own history is small-local-model tool-calling being unreliable
-  (why Qwen2.5-Coder was swapped out as the interactive-chat model
-  originally). What actually fixed the Terraform bug was the *orchestrator*
-  fetching the module's real source (`WebFetch`/`curl` against the actual
-  GitHub repo, not memory) and passing the verified interface through
-  `context_files` — the same reviewed, sandboxed mechanism already used for
-  everything else. Do that deliberately whenever a task references a
-  specific version of a library, framework, or infrastructure module,
-  instead of trusting either your memory or the local model's.
-- **A model backend can crash into a persistent "Compute error" state under
-  llama-server; the trigger looks like switching model tiers.** Three
-  occurrences now: (1) Gemma 4 12B after a near-max-context generation, (2)
-  Qwen3-8B immediately after Gemma's crash during the 4-model benchmark, (3)
-  Qwen3-8B again after a run of `delegate-fast` calls switched to
-  `model: "capable"`. Every case involved a tier swap shortly beforehand,
-  and in every case the "broken" model worked perfectly once isolated after
-  a restart — so this is a router-mode/build-level issue, not any model's
-  architecture. It's per-slot, not whole-server: `delegate-fast` kept
-  answering normally while the Qwen3-8B slot returned HTTP 500 on every
-  request. **Practical consequence: avoid switching tiers mid-session when
-  you can.** Symptoms are a `Compute error` 500 (or a ~1s tool-error that
-  looks like a fast failure but isn't); a full `llama-server` restart
-  (`launchctl unload`/`load -w` the plist) clears it. If a model that was
-  working starts failing instantly, suspect this before the request or the
-  model.
-- **The two `context_files`/prose-cost fixes above are documentation-only,
-  not code-enforced — and that's probably as far as this line of fixes
-  goes.** The server can't tell whether a context file was already lying
-  around or authored five minutes ago for this one call, or whether `task`
-  prose duplicates an example — that distinction only exists in the calling
-  model's own workflow history. Same situation as the batching guidance:
-  fixable-in-code problems (context-paste cost, tiny-artifact cost) already
-  have code fixes (`context_files`, the ratio warning); what's left is
-  judgment calls only the caller can make.

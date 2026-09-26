@@ -19,6 +19,7 @@
     "!agent/agent-loop.mjs",
     "!agent/anthropic-adapter.mjs",
     "!agent/README.md",
+    "templates/",
     "action.yml",
     "README.md",
     "LICENSE"

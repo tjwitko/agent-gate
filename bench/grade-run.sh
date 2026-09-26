@@ -11,7 +11,7 @@
 set -euo pipefail
 
 LLM_ROOT="${LLM_ROOT:-$HOME/LLM}"
-CONTROLS="$LLM_ROOT/local-delegate-mcp"
+CONTROLS="$LLM_ROOT/agent-gate"
 # Default only. The real answer comes from the run itself, below: a run built for one task and
 # graded against another reports its task-gated checks as "not checked" on a project that was asked
 # for exactly those things, which reads as the model omitting them.
@@ -34,6 +34,18 @@ else DIR="$LLM_ROOT/webhook-$ARG"; fi
 # so far -- those are all the webhook task, which is the default.
 if [ -f "$DIR/.bench-task" ]; then
   RECORDED="$(head -1 "$DIR/.bench-task")"
+  # A recorded path can go stale: this directory was called local-delegate-mcp until 2026-09-26,
+  # and runs scaffolded before then hold an absolute task path under the old name. Rather than
+  # hard-coding that one rename, look for the same fixture by name under the controls in use --
+  # which survives any future move too.
+  #
+  # Remap rather than rewriting the run's .bench-task: that file is part of its record. And do it
+  # rather than falling through to the default task, because grading a run against something it was
+  # never asked to build is the exact mismatch .bench-task exists to prevent.
+  if [ ! -f "$RECORDED" ] && [ -f "$CONTROLS/agent/fixtures/$(basename "$RECORDED")" ]; then
+    echo "  note: $RECORDED has moved; grading against $CONTROLS/agent/fixtures/$(basename "$RECORDED")" >&2
+    RECORDED="$CONTROLS/agent/fixtures/$(basename "$RECORDED")"
+  fi
   if [ -f "$RECORDED" ]; then
     TASK="$RECORDED"
   else
@@ -49,7 +61,7 @@ echo " run      : $DIR"
 echo " task     : $(basename "$TASK")"
 # All five control repos, because the gate is not one repository. Two runs once carried identical
 # "controls @" lines while dep-audit had changed between them.
-for r in local-delegate-mcp terraform-guard-mcp dep-audit-mcp secret-guard-mcp identity-guard-mcp; do
+for r in agent-gate terraform-guard-mcp dep-audit-mcp secret-guard-mcp identity-guard-mcp; do
   d="$LLM_ROOT/$r"
   sha="$(git -C "$d" rev-parse --short HEAD 2>/dev/null || echo unknown)"
   git -C "$d" diff --quiet 2>/dev/null || sha="$sha (UNCOMMITTED — grade not reproducible)"

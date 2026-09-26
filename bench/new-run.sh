@@ -21,7 +21,7 @@
 set -euo pipefail
 
 LLM_ROOT="${LLM_ROOT:-$HOME/LLM}"
-CONTROLS="$LLM_ROOT/local-delegate-mcp"
+CONTROLS="$LLM_ROOT/agent-gate"
 # The webhook task is the default because eleven graded runs used it and a comparison against them
 # has to be against the same task. A different task is an explicit choice, and it carries its own
 # directory prefix so a run directory always says which task produced it.
@@ -128,11 +128,11 @@ JSON
 # slack-opus-1 took and which records an explicit refusal instead. Detection is the backstop:
 # grade-run.sh reports the flag and the enabled set on every grade.
 
-# The gate spans five repositories, not one. Recording only local-delegate-mcp meant two runs could
+# The gate spans five repositories, not one. Recording only agent-gate meant two runs could
 # carry the same "controls @" line while dep-audit or terraform-guard had changed underneath them --
 # which happened: check_dependencies learned direct-vs-transitive between two runs whose RUN.md
 # would have been identical.
-CONTROL_REPOS="local-delegate-mcp terraform-guard-mcp dep-audit-mcp secret-guard-mcp identity-guard-mcp"
+CONTROL_REPOS="agent-gate terraform-guard-mcp dep-audit-mcp secret-guard-mcp identity-guard-mcp"
 gate_lines() {
   for r in $CONTROL_REPOS; do
     d="$LLM_ROOT/$r"
@@ -187,7 +187,7 @@ git -C "$DIR" add -f .mcp.json .claude/settings.local.json RUN.md .bench-task
 git -C "$DIR" -c user.name="bench" -c user.email="bench@localhost" \
   commit -q -m "Pin the security controls to this project before the run starts
 
-Controls frozen at local-delegate-mcp @ $GATE. Nothing here is application code."
+Controls frozen at agent-gate @ $GATE. Nothing here is application code."
 
 echo
 echo "  created $DIR (baseline committed, controls @ $GATE$GATE_DIRTY)"

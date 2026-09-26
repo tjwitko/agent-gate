@@ -23,7 +23,7 @@ import { resolveControls, readConfig, CONFIG_FILE } from "../lib/resolve-control
 
 const EXIT = { CLEAN: 0, BLOCKED: 1, USAGE: 2, INCOMPLETE: 3 };
 
-export async function runGate(projectDirArg, taskFile, { env = process.env } = {}) {
+export async function runGate(projectDirArg, taskFile, { env = process.env, preCommit = false } = {}) {
   const projectDir = path.resolve(projectDirArg);
   // Several checks are gated on what the task asked for -- immutability, retention, secret rotation
   // and both quality checks stay silent unless the requirement is stated. Without the task text
@@ -63,7 +63,7 @@ export async function runGate(projectDirArg, taskFile, { env = process.env } = {
     }
   }
 
-  const r = await validateProject(projectDir, registry, taskText);
+  const r = await validateProject(projectDir, registry, taskText, { preCommit });
   for (const c of clients) c.proc?.kill();
 
   // A server that connected but whose tool the gate never invoked. Not the same as one that could
@@ -192,9 +192,12 @@ function machine(result) {
 async function main() {
   const args = process.argv.slice(2);
   const json = args.includes("--json");
+  // Set by the pre-commit hook agent-gate-init writes. It disables exactly one check, the one
+  // whose premise a commit satisfies by existing; everything else runs, and the skip is reported.
+  const preCommit = args.includes("--pre-commit");
   const positional = args.filter((a) => !a.startsWith("--"));
   if (positional.length < 1) {
-    console.error("usage: agent-gate <project-dir> [task-file] [--json]");
+    console.error("usage: agent-gate <project-dir> [task-file] [--json] [--pre-commit]");
     console.error(`\ncontrols resolve from, in order: an env var, ${CONFIG_FILE} in the project,`);
     console.error("node_modules, then a sibling checkout. A control that resolves from nowhere exits 3.");
     process.exit(EXIT.USAGE);
@@ -212,7 +215,7 @@ async function main() {
   if (json) console.log = (...a) => console.error(...a);
   let result;
   try {
-    result = await runGate(positional[0], positional[1]);
+    result = await runGate(positional[0], positional[1], { preCommit });
   } finally {
     console.log = narrate;
   }

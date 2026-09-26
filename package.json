@@ -9,12 +9,14 @@
     "./package.json": "./package.json"
   },
   "bin": {
-    "agent-gate": "./bin/validate.mjs"
+    "agent-gate": "./bin/validate.mjs",
+    "agent-gate-init": "./bin/init.mjs"
   },
   "files": [
     "bin/",
     "lib/",
     "agent/",
+    "!bin/*.test.mjs",
     "!agent/*.test.mjs",
     "!agent/agent-loop.mjs",
     "!agent/anthropic-adapter.mjs",
@@ -25,7 +27,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node --test agent/*.test.mjs",
+    "test": "node --test agent/*.test.mjs bin/*.test.mjs bench/*.test.mjs",
     "corpus": "node corpus/run.mjs",
     "corpus:vendor": "node corpus/vendor.mjs",
     "corpus:check": "node corpus/vendor.mjs --check"

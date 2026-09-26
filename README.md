@@ -157,6 +157,53 @@ Every control line says **how it resolved**, so you can see at a glance that all
 
 ---
 
+## Set it up
+
+```bash
+npx agent-gate-init --new my-project --hook --task task.txt   # a new project
+npx agent-gate-init --hook --task task.txt                    # an existing one
+```
+
+Both do the same three things, and the second is the first without `--new`:
+
+| | |
+| --- | --- |
+| `.mcp.json` | the four controls, with absolute entry points and the project as their scan root |
+| `AGENTS.md` | the gate stanza, with `{{VALIDATE_COMMAND}}` filled in |
+| `.git/hooks/pre-commit` | with `--hook`: runs the gate and blocks the commit unless it exits 0 |
+
+**Nothing is overwritten.** An existing `.mcp.json` is merged into, not replaced — your own servers
+survive, and a control you have already defined yourself is left as you defined it. An `AGENTS.md`
+is appended to between markers, so a second run changes nothing. An existing pre-commit hook is
+reported and left alone. `--force mcp|agents|hook` says otherwise, per file.
+
+It exits **1** when it left something alone, so a script can tell "set up" from "already had one".
+
+### The pre-commit hook
+
+```
+git commit  ->  agent-gate . task.txt --pre-commit  ->  0 commit proceeds
+                                                        1 findings                                                              2 usage          > blocked
+                                                        3 could not run  /
+```
+
+**Exit 3 blocks.** A commit that nothing checked must not be easier to land than one that failed a
+check. For the same reason the hook fails closed: if `agent-gate` cannot be found it blocks rather
+than waving the commit through, because a hook that passes when it could not run leaves a repository
+that looks protected and is not.
+
+`git commit --no-verify` is the deliberate way past, and unlike quietly deleting the hook it is
+visible afterwards.
+
+`--pre-commit` turns off exactly one check, `uncommitted_work`, and says so in the output. In a hook
+its premise is satisfied by the act that invoked it — the work is uncommitted because it is being
+committed. Left on, it fails every commit forever, which teaches people to bypass the hook and costs
+you the whole thing. The stanza's command keeps that check, because an agent reporting it is done
+with work uncommitted has not finished.
+
+If `core.hooksPath` is set, the tool refuses rather than writing a hook into `.git/hooks` that would
+never run.
+
 ## Use it with a coding agent
 
 This is what the project was built for, and how every graded run in it was produced. The pattern has

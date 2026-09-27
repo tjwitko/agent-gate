@@ -72,6 +72,27 @@ jobs:
           esac
           exit $CODE
 
+  self:
+    # The gate, against this repository. The four control repositories have gated themselves since
+    # they gained a task file; this one never did -- the jobs below run the action against corpus
+    # fixtures and never against `.`. So for a month agent-gate failed its own gate: two credential
+    # findings from comments in agent/authentication.mjs quoting the patterns it detects, found only
+    # when someone installed it elsewhere and pointed it at itself. A security gate that fails on its
+    # own source is not believed, and this job is what would have caught it the day it was written.
+    name: the gate, against this repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci --ignore-scripts
+      - uses: ./.github/actions/control-tooling
+      - uses: ./
+        with:
+          project: .
+          task-file: .github/gate-task.txt
+
   action:
     name: the action, against fixtures with known verdicts
     runs-on: ubuntu-latest

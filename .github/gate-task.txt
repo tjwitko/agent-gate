@@ -1,0 +1,24 @@
+# The contract this repository is held to, read by the `self` job in .github/workflows/gate.yml.
+#
+# Six checks are gated on what the task asked for. This states only what is true here: a requirement
+# written to switch a check on would be a fabricated requirement, which is the failure this gate
+# exists to catch -- and would be an odd thing to find in the gate's own repository.
+
+A command-line tool, GitHub Action and library that runs security controls against a project and
+returns one verdict: clean, blocked, or could-not-run.
+
+WHAT IT MUST DO
+- Run the four control servers itself and report how each one was located.
+- Report a check that could not run as not having run. Never as a pass.
+- Leave a project's existing configuration alone unless told otherwise.
+
+HOW WE WILL JUDGE IT
+- Automated tests that someone else can run, covering the command itself and not only the
+  validators behind it.
+- Errors distinguished from faults: a project found insecure is a result, and a check that could
+  not run is a different result again. Exit 1 and exit 3 must never collapse into one.
+- It must pass its own gate. A security gate that fails on its own source is not believed.
+
+NOT IN SCOPE
+- No deployment artifacts. This is a package and an Action, not a deployed service.
+- No records are stored here, and no credentials are held.

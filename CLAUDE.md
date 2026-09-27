@@ -118,6 +118,17 @@ Tests run per-file (`node --test agent/immutability.test.mjs`). The path must be
 
 ## Things to know
 
+- **The gate must pass its own gate, and CI checks that it does.** The `self` job in
+  `.github/workflows/gate.yml` runs the action against `.` with `.github/gate-task.txt`. It exists
+  because agent-gate failed its own gate for a month without anyone noticing: its other jobs ran the
+  action against corpus fixtures and never against this tree. The findings came from comments in
+  `agent/authentication.mjs` quoting the patterns it detects — a rule file necessarily contains the
+  patterns it looks for. If the self job goes red on a validator's own source, fix the validator's
+  reading, not the source: that is how the same defect was found to pass services whose only auth
+  was commented out.
+- **Two renderers print the control line, and they must agree.** `bin/validate.mjs` for the CLI,
+  the script in `action.yml` for CI. Both show each control's version beside where it resolved from,
+  because an upgrade can fail to take: v1.1.1 shipped terraform-guard v1.0.0 and said nothing.
 - **The commit gate must fail when it cannot run, not disappear.** The uncommitted-work check was
   wrapped in `if (status.status === 0)`, and `git status` exits non-zero outside a repository — so
   a run into a plain directory made 26 `write_file` calls, got `Not a git repository` from all four

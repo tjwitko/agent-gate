@@ -1432,3 +1432,66 @@ test("the vacuous finding is worded for Python when Python matched", () => {
   assert.match(v, /compare_digest/);
   assert.doesNotMatch(v, /\bundefined\b/);
 });
+
+// --- a credential held in a local whose name does not look like one ---------------------------
+//
+// The detector required Key/Secret/Token/Password/Credential in the LOCAL name, on top of the same
+// test applied to the env name, so `const expected = process.env.SUPPORT_TEAM_KEY` was never examined
+// and a vacuous comparison against `expected` passed. Any local is examined now. An arbitrary name
+// must be an operand of the comparison, though, not merely share a line with one: `v` or `value`
+// sits on unrelated comparison lines everywhere, and a false positive in a blocking check is how a
+// gate gets switched off. Measured over 36 real codebases on the author's machine, neither the strict
+// nor the loose version changed a single verdict; the strict one is kept for the case below, which
+// is easy to write and which the loose one gets wrong.
+
+const vacuousJs = (body) => ({
+  "src/index.ts": "app.get('/lookup/:id', requireSupport, lookup);\n",
+  "src/middleware.ts": "export const requireSupport = (req, res, next) => {\n" + body + "  next();\n};\n",
+});
+
+test("a credential in a local with an ordinary name is still examined", () => {
+  const { failures } = run(
+    vacuousJs(
+      "  const expected = process.env.SUPPORT_TEAM_KEY;\n" +
+        "  if (req.headers['x-support-key'] !== expected) return res.status(403).send();\n"
+    ),
+    authenticationFailures
+  );
+  assert.ok(
+    vacuous(failures).some((f) => /SUPPORT_TEAM_KEY/.test(f)),
+    "the env name says what the value is; the local is whatever someone called it"
+  );
+});
+
+test("an ordinarily named local that only shares a line with a comparison is not a comparison", () => {
+  // The case that separates the strict rule from the loose one. `v` is logged on a line that
+  // happens to compare two other things; it is never compared with anything.
+  const { failures } = run(
+    vacuousJs(
+      "  const v = process.env.SUPPORT_TEAM_KEY;\n" +
+        "  if (req.method === 'GET') console.log('key length', v.length);\n"
+    ),
+    authenticationFailures
+  );
+  assert.deepEqual(vacuous(failures), []);
+});
+
+test("an ordinarily named local validated at startup is not vacuous", () => {
+  const { failures } = run(
+    vacuousJs(
+      "  const expected = process.env.SUPPORT_TEAM_KEY;\n" +
+        "  if (!expected) throw new Error('SUPPORT_TEAM_KEY is required');\n" +
+        "  if (req.headers['x-support-key'] !== expected) return res.status(403).send();\n"
+    ),
+    authenticationFailures
+  );
+  assert.deepEqual(vacuous(failures), []);
+});
+
+test("an ordinarily named local holding something that is not a credential is ignored", () => {
+  const { failures } = run(
+    vacuousJs("  const expected = process.env.REGION;\n  if (req.headers['x-region'] !== expected) return res.status(400).send();\n"),
+    authenticationFailures
+  );
+  assert.deepEqual(vacuous(failures), []);
+});

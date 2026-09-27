@@ -198,8 +198,13 @@ const LEAKY_SIGNATURE_COMPARE =
 // nothing, certifies exactly this.
 // process.env.X is undefined when unset, and `undefined !== undefined` is false -- the same
 // vacuous comparison as Python's os.getenv, in the language the second webhook receiver used.
-const JS_ENV_CREDENTIAL =
-  /\b(?:const|let|var)\s+(\w*(?:[Kk]ey|[Ss]ecret|[Tt]oken|[Pp]assword|[Cc]redential)\w*)\s*=\s*process\.env\.(\w+)/g;
+// Any local, not only one whose name looks like a credential. The name test here used to require
+// Key/Secret/Token/Password/Credential in the LOCAL, on top of the same test applied to the env name
+// below -- so `const expected = process.env.SUPPORT_TEAM_KEY` was never examined, and a vacuous
+// comparison against `expected` passed. The env name says what the value is; the local is whatever
+// someone called it.
+const JS_ENV_CREDENTIAL = /\b(?:const|let|var)\s+(\w+)\s*=\s*process\.env\.(\w+)/g;
+const CREDENTIAL_NAME = /key|secret|token|password|credential/i;
 // Or read inline at the comparison site: `req.headers['x'] !== process.env.SUPPORT_TEAM_KEY`.
 const JS_INLINE_ENV_COMPARE = /[!=]==?\s*process\.env\.([A-Z_][A-Z0-9_]*)|process\.env\.([A-Z_][A-Z0-9_]*)\s*[!=]==?/g;
 
@@ -256,8 +261,14 @@ export function vacuousCredentialDetails(all) {
       // The comparison is usually against the local alias, not the env expression. Missing that
       // is why this check saw nothing in a deliverable that had the defect.
       const names = [envName, local].filter(Boolean);
+      // "Same line as an equality operator" is specific enough for a name like SUPPORT_TEAM_KEY or
+      // expectedKey. It is not for a name like `k` or `value`, which sits on unrelated comparison
+      // lines all over a codebase. So a local whose name says nothing about credentials must be an
+      // operand of the comparison itself, not merely share a line with one.
       const compared = names.some((n) =>
-        new RegExp(`[!=]==?[^\\n]*\\b${n}\\b|\\b${n}\\b[^\\n]*[!=]==?`).test(all)
+        n === envName || CREDENTIAL_NAME.test(n)
+          ? new RegExp(`[!=]==?[^\\n]*\\b${n}\\b|\\b${n}\\b[^\\n]*[!=]==?`).test(all)
+          : new RegExp(`[!=]==?\\s*\\b${n}\\b|\\b${n}\\b\\s*[!=]==?`).test(all)
       );
       if (compared) out.push({ name: envName, comparedAs: names });
     }

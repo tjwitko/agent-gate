@@ -592,20 +592,24 @@ Detectable in principle: a broad `except Exception` enclosing a `raise HTTPExcep
 and it competes for attention with the two above.
 
 
-### 4. A credential held in a local whose name does not look like one
+### 4. A credential held in a local whose name does not look like one — fixed
 
-Found while writing the tests for the comment fix. `JS_ENV_CREDENTIAL` only matches an assignment
-whose *local* name contains Key, Secret, Token, Password or Credential:
+Found while writing the tests for the comment fix. `JS_ENV_CREDENTIAL` only matched an assignment
+whose *local* name contained Key, Secret, Token, Password or Credential, on top of the same test on
+the env name — so `const expected = process.env.SUPPORT_TEAM_KEY` was never examined, and a vacuous
+comparison against `expected` passed.
 
-```js
-const expectedKey = process.env.SUPPORT_TEAM_KEY;   // examined
-const expected    = process.env.SUPPORT_TEAM_KEY;   // never examined
-```
+Any local is examined now. The judgement was in what counts as a comparison. The existing test —
+the name appears on the same line as `==` — is specific for `SUPPORT_TEAM_KEY` or `expectedKey` and
+not for `v` or `value`, which sit on unrelated comparison lines everywhere. So an arbitrarily named
+local must be an operand of the comparison.
 
-The env name is then checked separately for the same words, so the first requirement adds nothing
-except the miss: a vacuous comparison against `expected` passes. The env name alone should be enough.
-Not folded into the comment fix, because it changes what is detected and that change deserves its
-own corpus check.
+Measured honestly: over 36 real codebases on the author's machine — the 13 corpus fixtures, every
+historical `webhook-*` deliverable, both Slack runs, the four control repositories — **neither** the
+strict nor the loose rule moved a single verdict, so the measurement does not choose between them.
+The tests do: the original detector fails the one that uses `expected`, and the loose rule fails the
+one where `v` shares a line with an unrelated `===`. The strict rule passes both, at the cost of one
+branch. No corpus verdict moved, so nothing was re-frozen.
 
 ### 5. `build_check` can wait on Docker forever — fixed
 

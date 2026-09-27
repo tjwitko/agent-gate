@@ -607,13 +607,22 @@ except the miss: a vacuous comparison against `expected` passes. The env name al
 Not folded into the comment fix, because it changes what is detected and that change deserves its
 own corpus check.
 
-### 5. `build_check` can wait on Docker forever
+### 5. `build_check` can wait on Docker forever — fixed
 
 A local corpus run sat for thirteen minutes on one fixture: `docker pull golang:1.22` at 0% CPU,
-blocked on `docker-credential-desktop get`. Docker Desktop's credential helper had wedged — the same
-thing that stalled an Opus run's `docker build` — and nothing timed it out. A check that cannot run
-must say so; this one said nothing and never returned. A timeout that reports the toolchain as
-unavailable, which is exit 3 territory, is the fix.
+blocked on `docker-credential-desktop get`, and nothing timed it out. It became urgent the day
+`agent-gate-init` started installing a pre-commit hook that runs this check: a Go project on a machine
+in that state would hang every commit, indefinitely, with no message.
+
+Both docker calls are now bounded (five minutes, `AGENT_GATE_DOCKER_TIMEOUT_MS` to change it) and a
+timeout ends as COULD NOT RUN, exit 3. **The obvious fix would have been wrong.** A timed-out
+`spawnSync` returns an error and a null status — exactly what a missing binary returns — and the
+existing branch said "docker is not installed or not on PATH". A timeout alone would have turned an
+endless hang into a false diagnosis, sending someone to install software they already have. Timeouts
+are now named as timeouts, and a build that runs out of time is could-not-run, never build errors.
+
+Tested against a fake `docker` on PATH that hangs the way the real one did. Before the fix the test
+run could not finish; after, it takes five seconds and leaves nothing running.
 ## Resolved (found by slack-sonnet-1)
 
 ### A parameterised retention period reads as no retention at all — `retention.mjs`

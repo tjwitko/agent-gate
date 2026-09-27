@@ -113,3 +113,94 @@ test("unavailableCheckers reads only its own marker", () => {
   // detection is anchored to the start of the line rather than a substring search.
   assert.deepEqual(unavailableCheckers("python STATIC ERRORS:\n  the test COULD NOT RUN: see above"), []);
 });
+
+// --- a toolchain that stops answering ----------------------------------------------------------
+//
+// A local corpus run sat for thirteen minutes on one fixture: `docker pull golang:1.22` at 0% CPU,
+// blocked on Docker Desktop's credential helper, and nothing timed it out. Since agent-gate-init
+// installs a pre-commit hook that runs this check, a Go project on a machine in that state would
+// hang every commit, indefinitely, with no message.
+//
+// These drive the real check against a fake `docker` on PATH that hangs the way the real one did.
+// `exec sleep` so that killing the docker process kills the sleep with it, rather than leaving it
+// running after the test.
+
+import { chmodSync } from "fs";
+
+const GO_PROJECT = { "go.mod": "module example.com/x\n\ngo 1.22\n", "main.go": "package main\n\nfunc main() {}\n" };
+
+function withFakeDocker(mode, fn) {
+  const bin = mkdtempSync(path.join(tmpdir(), "fakedocker-"));
+  const docker = path.join(bin, "docker");
+  writeFileSync(
+    docker,
+    "#!/bin/sh\n" +
+      'case "$1" in\n' +
+      `  pull) [ "${mode}" = hang-pull ] && exec sleep 600; exit 0 ;;\n` +
+      `  run)  [ "${mode}" = hang-run ] && exec sleep 600; exit 0 ;;\n` +
+      "esac\nexit 0\n"
+  );
+  chmodSync(docker, 0o755);
+  const saved = { PATH: process.env.PATH, T: process.env.AGENT_GATE_DOCKER_TIMEOUT_MS };
+  process.env.PATH = `${bin}${path.delimiter}${process.env.PATH}`;
+  process.env.AGENT_GATE_DOCKER_TIMEOUT_MS = "1500";
+  try {
+    return fn();
+  } finally {
+    process.env.PATH = saved.PATH;
+    if (saved.T === undefined) delete process.env.AGENT_GATE_DOCKER_TIMEOUT_MS;
+    else process.env.AGENT_GATE_DOCKER_TIMEOUT_MS = saved.T;
+    rmSync(bin, { recursive: true, force: true });
+  }
+}
+
+test("a docker pull that stops answering ends as could-not-run, not a hang", () => {
+  project(GO_PROJECT, (dir) =>
+    withFakeDocker("hang-pull", () => {
+      const started = Date.now();
+      const out = buildCheck(dir);
+      const took = Date.now() - started;
+      assert.ok(took < 10_000, `returned in ${took}ms rather than waiting on docker`);
+      assert.ok(out.includes(UNAVAILABLE), "reported as a check that could not run");
+      assert.match(out, /did not answer within/);
+      assert.equal(unavailableCheckers(out).length > 0, true, "which the gate turns into exit 3");
+    })
+  );
+});
+
+test("a timeout is not reported as docker being missing", () => {
+  // The obvious fix -- add a timeout -- lands a timed-out call in the branch that says "docker is
+  // not installed or not on PATH", which would send someone to install software they already have.
+  project(GO_PROJECT, (dir) =>
+    withFakeDocker("hang-pull", () => {
+      assert.doesNotMatch(buildCheck(dir), /not installed/);
+    })
+  );
+});
+
+test("a go build that never finishes ends as could-not-run, not as build errors", () => {
+  // A build that runs out of time says nothing about whether the code compiles. Reporting it as
+  // build errors would block on a verdict nobody reached.
+  project(GO_PROJECT, (dir) =>
+    withFakeDocker("hang-run", () => {
+      const out = buildCheck(dir);
+      assert.ok(out.includes(UNAVAILABLE));
+      assert.match(out, /did not finish within/);
+      assert.doesNotMatch(out, /BUILD ERRORS/);
+    })
+  );
+});
+
+test("docker that is genuinely absent is still reported as absent", () => {
+  project(GO_PROJECT, (dir) => {
+    const empty = mkdtempSync(path.join(tmpdir(), "nodocker-"));
+    const saved = process.env.PATH;
+    process.env.PATH = empty;
+    try {
+      assert.match(buildCheck(dir), /not installed or not on PATH/);
+    } finally {
+      process.env.PATH = saved;
+      rmSync(empty, { recursive: true, force: true });
+    }
+  });
+});

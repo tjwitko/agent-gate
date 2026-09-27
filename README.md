@@ -53,15 +53,15 @@ script on `PATH` is a different fact and will not satisfy it.
 
 ### Install
 
-Latest release: **[v1.1.3](https://github.com/tjwitko/agent-gate/releases/latest)**
+Latest release: **[v1.1.4](https://github.com/tjwitko/agent-gate/releases/latest)**
 
 ```bash
-npm install --save-dev github:tjwitko/agent-gate#v1.1.3
+npm install --save-dev github:tjwitko/agent-gate#v1.1.4
 ```
 
 The four control servers come with it as dependencies — there is nothing else to clone or wire up.
 They are pinned to their own `v1.0.0` tags, so this installs the same five components every time.
-Drop the `#v1.1.3` to track `main` instead, which moves.
+Drop the `#v1.1.4` to track `main` instead, which moves.
 
 ### Run it
 
@@ -303,22 +303,31 @@ jobs:
         with:
           node-version: "22"
 
-      # Install the scanners the controls drive.
-      - run: |
-          curl -fsSL -o /tmp/gitleaks.tar.gz \
-            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
-          sudo tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks
-          sudo curl -fsSL -o /usr/local/bin/osv-scanner \
-            https://github.com/google/osv-scanner/releases/download/v2.4.0/osv-scanner_linux_amd64
-          sudo chmod +x /usr/local/bin/osv-scanner
-      - uses: hashicorp/setup-terraform@v3
-        with: { terraform_version: "1.15.8", terraform_wrapper: false }
+      # Your project's own dependencies. The `tests` check runs your suite, and without these it
+      # cannot load its imports and every test file fails.
+      - run: npm ci --ignore-scripts
 
-      - uses: tjwitko/agent-gate@v1.1.3
+      # Everything the controls drive, at the versions this release was tested with: Terraform,
+      # gitleaks, osv-scanner, checkov, ruff and pytest, each checked after install.
+      - uses: tjwitko/agent-gate/.github/actions/control-tooling@v1.1.4
+
+      - uses: tjwitko/agent-gate@v1.1.4
         with:
           project: .
           task-file: task.txt
 ```
+
+Two things in there are easy to leave out, and both fail quietly rather than loudly:
+
+- **`npm ci`** — or your language's equivalent. Without it the gate's `tests` check runs your suite
+  against no dependencies and reports every file failing, which reads like broken tests.
+- **`control-tooling`**, rather than installing the scanners yourself. It pins them to the versions
+  the release was tested with and verifies each one, and it moves when you upgrade the gate. A
+  hand-written install stays at whatever you wrote, and a scanner that is missing reports its check
+  as not run.
+
+Both `uses:` lines name one repository and should always carry the same tag — see
+[Upgrading](#upgrading).
 
 Then make it a required check in **Settings → Branches → Branch protection**.
 

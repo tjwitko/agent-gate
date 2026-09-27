@@ -114,7 +114,8 @@ function human(result) {
   out.push(`project        : ${result.projectDir}`);
   out.push(`task text      : ${result.taskFile || "NONE — checks gated on the task will report as not checked"}`);
   for (const c of result.controls) {
-    out.push(`control        : ${c.name.padEnd(16)} ${c.entry ? c.source : `NOT RESOLVED — ${c.error}`}`);
+    const v = c.entry ? (c.version ? `v${c.version}` : "v?").padEnd(8) : "";
+    out.push(`control        : ${c.name.padEnd(16)} ${v}${c.entry ? c.source : `NOT RESOLVED — ${c.error}`}`);
   }
   out.push(`validators run : ${result.ran.join(", ")}\n`);
 
@@ -169,6 +170,7 @@ function machine(result) {
         name: c.name,
         provides: c.provides,
         resolvedFrom: c.source,
+        version: c.version || null,
         entry: c.entry,
         status: !c.entry
           ? "could-not-run"
@@ -191,6 +193,19 @@ function machine(result) {
 
 async function main() {
   const args = process.argv.slice(2);
+  // What you are on, and which controls that brings with it. Answered before anything else, because
+  // the first question during an upgrade is whether the upgrade took -- and "the package moved" is
+  // not the same answer as "the controls that will run moved". v1.1.1 is the release where they
+  // did not.
+  if (args.includes("--version")) {
+    const self = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+    console.log(`agent-gate ${self.version}`);
+    for (const c of resolveControls(process.cwd())) {
+      const v = c.entry ? (c.version ? `v${c.version}` : "v?").padEnd(8) : "".padEnd(8);
+      console.log(`  ${c.name.padEnd(16)} ${v}${c.entry ? c.source : `NOT RESOLVED — ${c.error}`}`);
+    }
+    process.exit(EXIT.CLEAN);
+  }
   const json = args.includes("--json");
   // Set by the pre-commit hook agent-gate-init writes. It disables exactly one check, the one
   // whose premise a commit satisfies by existing; everything else runs, and the skip is reported.

@@ -98,7 +98,7 @@ runs:
 
         node -e '
           const r = require(process.argv[1]);
-          for (const c of r.controls) console.log(`control  : ${c.name.padEnd(16)} ${c.status.padEnd(14)} ${c.resolvedFrom || c.error}`);
+          for (const c of r.controls) console.log(`control  : ${c.name.padEnd(16)} ${c.status.padEnd(14)} ${(c.version ? `v${c.version}` : c.status === "ran" ? "v?" : "").padEnd(8)} ${c.resolvedFrom || c.error}`);
           console.log(`validators: ${r.validatorsRun.join(", ")}`);
           // Printed BEFORE the verdict, and printed at all. The result document carried these
           // three all along and this renderer showed none of them, so in CI -- the place the gate

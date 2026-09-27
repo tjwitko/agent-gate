@@ -5,7 +5,10 @@ import { spawnSync } from "child_process";
 import { tmpdir } from "os";
 import path from "path";
 
-import { parseArgs, writeMcpJson, writeStanza, writeHook, validateCommand, HOOK, STANZA_START } from "./init.mjs";
+import {
+  parseArgs, writeMcpJson, writeStanza, writeHook, validateCommand, HOOK, STANZA_START,
+  upgradeMcp, upgradeStanza, upgradeHook, recoverTask, VERSION,
+} from "./init.mjs";
 
 function project(files = {}, { git = true } = {}) {
   const dir = mkdtempSync(path.join(tmpdir(), "init-"));
@@ -18,9 +21,10 @@ function project(files = {}, { git = true } = {}) {
   return dir;
 }
 const collect = () => {
-  const seen = { wrote: [], ok: [], left: [], warn: [] };
+  const seen = { wrote: [], ok: [], left: [], warn: [], updated: [] };
   return [seen, { wrote: (m) => seen.wrote.push(m), ok: (m) => seen.ok.push(m),
-                  left: (m) => seen.left.push(m), warn: (m) => seen.warn.push(m) }];
+                  left: (m) => seen.left.push(m), warn: (m) => seen.warn.push(m),
+                  updated: (m) => seen.updated.push(m) }];
 };
 const OPTS = { dir: ".", task: null, agents: "AGENTS.md", hook: false, mcp: true, isNew: false, force: [] };
 
@@ -179,4 +183,129 @@ test("the installed command is what lands in a committed file", () => {
     assert.match(validateCommand(path.join(dir, "nested"), "t.txt"), /^npx agent-gate/,
       "found by walking up, as node would");
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+
+// --- upgrading --------------------------------------------------------------------------------
+//
+// Upgrading the package moves the gate and the controls; it does not touch what setup wrote into a
+// project. These pin that --upgrade refreshes exactly what agent-gate-init wrote and nothing else.
+
+// What v1.1.3 wrote, exactly: markers and hook header carried no version then.
+const V113_STANZA = "<!-- agent-gate:start -->\n## Security gate\n\n    npx agent-gate . task.txt\n\nold words\n<!-- agent-gate:end -->\n";
+const V113_HOOK = "#!/usr/bin/env bash\n# Installed by agent-gate-init. Blocks a commit whose tree does not pass the gate.\nnpx agent-gate . task.txt --pre-commit\n";
+
+test("a stanza written by v1.1.3 is recognised, not duplicated", () => {
+  // The unstamped marker must still read as ours. Otherwise the first run of a newer init on a
+  // project set up by the older one appends a second stanza beneath the first.
+  const dir = project({ "AGENTS.md": "# House rules\n\n" + V113_STANZA });
+  try {
+    const [seen, log] = collect();
+    writeStanza(dir, OPTS, log);
+    const body = readFileSync(path.join(dir, "AGENTS.md"), "utf8");
+    assert.equal((body.match(/agent-gate:start/g) || []).length, 1);
+    assert.match(seen.ok[0], /already carries/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("upgrade refreshes a v1.1.3 stanza and keeps its task file", () => {
+  const dir = project({ "AGENTS.md": "# House rules\n\n" + V113_STANZA + "\n## After\n" });
+  try {
+    const [seen, log] = collect();
+    upgradeStanza(dir, OPTS, log);
+    const body = readFileSync(path.join(dir, "AGENTS.md"), "utf8");
+    assert.equal((body.match(/agent-gate:start/g) || []).length, 1, "replaced, not appended");
+    assert.ok(body.includes(`<!-- agent-gate:start v${VERSION} -->`));
+    assert.match(body, /task\.txt/, "the task file survives, or six checks go quiet");
+    assert.doesNotMatch(body, /old words/);
+    assert.match(body, /# House rules/, "what surrounds it is untouched");
+    assert.match(body, /## After/);
+    assert.match(seen.updated[0], /an earlier version → v/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("upgrade is a no-op the second time", () => {
+  const dir = project({ "AGENTS.md": V113_STANZA });
+  try {
+    const [, log] = collect();
+    upgradeStanza(dir, OPTS, log);
+    const once = readFileSync(path.join(dir, "AGENTS.md"), "utf8");
+    const [seen, log2] = collect();
+    upgradeStanza(dir, OPTS, log2);
+    assert.equal(readFileSync(path.join(dir, "AGENTS.md"), "utf8"), once);
+    assert.match(seen.ok[0], /current/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("upgrade refuses a stanza whose end marker is gone", () => {
+  // Guessing where it stops could eat the rest of the file.
+  const dir = project({ "AGENTS.md": "<!-- agent-gate:start -->\nhalf a stanza\n\n## Someone's section\n" });
+  try {
+    const [seen, log] = collect();
+    upgradeStanza(dir, OPTS, log);
+    assert.match(readFileSync(path.join(dir, "AGENTS.md"), "utf8"), /Someone's section/);
+    assert.match(seen.left[0], /without its end marker/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("upgrade refreshes a hook agent-gate-init wrote and keeps its task file", () => {
+  const dir = project();
+  try {
+    mkdirSync(path.join(dir, ".git", "hooks"), { recursive: true });
+    writeFileSync(path.join(dir, ".git", "hooks", "pre-commit"), V113_HOOK);
+    const [seen, log] = collect();
+    upgradeHook(dir, OPTS, log);
+    const hook = readFileSync(path.join(dir, ".git", "hooks", "pre-commit"), "utf8");
+    assert.match(hook, new RegExp(`Installed by agent-gate-init v${VERSION.replace(/\./g, "\\.")}\\.`));
+    assert.match(hook, /\. task\.txt --pre-commit/);
+    assert.match(seen.updated[0], /an earlier version → v/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("upgrade never touches a hook someone else wrote", () => {
+  // This is the case --force gets wrong, and the reason --upgrade exists rather than a
+  // recommendation to re-run with --force.
+  const dir = project();
+  try {
+    mkdirSync(path.join(dir, ".git", "hooks"), { recursive: true });
+    writeFileSync(path.join(dir, ".git", "hooks", "pre-commit"), "#!/bin/sh\necho mine\n");
+    const [seen, log] = collect();
+    upgradeHook(dir, OPTS, log);
+    assert.equal(readFileSync(path.join(dir, ".git", "hooks", "pre-commit"), "utf8"), "#!/bin/sh\necho mine\n");
+    assert.match(seen.warn[0], /not installed by agent-gate-init/);
+    assert.equal(seen.left.length, 0, "someone else's hook is not a failed upgrade");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("upgrade keeps a control the project defined itself, and says it will not follow", () => {
+  const dir = project({ ".mcp.json": JSON.stringify({ mcpServers: { "secret-guard": { command: "docker", args: ["run", "sg"] } } }) });
+  try {
+    const [seen, log] = collect();
+    upgradeMcp(dir, OPTS, log);
+    const doc = JSON.parse(readFileSync(path.join(dir, ".mcp.json"), "utf8"));
+    assert.equal(doc.mcpServers["secret-guard"].command, "docker", "theirs, untouched");
+    assert.match(seen.left[0], /does not follow this upgrade/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("upgrade repoints a control whose install moved", () => {
+  // What setup wrote, pointing at a node_modules that is no longer there.
+  const stale = { command: "node", args: ["/old/place/node_modules/@tjwitko/dep-audit-mcp/index.mjs"], env: { SCAN_ROOT: "/old" } };
+  const dir = project({ ".mcp.json": JSON.stringify({ mcpServers: { "dep-audit": stale } }) });
+  try {
+    const [seen, log] = collect();
+    upgradeMcp(dir, OPTS, log);
+    const doc = JSON.parse(readFileSync(path.join(dir, ".mcp.json"), "utf8"));
+    assert.notEqual(doc.mcpServers["dep-audit"].args[0], stale.args[0]);
+    assert.equal(doc.mcpServers["dep-audit"].env.SCAN_ROOT, path.resolve(dir));
+    assert.match(seen.updated[0], /dep-audit v/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("recoverTask reads back the task file setup was given", () => {
+  assert.equal(recoverTask("    npx agent-gate . task.txt"), "task.txt");
+  assert.equal(recoverTask("npx agent-gate . specs/task.md --pre-commit"), "specs/task.md");
+  assert.equal(recoverTask("node /x/bin/validate.mjs . t.txt --pre-commit"), "t.txt");
+  assert.equal(recoverTask("npx agent-gate . --pre-commit"), null, "a flag is not a task file");
+  assert.equal(recoverTask("npx agent-gate ."), null);
 });

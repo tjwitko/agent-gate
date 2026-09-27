@@ -2,6 +2,8 @@
 // agent-gate-init — wire a project to the gate.
 //
 //   agent-gate-init [project-dir] [--new] [--task <file>] [--agents <file>] [--hook] [--no-mcp]
+//   agent-gate-init [project-dir] --upgrade        refresh what an earlier version wrote
+//   agent-gate-init --version
 //
 // Two jobs, which are the same job: make a directory one the gate runs against. `--new` creates it
 // and `git init`s it first; without it, an existing project is updated in place.
@@ -25,19 +27,32 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = path.resolve(__dirname, "..");
 const EXIT = { OK: 0, LEFT_ALONE: 1, USAGE: 2 };
 
+const VERSION = JSON.parse(readFileSync(path.join(PKG_ROOT, "package.json"), "utf8")).version;
+
 // The marker is how a second run knows it has already written the stanza. Matching on the prose
-// would break the moment the template is reworded, which it will be.
-const STANZA_START = "<!-- agent-gate:start -->";
+// would break the moment the template is reworded, which it will be. Stamped with the version that
+// wrote it, so an upgrade can say what it replaced -- and matched with or without the stamp, because
+// v1.1.3 wrote it without one, and a project set up then must be recognised rather than handed a
+// second stanza beneath the first.
+const STANZA_START = `<!-- agent-gate:start v${VERSION} -->`;
+const STANZA_START_RE = /<!-- agent-gate:start(?: v([^\s>]+))? -->/;
 const STANZA_END = "<!-- agent-gate:end -->";
+const STANZA_BLOCK_RE = new RegExp(`${STANZA_START_RE.source}[\\s\\S]*?${STANZA_END}\\n?`);
+
+// The same for the hook. What identifies a hook as ours is this line; a hook without it belongs to
+// someone else and an upgrade never touches it.
+const HOOK_MARK_RE = /^# Installed by agent-gate-init(?: v([^\s.]+(?:\.[^\s.]+)*))?\./m;
 
 function parseArgs(argv) {
-  const opts = { dir: ".", task: null, agents: "AGENTS.md", hook: false, mcp: true, isNew: false, force: [] };
+  const opts = { dir: ".", task: null, agents: "AGENTS.md", hook: false, mcp: true, isNew: false, force: [], upgrade: false, version: false };
   const rest = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--new") opts.isNew = true;
     else if (a === "--hook") opts.hook = true;
     else if (a === "--no-mcp") opts.mcp = false;
+    else if (a === "--upgrade") opts.upgrade = true;
+    else if (a === "--version") opts.version = true;
     else if (a === "--task") opts.task = argv[++i];
     else if (a === "--agents") opts.agents = argv[++i];
     else if (a === "--force") opts.force.push(argv[++i] ?? "all");
@@ -142,13 +157,13 @@ function writeStanza(projectDir, opts, log) {
   const file = path.join(projectDir, opts.agents);
   const existing = existsSync(file) ? readFileSync(file, "utf8") : "";
 
-  if (existing.includes(STANZA_START) && !forced(opts, "agents")) {
+  if (STANZA_START_RE.test(existing) && !forced(opts, "agents")) {
     log.ok(`${opts.agents} already carries the stanza`);
     return;
   }
   const block = `${STANZA_START}\n${body.trim()}\n${STANZA_END}\n`;
-  const next = existing.includes(STANZA_START)
-    ? existing.replace(new RegExp(`${STANZA_START}[\\s\\S]*?${STANZA_END}\\n?`), block)
+  const next = STANZA_START_RE.test(existing)
+    ? existing.replace(STANZA_BLOCK_RE, block)
     : `${existing}${existing && !existing.endsWith("\n") ? "\n" : ""}${existing ? "\n" : ""}${block}`;
   writeFileSync(file, next);
   log.wrote(`${opts.agents} — ${existing ? "appended" : "created with"} the gate stanza`);
@@ -164,7 +179,7 @@ function writeStanza(projectDir, opts, log) {
  */
 function HOOK(command) {
   return `#!/usr/bin/env bash
-# Installed by agent-gate-init. Blocks a commit whose tree does not pass the gate.
+# Installed by agent-gate-init v${VERSION}. Blocks a commit whose tree does not pass the gate.
 #
 # MCP registration makes a validator available to an assistant; nothing makes it run. Measured
 # across four runs of one task with identical tooling, a model called the Terraform validator 3, 1,
@@ -227,11 +242,147 @@ function writeHook(projectDir, opts, log) {
   log.wrote(`.git/hooks/pre-commit — runs the gate, and blocks on exit 1, 2 and 3 alike`);
 }
 
+// --- upgrading ---------------------------------------------------------------------------------
+//
+// Refresh what an earlier agent-gate-init wrote, and nothing else. Upgrading the package moves the
+// gate and the controls; it does not touch what setup wrote into a project -- the stanza in
+// AGENTS.md, the hook in .git/hooks, the control entries in .mcp.json -- so without this a project
+// keeps whatever an older release put there, indefinitely and silently. `--force` would refresh
+// them too, and would also overwrite a hook someone wrote themselves. This only touches what carries
+// agent-gate-init's own mark.
+
+// The task file the project was set up with, read back from what setup wrote, so an upgrade does
+// not need it repeated -- and does not quietly drop it, which would switch six checks off.
+function recoverTask(text) {
+  const m = /(?:npx agent-gate|validate\.mjs) \.(?: (?!--)(\S+))?/.exec(text || "");
+  return m ? m[1] || null : null;
+}
+
+const from = (v) => (v ? `v${v}` : "an earlier version");
+
+function upgradeStanza(projectDir, opts, log) {
+  const file = path.join(projectDir, opts.agents);
+  const existing = existsSync(file) ? readFileSync(file, "utf8") : "";
+  const start = STANZA_START_RE.exec(existing);
+  if (!start) {
+    log.warn(`${opts.agents}: no stanza from agent-gate-init to upgrade — run without --upgrade to add one`);
+    return;
+  }
+  const block = STANZA_BLOCK_RE.exec(existing);
+  if (!block) {
+    log.left(`${opts.agents}: the stanza's start marker is there without its end marker — not guessing where it stops`);
+    return;
+  }
+  const tmpl = path.join(PKG_ROOT, "templates", "AGENTS.md.tmpl");
+  const task = opts.task ?? recoverTask(block[0]);
+  const body = readFileSync(tmpl, "utf8").replaceAll("{{VALIDATE_COMMAND}}", validateCommand(projectDir, task));
+  const next = existing.replace(STANZA_BLOCK_RE, `${STANZA_START}\n${body.trim()}\n${STANZA_END}\n`);
+  if (next === existing) {
+    log.ok(`${opts.agents}: stanza is current (v${VERSION})`);
+    return;
+  }
+  writeFileSync(file, next);
+  log.updated(`${opts.agents}: stanza ${from(start[1])} → v${VERSION}${task ? ` (task file ${task} kept)` : ""}`);
+}
+
+function upgradeHook(projectDir, opts, log) {
+  const top = spawnSync("git", ["rev-parse", "--show-toplevel"], { cwd: projectDir, encoding: "utf8" });
+  if (top.status !== 0) return;
+  const file = path.join(top.stdout.trim(), ".git", "hooks", "pre-commit");
+  if (!existsSync(file)) {
+    log.warn("pre-commit hook: none installed — add one with --hook");
+    return;
+  }
+  const text = readFileSync(file, "utf8");
+  const mark = HOOK_MARK_RE.exec(text);
+  if (!mark) {
+    log.warn("pre-commit hook: not installed by agent-gate-init, so an upgrade does not touch it");
+    return;
+  }
+  const hooksPath = (spawnSync("git", ["config", "--get", "core.hooksPath"], { cwd: projectDir, encoding: "utf8" }).stdout || "").trim();
+  if (hooksPath) {
+    // Refreshing it would be pointless and would read as protection: git is not running it.
+    log.left(`pre-commit hook: core.hooksPath is now ${hooksPath}, so the hook in .git/hooks does not run at all`);
+    return;
+  }
+  const task = opts.task ?? recoverTask(text);
+  const next = HOOK(validateCommand(projectDir, task, { preCommit: true }));
+  if (next === text) {
+    log.ok(`pre-commit hook: current (v${VERSION})`);
+    return;
+  }
+  writeFileSync(file, next);
+  chmodSync(file, 0o755);
+  log.updated(`pre-commit hook: ${from(mark[1])} → v${VERSION}`);
+}
+
+function upgradeMcp(projectDir, opts, log) {
+  const file = path.join(projectDir, ".mcp.json");
+  if (!existsSync(file)) {
+    log.warn(".mcp.json: none to upgrade — run without --upgrade to add one");
+    return;
+  }
+  let doc;
+  try {
+    doc = JSON.parse(readFileSync(file, "utf8"));
+  } catch (err) {
+    log.left(`.mcp.json could not be parsed (${err.message}) — leaving it alone`);
+    return;
+  }
+  doc.mcpServers ||= {};
+  const { config } = readConfig(projectDir);
+  const changed = [];
+  const current = [];
+  const custom = [];
+  for (const c of resolveControls(projectDir, { config })) {
+    if (!c.entry) {
+      log.warn(`.mcp.json: ${c.name} could not be located in this install — set ${c.envVar}`);
+      continue;
+    }
+    const want = { command: "node", args: [c.entry], env: { [c.rootVar]: path.resolve(projectDir) } };
+    const have = doc.mcpServers[c.name];
+    const label = `${c.name} ${c.version ? `v${c.version}` : "v?"}`;
+    if (!have) {
+      // A control this release has and the project does not -- how a new one reaches an existing
+      // project at all.
+      doc.mcpServers[c.name] = want;
+      changed.push(`${label} (added)`);
+    } else if (JSON.stringify(have) === JSON.stringify(want)) {
+      current.push(label);
+    } else if (have.command === "node" && typeof have.args?.[0] === "string" && have.args[0].endsWith(path.join(c.pkg, "index.mjs"))) {
+      doc.mcpServers[c.name] = want;
+      changed.push(label);
+    } else {
+      custom.push(c.name);
+    }
+  }
+  if (changed.length) {
+    writeFileSync(file, `${JSON.stringify(doc, null, 2)}\n`);
+    log.updated(`.mcp.json: ${changed.join(", ")}`);
+  }
+  if (current.length) log.ok(`.mcp.json: ${current.join(", ")} current`);
+  if (custom.length) {
+    log.left(
+      `.mcp.json: kept ${custom.join(", ")} as defined — ${custom.length === 1 ? "it points" : "they point"} ` +
+        `somewhere agent-gate did not write, so ${custom.length === 1 ? "it does" : "they do"} not follow this upgrade`
+    );
+  }
+}
+
 async function main() {
   const { opts, error } = parseArgs(process.argv.slice(2));
   if (error) {
     console.error(`agent-gate-init: ${error}`);
-    console.error("usage: agent-gate-init [project-dir] [--new] [--task <file>] [--agents <file>] [--hook] [--no-mcp]");
+    console.error("usage: agent-gate-init [project-dir] [--new] [--task <file>] [--agents <file>] [--hook] [--no-mcp]\n       agent-gate-init [project-dir] --upgrade\n       agent-gate-init --version");
+    process.exit(EXIT.USAGE);
+  }
+
+  if (opts.version) {
+    console.log(`agent-gate-init ${VERSION}`);
+    process.exit(EXIT.OK);
+  }
+  if (opts.upgrade && (opts.isNew || opts.hook || opts.force.length)) {
+    console.error("agent-gate-init: --upgrade refreshes what is already there; it does not take --new, --hook or --force");
     process.exit(EXIT.USAGE);
   }
 
@@ -250,10 +401,21 @@ async function main() {
   let leftAlone = 0;
   const log = {
     wrote: (m) => console.log(`  wrote   ${m}`),
+    updated: (m) => console.log(`  updated ${m}`),
     ok: (m) => console.log(`  ok      ${m}`),
     left: (m) => { leftAlone++; console.log(`  left    ${m}`); },
     warn: (m) => console.log(`  note    ${m}`),
   };
+
+  if (opts.upgrade) {
+    console.log(`agent-gate-init ${VERSION}: upgrading ${projectDir}`);
+    if (opts.mcp) upgradeMcp(projectDir, opts, log);
+    upgradeStanza(projectDir, opts, log);
+    upgradeHook(projectDir, opts, log);
+    console.log("");
+    console.log("  confirm: npx agent-gate --version     (the controls that will actually run)");
+    process.exit(leftAlone ? EXIT.LEFT_ALONE : EXIT.OK);
+  }
 
   console.log(`agent-gate-init: ${projectDir}`);
   if (opts.mcp) writeMcpJson(projectDir, opts, log);
@@ -287,4 +449,7 @@ function invokedDirectly() {
 
 if (invokedDirectly()) await main();
 
-export { parseArgs, writeMcpJson, writeStanza, writeHook, validateCommand, HOOK, EXIT, STANZA_START };
+export {
+  parseArgs, writeMcpJson, writeStanza, writeHook, validateCommand, HOOK, EXIT, STANZA_START,
+  upgradeMcp, upgradeStanza, upgradeHook, recoverTask, VERSION,
+};

@@ -179,6 +179,8 @@ reported and left alone. `--force mcp|agents|hook` says otherwise, per file.
 
 It exits **1** when it left something alone, so a script can tell "set up" from "already had one".
 
+After upgrading the package, `agent-gate-init --upgrade` refreshes what it wrote — see [Upgrading](#upgrading).
+
 ### The pre-commit hook
 
 ```
@@ -344,6 +346,108 @@ runner that has the missing scanner, which is never the right response to `block
 See [`docs/ci.md`](docs/ci.md) for a full worked example including a pinned toolchain.
 
 ---
+
+## Upgrading
+
+The four controls come **with** the gate — `@tjwitko/agent-gate` pins them — so upgrading the gate
+upgrades them. You only upgrade a control separately if you wired it into an editor on its own.
+
+### 1. See what you are on
+
+```text
+$ npx agent-gate --version
+agent-gate 1.1.4
+  terraform-guard  v1.1.0  node_modules @tjwitko/terraform-guard-mcp
+  dep-audit        v1.0.0  node_modules @tjwitko/dep-audit-mcp
+  secret-guard     v1.0.0  node_modules @tjwitko/secret-guard-mcp
+  identity-guard   v1.0.0  node_modules @tjwitko/identity-guard-mcp
+```
+
+Run it again afterwards. **"The package moved" and "the controls that will run moved" are different
+answers**, and only the second one protects anything: v1.1.1 shipped with terraform-guard a release
+behind its own fixes, and nothing in the output said so. Every gate run now prints the version of
+each control beside where it was found, in the CLI and in the Action's log alike.
+
+### 2. Move the pin
+
+**GitHub Action** — bump **both** references, which name one repository at one version:
+
+```yaml
+- uses: tjwitko/agent-gate/.github/actions/control-tooling@v1.1.4
+- uses: tjwitko/agent-gate@v1.1.4
+```
+
+A workflow left at two versions runs one release's gate on another's toolchain. It is an easy one to
+miss: a search for `agent-gate@` does not match the first line.
+
+**npm:**
+
+```bash
+npm install --save-dev github:tjwitko/agent-gate#v1.1.4
+```
+
+### 3. Refresh what setup wrote
+
+```bash
+npx agent-gate-init --upgrade
+```
+
+Upgrading the package does not touch what `agent-gate-init` wrote into your project, so without this
+a project keeps an older release's stanza and hook indefinitely. `--upgrade` refreshes exactly
+those, and nothing it did not write:
+
+| | refreshed when | left alone when |
+| --- | --- | --- |
+| `AGENTS.md` stanza | it sits between agent-gate's markers | there are no markers, or the end marker is missing |
+| pre-commit hook | it carries the `Installed by agent-gate-init` header | anyone else wrote it |
+| `.mcp.json` controls | the entry is one agent-gate wrote, or the control is missing | you defined the control yourself |
+
+The task file is read back from what setup wrote, so you do not have to repeat it — and it is not
+quietly dropped, which would switch six checks off. Running it twice changes nothing the second
+time. It exits **1** if something of agent-gate's own could not be refreshed, and says what.
+
+`--force` would also refresh these, and would also overwrite a hook you wrote. Use `--upgrade`.
+
+### 4. Run the new version before you gate on it
+
+**An upgrade can turn a passing project red, deliberately.** When a release fixes a check that was
+passing something it should not have, projects relying on that gap start failing. v1.1.2 did this
+for S3 buckets with no public access block of their own; v1.1.4 does it for services whose only
+authentication was commented out. Release notes call these out under *expect this to fail*.
+
+So run the new version locally first, read what it finds, and move the CI pin once you have — not
+the other way round, where the first you hear of it is a red build on someone else's pull request.
+
+### Keeping current
+
+Dependabot's `github-actions` updater opens a pull request when a new tag is published:
+
+```yaml
+# .github/dependabot.yml
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+```
+
+Check that the pull request moves **both** references before merging it.
+
+### A control wired in on its own
+
+If you run one of the four servers directly from an editor rather than through the gate, upgrade it
+by its own tag — `npm install github:tjwitko/secret-guard-mcp#vX`, or `git pull && npm ci` in a
+checkout — and then **restart the editor's MCP client**. A client starts each server once per
+session, so a running editor keeps serving the old code until it is restarted, and nothing about
+the upgrade tells you that.
+
+### Rolling back
+
+Pin the previous tag and run `npm install`. The stanza and hook a newer release wrote keep working
+with an older gate, with one exception: **below v1.1.3, remove the pre-commit hook**. It passes
+`--pre-commit`, which older releases do not know, so they run the uncommitted-work check inside the
+hook — where a commit in progress always has uncommitted work — and block every commit.
 
 ## Exit codes
 

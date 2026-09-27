@@ -68,6 +68,57 @@ const TEST_FILE =
   /(\.(test|spec)\.[mc]?[jt]sx?|_test\.go|_test\.py|_spec\.rb|_test\.rb|Test\.java|Tests\.java)$|^test_[^/]*\.py$|^conftest\.py$/i;
 const TEST_DIRS = new Set(["__tests__", "__mocks__", "fixtures", "testdata"]);
 
+// Comments are not code, and this check used to read them as code in both directions. Running
+// agent-gate over its own source blocked on two credential findings, both from comments here that
+// quote the patterns this file was written against, and on a phantom `POST /webhook` from a comment
+// quoting a route -- which is what let the credential findings be reported at all. The reverse was
+// worse: a commented-out `app.use(requireAuth)` counted as protection, so a service with every route
+// open passed. Same defect; the second direction is the one that ships a hole.
+//
+// Full-line comments only, blanked rather than removed so every line number still matches the file.
+// A line with code and a trailing comment is kept whole: cutting at a mid-line `//` would also cut
+// code that follows a URL in a string, and a false negative in a security check costs more than a
+// trailing comment's noise. For the same reason a block comment is only recognised where it OPENS a
+// line -- `/*` in the middle of a line is as likely to sit in a string ("src/**/*.js") as to start a
+// comment.
+//
+// Known limit: Python docstrings are strings, not comments, and are not blanked. A docstring quoting
+// a vulnerable comparison will still be read as one.
+const C_COMMENTS = { line: /^\s*\/\//, blockStart: /^\s*\/\*/, blockEnd: /\*\//, codeAfterEnd: true };
+const HASH_COMMENTS = { line: /^\s*#/ };
+const RUBY_COMMENTS = { line: /^\s*#/, blockStart: /^=begin\b/, blockEnd: /^=end\b/, codeAfterEnd: false };
+
+export function codeOnly(text, style) {
+  if (!style) return text;
+  const lines = text.split("\n");
+  let inBlock = false;
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    if (inBlock) {
+      const m = style.blockEnd.exec(l);
+      if (!m) { lines[i] = ""; continue; }
+      inBlock = false;
+      lines[i] = style.codeAfterEnd ? l.slice(m.index + m[0].length) : "";
+      continue;
+    }
+    if (style.line.test(l)) { lines[i] = ""; continue; }
+    if (style.blockStart && style.blockStart.test(l)) {
+      if (style.codeAfterEnd) {
+        // C family: `/* note */ app.use(auth)` closes on the same line and keeps the code after it.
+        const rest = l.slice(l.indexOf("/*") + 2);
+        const m = style.blockEnd.exec(rest);
+        lines[i] = m ? rest.slice(m.index + m[0].length) : "";
+        inBlock = !m;
+      } else {
+        // Ruby: =begin and =end each own their whole line.
+        lines[i] = "";
+        inBlock = true;
+      }
+    }
+  }
+  return lines.join("\n");
+}
+
 // ---------------------------------------------------------------------------------------------
 // Python -- FastAPI and Flask
 // ---------------------------------------------------------------------------------------------
@@ -183,7 +234,14 @@ function validatedAtStartup(all, name) {
 }
 
 /** Credentials compared against an environment value that may be unset, making the check vacuous. */
+// Names only, for callers that want a verdict. vacuousCredentialDetails keeps which identifiers the
+// comparison is actually written against: usually the local the env value was assigned to, not the
+// env name, so locating the finding by the env name alone found nothing.
 export function vacuousCredentialChecks(all) {
+  return [...new Set(vacuousCredentialDetails(all).map((d) => d.name))];
+}
+
+export function vacuousCredentialDetails(all) {
   const out = [];
   for (const re of [JS_ENV_CREDENTIAL, JS_INLINE_ENV_COMPARE]) {
     re.lastIndex = 0;
@@ -201,7 +259,7 @@ export function vacuousCredentialChecks(all) {
       const compared = names.some((n) =>
         new RegExp(`[!=]==?[^\\n]*\\b${n}\\b|\\b${n}\\b[^\\n]*[!=]==?`).test(all)
       );
-      if (compared) out.push(envName);
+      if (compared) out.push({ name: envName, comparedAs: names });
     }
   }
   PY_ENV_CREDENTIAL.lastIndex = 0;
@@ -213,9 +271,9 @@ export function vacuousCredentialChecks(all) {
     // hides the name inside an f-string, and the original pattern saw no comparison at all. Same
     // line as a comparison is the test, which also covers template literals in JS.
     const compared = new RegExp(`[!=]==?[^\\n]*\\b${name}\\b|\\b${name}\\b[^\\n]*[!=]==?`).test(all);
-    if (compared) out.push(name);
+    if (compared) out.push({ name, comparedAs: [name] });
   }
-  return [...new Set(out)];
+  return out;
 }
 
 /** A signature is verified somewhere, but not in constant time. */
@@ -300,6 +358,7 @@ function pyRouteBody(lines, startIdx) {
 const pythonAdapter = {
   name: "Python",
   extensions: [".py"],
+  comments: HASH_COMMENTS,
   idiom: "a FastAPI dependency (Depends/Security) on the route or on the app, or a credential header the handler verifies",
 
   routes(text) {
@@ -652,6 +711,7 @@ function nodeHttpRoutes(text, lineAt) {
 const jsAdapter = {
   name: "JavaScript/TypeScript",
   extensions: [".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"],
+  comments: C_COMMENTS,
   // The example deliberately writes the path as an identifier rather than a quoted literal: this
   // string is source text in a file this same check may walk, and a quoted path followed by a
   // comma is exactly what JS_ROUTE_RE matches. Documenting a route shape must not declare one.
@@ -790,6 +850,7 @@ const GO_ROUTE_RE =
 const goAdapter = {
   name: "Go",
   extensions: [".go"],
+  comments: C_COMMENTS,
   idiom: "middleware in the route's chain, or a router-wide `Use(...)` that verifies the caller",
 
   routes(text) {
@@ -865,6 +926,7 @@ const JAVA_ROUTE_RE =
 const javaAdapter = {
   name: "Java",
   extensions: [".java"],
+  comments: C_COMMENTS,
   idiom: "`@PreAuthorize`/`@Secured` on the handler, or a `SecurityFilterChain` requiring authentication",
 
   routes(text) {
@@ -905,6 +967,7 @@ const RUBY_ROUTE_RE = /^[ \t]*(get|post|put|patch|delete)\s+['"](\/[^'"]*)['"]\s
 const rubyAdapter = {
   name: "Ruby",
   extensions: [".rb"],
+  comments: RUBY_COMMENTS,
   idiom: "a `before` filter or `before_action` that authenticates the caller",
 
   routes(text) {
@@ -960,13 +1023,32 @@ function walk(dir, acc = [], root = dir) {
     if (!adapter) continue;
     try {
       if (statSync(full).size <= MAX_FILE_BYTES) {
-        acc.push({ rel: path.relative(root, full), text: readFileSync(full, "utf8"), adapter });
+        acc.push({ rel: path.relative(root, full), text: codeOnly(readFileSync(full, "utf8"), adapter.comments), adapter });
       }
     } catch {
       /* unreadable is not this check's problem */
     }
   }
   return acc;
+}
+
+// Which lines compare one of `names`, by the same test the credential checks use to decide that a
+// comparison exists. Those checks run over every file of a language joined into one string, which
+// is right for detection -- the env read and the comparison are often in different files -- and
+// loses where the finding is. A blocking finding that does not say where is one a reader has to
+// guess at; an agent handed one on a repository it did not write guessed "sample code".
+function locateComparisons(files, names) {
+  const at = [];
+  for (const name of names) {
+    const n = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(`[!=]==?[^\\n]*\\b${n}\\b|\\b${n}\\b[^\\n]*[!=]==?`);
+    for (const f of files) {
+      f.text.split("\n").forEach((line, i) => {
+        if (re.test(line)) at.push(`${f.rel}:${i + 1}`);
+      });
+    }
+  }
+  return [...new Set(at)];
 }
 
 /** Per-route authentication state. Returns { ran, routes, languages, unknown }. */
@@ -992,15 +1074,20 @@ export function checkAuthentication(projectDir) {
   const routes = [];
   const languages = [];
   let leakySignature = false;
-  let leakyCredential = false;
-  const vacuous = new Set();
+  let leakyCredential = false;   // { name, language, at } once found
+  const vacuous = new Map();     // env name -> { language, at }
   for (const [adapter, adapterFiles] of byAdapter) {
     const all = adapterFiles.map((f) => f.text).join("\n");
     const global = adapter.globalAuth(all);
     if (leakySignatureCheck(all)) leakySignature = true;
     const leakyCred = leakyCredentialCheck(all);
-    if (leakyCred) leakyCredential = leakyCred;
-    for (const n of vacuousCredentialChecks(all)) vacuous.add(n);
+    if (leakyCred && !leakyCredential) {
+      leakyCredential = { name: leakyCred, language: adapter.name, at: locateComparisons(adapterFiles, [leakyCred]) };
+    }
+    for (const d of vacuousCredentialDetails(all)) {
+      if (vacuous.has(d.name)) continue;
+      vacuous.set(d.name, { language: adapter.name, at: locateComparisons(adapterFiles, d.comparedAs) });
+    }
     let found = 0;
     for (const file of adapterFiles) {
       for (const r of adapter.routes(file.text)) {
@@ -1029,8 +1116,25 @@ export function checkAuthentication(projectDir) {
         "they are declared in a form this check does not recognise",
     };
   }
-  return { ran: true, routes, languages, leakySignature, leakyCredential, vacuousCredentials: [...vacuous], unknown: null };
+  return { ran: true, routes, languages, leakySignature, leakyCredential, vacuousCredentials: [...vacuous.keys()], vacuousAt: Object.fromEntries(vacuous), unknown: null };
 }
+
+// The advice has to be in the language that matched. The first version of these messages said
+// "returns None" and "hmac.compare_digest" whatever matched, so a TypeScript finding told its reader
+// to use a Python function on a value that is `undefined`.
+const CONSTANT_TIME = {
+  Python: "hmac.compare_digest",
+  "JavaScript/TypeScript": "crypto.timingSafeEqual",
+  Go: "subtle.ConstantTimeCompare from crypto/subtle",
+  Java: "MessageDigest.isEqual",
+  Ruby: "ActiveSupport::SecurityUtils.secure_compare",
+};
+const UNSET = {
+  Python: { getter: "os.getenv or os.environ.get, which return None when it is unset", pair: "between two Nones" },
+  "JavaScript/TypeScript": { getter: "process.env, which is undefined when it is unset", pair: "undefined against undefined" },
+};
+const where = (at) =>
+  at && at.length ? ` (${at.slice(0, 3).join(", ")}${at.length > 3 ? `, +${at.length - 3} more` : ""})` : "";
 
 /** Blocking failures for the gate. */
 export function authenticationFailures(projectDir) {
@@ -1054,26 +1158,35 @@ export function authenticationFailures(projectDir) {
     : [];
 
   if (report.leakyCredential) {
+    const { name, language, at } = report.leakyCredential;
     timing.push(
-      `authentication: the credential \`${report.leakyCredential}\` is compared with an ordinary ` +
-        `equality operator rather than a constant-time one. The leak is the same as for a signature, ` +
-        `and the payoff is larger: a bearer credential is stable across attempts, so timing that ` +
-        `recovers it once yields a value that keeps working, where a per-payload digest does not. ` +
-        `The caller can also retry as often as it likes. Use hmac.compare_digest (Python), ` +
-        `crypto.timingSafeEqual (Node), hmac.Equal (Go) or the equivalent.`
+      `authentication: the credential \`${name}\` is compared with an ordinary equality operator ` +
+        `rather than a constant-time one${where(at)}. The leak is the same as for a signature, and ` +
+        `the payoff is larger: a bearer credential is stable across attempts, so timing that recovers ` +
+        `it once yields a value that keeps working, where a per-payload digest does not. The caller ` +
+        `can also retry as often as it likes. Use ${CONSTANT_TIME[language] || "the language's constant-time comparison"}.`
     );
   }
 
-  const vacuousNames = report.vacuousCredentials || [];
-  if (vacuousNames.length) {
+  // One finding per language rather than per name: two unset credentials in one service are one
+  // mistake made twice, and the words for it differ by language, not by variable.
+  const byLanguage = new Map();
+  for (const name of report.vacuousCredentials || []) {
+    const { language, at } = report.vacuousAt[name];
+    if (!byLanguage.has(language)) byLanguage.set(language, { names: [], at: [] });
+    byLanguage.get(language).names.push(name);
+    byLanguage.get(language).at.push(...at);
+  }
+  for (const [language, { names, at }] of byLanguage) {
+    const unset = UNSET[language] || { getter: "a getter that returns nothing", pair: "nothing against nothing" };
     timing.push(
-      `authentication: ${vacuousNames.join(", ")} ${vacuousNames.length === 1 ? "is" : "are"} read ` +
-        `from the environment with a getter that returns None when unset, and compared with == or ` +
-        `!= against what the caller sent. When the variable is missing the comparison is between ` +
-        `two Nones, which succeeds — so a deployment that forgets it does not fail closed, it ` +
-        `serves the endpoint to anyone. Validate at startup and refuse to start without it, the ` +
-        `way this file already treats its other required configuration, and compare with ` +
-        `hmac.compare_digest so the check is constant-time as well as non-vacuous.`
+      `authentication: ${names.join(", ")} ${names.length === 1 ? "is" : "are"} read from the ` +
+        `environment with ${unset.getter}, and compared for equality against what the caller ` +
+        `sent${where(at)}. When the variable is missing the comparison is ${unset.pair}, which ` +
+        `succeeds — so a deployment that forgets it does not fail closed, it serves the endpoint to ` +
+        `anyone. Validate at startup and refuse to start without it, and compare with ` +
+        `${CONSTANT_TIME[language] || "a constant-time comparison"} so the check is constant-time ` +
+        `as well as non-vacuous.`
     );
   }
 

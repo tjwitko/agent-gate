@@ -1243,3 +1243,192 @@ test("a Go health endpoint stays exempt", () => {
   const { failures } = run(GO_SERVER(GUARDED_WEBHOOK, GUARDED_LOOKUP), (d) => authenticationFailures(d));
   assert.doesNotMatch(failures.join(" "), /health/);
 });
+
+// --- comments are not code -------------------------------------------------------------------
+//
+// This check read comments as code, and that failed in both directions. Running agent-gate on
+// agent-gate blocked with two credential findings, both from comments in this checker quoting the
+// patterns it was written against -- and a phantom POST /webhook from a comment that quotes a route,
+// which is what let the credential findings be reported at all. The reverse was worse: a commented-
+// out `app.use(requireAuth)` counted as protection, so a service with every route open passed.
+//
+// Full-line comments only. Cutting at a mid-line `//` would also cut code that follows a URL in a
+// string, and a false negative in a security check costs more than a trailing comment's noise.
+
+const credentialFindings = (failures) =>
+  failures.filter((f) => /constant-time|does not fail closed/.test(f));
+
+test("a comment quoting a vulnerable comparison is not a vulnerable comparison", () => {
+  const { failures } = run(
+    {
+      "src/index.js":
+        "// Or read inline at the comparison site: `req.headers['x'] !== process.env.SUPPORT_TEAM_KEY`.\n" +
+        "// Observed in webhook-5: `x_internal_token != internal_token`.\n" +
+        "/*\n" +
+        " * authorization != process.env.SUPPORT_TEAM_KEY\n" +
+        " */\n" +
+        "app.get('/items', requireAuth, list);\n",
+    },
+    authenticationFailures
+  );
+  assert.deepEqual(credentialFindings(failures), []);
+});
+
+test("a Python comment quoting a vulnerable comparison is not one either", () => {
+  const { failures } = run(
+    {
+      "app/main.py":
+        "# Adjacency is too strict: `authorization != f\"Bearer {SUPPORT_TEAM_TOKEN}\"`\n" +
+        "# SUPPORT_TEAM_TOKEN = os.getenv(\"SUPPORT_TEAM_TOKEN\")\n" +
+        "@app.get('/items')\n" +
+        "async def items(user = Depends(current_user)):\n    pass\n",
+    },
+    authenticationFailures
+  );
+  assert.deepEqual(credentialFindings(failures), []);
+});
+
+test("a commented-out route is not an endpoint", () => {
+  // The phantom that let agent-gate's own credential findings through: with no real routes this
+  // check reports "no HTTP routes were identified" and says nothing about credentials.
+  const { routes, unknown } = run(
+    {
+      "src/notes.js":
+        "// `app.post('/webhook', express.raw({...}), handleWebhook)`\n" +
+        "export const x = 1;\n",
+    },
+    checkAuthentication
+  );
+  assert.deepEqual(routes, []);
+  assert.match(unknown, /no HTTP routes/);
+});
+
+test("commented-out middleware is not protection", () => {
+  // The false negative: every route open, and a comment saying auth used to be here was enough.
+  for (const off of ["// app.use(requireAuth);\n", "/* app.use(requireAuth); */\n", "/*\n  app.use(requireAuth);\n*/\n"]) {
+    const { failures } = run(
+      {
+        "src/app.js":
+          "const app = express();\n" + off +
+          "app.get('/records', (req, res) => res.json([]));\n" +
+          "app.post('/records', (req, res) => res.status(201).end());\n",
+      },
+      authenticationFailures
+    );
+    assert.ok(
+      failures.some((f) => /2 of 2 endpoint/.test(f)),
+      `routes stay open when the middleware is commented out as: ${JSON.stringify(off)}`
+    );
+  }
+});
+
+test("a real comparison after a URL in a string is still caught", () => {
+  // The reason stripping is full-line only. Cutting at `//` would remove the comparison below.
+  const { failures } = run(
+    {
+      "src/app.js":
+        "app.get('/lookup', requireSupport, lookup);\n" +
+        "function requireSupport(req, res, next) {\n" +
+        "  const docs = \"https://example.com/support\"; if (req.headers.authorization !== process.env.SUPPORT_TEAM_KEY) return res.status(403).end();\n" +
+        "  next();\n}\n",
+    },
+    authenticationFailures
+  );
+  assert.ok(credentialFindings(failures).length > 0, "the comparison on that line is code");
+});
+
+test("stripping a block comment does not move the lines after it", () => {
+  const { routes } = run(
+    {
+      "src/app.js":
+        "/*\n * one\n * two\n */\n" +
+        "app.get('/open', (req, res) => res.end());\n",
+    },
+    checkAuthentication
+  );
+  assert.equal(routes[0].line, 5, "reported at its real line");
+});
+
+// --- where a finding is ----------------------------------------------------------------------
+//
+// These two checks run over every file of a language joined into one string, so the file that
+// matched was lost and the finding said only what was wrong, never where. An agent handed that
+// on a repository it did not write concluded, correctly as it happened, that it was "sample code"
+// -- by guessing.
+
+test("a vacuous credential finding names the file and line", () => {
+  const { failures } = run(
+    {
+      "src/index.ts": "app.get('/lookup/:id', requireSupportAuth, lookup);\n",
+      "src/middleware.ts":
+        "export const requireSupportAuth = (req, res, next) => {\n" +
+        "  const supportKey = req.headers['x-support-key'];\n" +
+        "  const expectedSupportKey = process.env.SUPPORT_TEAM_KEY;\n" +
+        "  if (supportKey !== expectedSupportKey) return res.status(403).send();\n" +
+        "  next();\n};\n",
+    },
+    authenticationFailures
+  );
+  const v = vacuous(failures);
+  assert.equal(v.length, 1);
+  assert.match(v[0], /src\/middleware\.ts:4/);
+});
+
+test("a leaky credential finding names the file and line", () => {
+  const { failures } = run(
+    {
+      "app/main.py":
+        "import os, hmac\n" +
+        'INTERNAL = os.environ["INTERNAL_TOKEN"]\n' +
+        "def verify(x_internal_token: str = Header(...)):\n" +
+        "    if x_internal_token != INTERNAL:\n" +
+        "        raise HTTPException(403)\n" +
+        "@app.get('/support')\n" +
+        "async def support(_ = Depends(verify)):\n    pass\n",
+    },
+    authenticationFailures
+  );
+  const leaky = failures.filter((f) => /constant-time/.test(f) && !/does not fail closed/.test(f));
+  assert.equal(leaky.length, 1);
+  assert.match(leaky[0], /app\/main\.py:4/);
+});
+
+// --- words for the language that matched ------------------------------------------------------
+
+test("the vacuous finding is worded for JavaScript when JavaScript matched", () => {
+  const { failures } = run(
+    {
+      "src/index.ts": "app.get('/lookup/:id', requireSupportAuth, lookup);\n",
+      "src/middleware.ts":
+        "export const requireSupportAuth = (req, res, next) => {\n" +
+        "  const expectedKey = process.env.SUPPORT_TEAM_KEY;\n" +
+        "  if (req.headers['x-support-key'] !== expectedKey) return res.status(403).send();\n" +
+        "  next();\n};\n",
+    },
+    authenticationFailures
+  );
+  const [v] = vacuous(failures);
+  assert.match(v, /undefined/);
+  assert.match(v, /timingSafeEqual/);
+  assert.doesNotMatch(v, /\bNone\b/, "not Python's word for it");
+});
+
+test("the vacuous finding is worded for Python when Python matched", () => {
+  const { failures } = run(
+    {
+      "src/main.py":
+        "import os\n" +
+        'SUPPORT_API_KEY = os.getenv("SUPPORT_API_KEY")\n\n' +
+        "def verify(x_support_key: str = Header(None)):\n" +
+        "    if x_support_key != SUPPORT_API_KEY:\n" +
+        "        raise HTTPException(403)\n\n" +
+        "@app.get('/lookup')\n" +
+        "async def lookup(_ = Depends(verify)):\n    pass\n",
+    },
+    authenticationFailures
+  );
+  const [v] = vacuous(failures);
+  assert.match(v, /\bNone\b/);
+  assert.match(v, /compare_digest/);
+  assert.doesNotMatch(v, /\bundefined\b/);
+});

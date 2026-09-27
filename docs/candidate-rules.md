@@ -496,6 +496,35 @@ then the check says what it verified and no more.
 
 ---
 
+### Comments read as code, in both directions — `authentication.mjs`
+
+Reported from another machine: agent-gate installed fresh and pointed at its own repository exited 1,
+with two credential findings — a credential compared with `!=` rather than a constant-time check, and
+`SUPPORT_TEAM_KEY` letting anyone in when unset. The agent reading it concluded it was "sample code".
+It was right, and had to guess, because neither finding named a file.
+
+Both came from comments in `agent/authentication.mjs` quoting the patterns it was written against,
+and a phantom `POST /webhook` from a third comment is what let them be reported at all: with no
+routes, the check says so and stops. The comments had been there since 27 August. agent-gate's CI ran
+the action against corpus fixtures and never against `.`, so it had failed its own gate for a month.
+I also missed it earlier the same week: a self-scan returned `BLOCKING: 8` and I put all eight down to
+the deliberately insecure reference fixtures without reading them.
+
+**The other direction was worse.** If comments are code, a commented-out `app.use(requireAuth)` is
+protection — and it was. A service with every route open returned no blocking finding; delete the
+comment line and the same file blocked on "2 of 2 endpoints accept requests from anyone". A critical
+check switched off by a comment.
+
+Fixed by blanking full-line comments before analysis, per language, preserving line numbers. Only
+full-line: cutting at a mid-line `//` would also cut real code after a URL in a string. Findings now
+name file and line, and are worded for the language that matched — the vacuous finding had told a
+TypeScript reader about `None` and `hmac.compare_digest`. Seven tests fail against the old checker;
+three guards pass on both. None of the thirteen corpus fixtures changed its authentication verdict.
+agent-gate's CI now runs the gate against its own tree with a task file of its own.
+
+**Known limit, not fixed:** a Python docstring is a string, not a comment, and one quoting a
+vulnerable comparison is still read as one.
+
 ## Open
 
 ### 1. A credential compared against a value of the wrong type
@@ -562,6 +591,29 @@ internals to the caller.
 Detectable in principle: a broad `except Exception` enclosing a `raise HTTPException`. Not yet built,
 and it competes for attention with the two above.
 
+
+### 4. A credential held in a local whose name does not look like one
+
+Found while writing the tests for the comment fix. `JS_ENV_CREDENTIAL` only matches an assignment
+whose *local* name contains Key, Secret, Token, Password or Credential:
+
+```js
+const expectedKey = process.env.SUPPORT_TEAM_KEY;   // examined
+const expected    = process.env.SUPPORT_TEAM_KEY;   // never examined
+```
+
+The env name is then checked separately for the same words, so the first requirement adds nothing
+except the miss: a vacuous comparison against `expected` passes. The env name alone should be enough.
+Not folded into the comment fix, because it changes what is detected and that change deserves its
+own corpus check.
+
+### 5. `build_check` can wait on Docker forever
+
+A local corpus run sat for thirteen minutes on one fixture: `docker pull golang:1.22` at 0% CPU,
+blocked on `docker-credential-desktop get`. Docker Desktop's credential helper had wedged — the same
+thing that stalled an Opus run's `docker build` — and nothing timed it out. A check that cannot run
+must say so; this one said nothing and never returned. A timeout that reports the toolchain as
+unavailable, which is exit 3 territory, is the fix.
 ## Resolved (found by slack-sonnet-1)
 
 ### A parameterised retention period reads as no retention at all — `retention.mjs`

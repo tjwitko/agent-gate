@@ -34,10 +34,10 @@
   },
   "license": "Apache-2.0",
   "dependencies": {
-    "@tjwitko/dep-audit-mcp": "git+https://github.com/tjwitko/dep-audit-mcp.git#v1.0.0",
-    "@tjwitko/identity-guard-mcp": "git+https://github.com/tjwitko/identity-guard-mcp.git#v1.0.0",
-    "@tjwitko/secret-guard-mcp": "git+https://github.com/tjwitko/secret-guard-mcp.git#v1.0.0",
-    "@tjwitko/terraform-guard-mcp": "git+https://github.com/tjwitko/terraform-guard-mcp.git#v1.1.0",
+    "@tjwitko/dep-audit-mcp": "git+https://github.com/tjwitko/dep-audit-mcp.git#v1.0.1",
+    "@tjwitko/identity-guard-mcp": "git+https://github.com/tjwitko/identity-guard-mcp.git#v1.0.1",
+    "@tjwitko/secret-guard-mcp": "git+https://github.com/tjwitko/secret-guard-mcp.git#v1.0.1",
+    "@tjwitko/terraform-guard-mcp": "git+https://github.com/tjwitko/terraform-guard-mcp.git#v1.1.1",
     "yaml": "^2.8.1"
   },
   "devDependencies": {

@@ -9,6 +9,20 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Weekly, whether or not anything was pushed. Advisories arrive without a commit: between 27
+  # September and 13 October every repository in this estate gained a critical and a high from new
+  # advisories against dependencies nobody had touched, and CI stayed green because nothing ran.
+  # The next push would have been the first to find out, and would have gone red for reasons that
+  # had nothing to do with what it changed.
+  #
+  # Monday 06:17 UTC. Off the hour, because scheduled runs at :00 are the ones GitHub most often
+  # delays or drops under load. GitHub also disables scheduled workflows in a public repository after
+  # 60 days without activity -- precisely the dormant repository this is for. It emails the owner
+  # when it does; re-enable it from the Actions tab.
+  schedule:
+    - cron: "17 6 * * 1"
+  # Run it now, without pushing anything.
+  workflow_dispatch:
 
 jobs:
   unit:

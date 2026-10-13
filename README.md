@@ -53,16 +53,16 @@ script on `PATH` is a different fact and will not satisfy it.
 
 ### Install
 
-Latest release: **[v1.1.6](https://github.com/tjwitko/agent-gate/releases/latest)**
+Latest release: **[v1.1.7](https://github.com/tjwitko/agent-gate/releases/latest)**
 
 ```bash
-npm install --save-dev github:tjwitko/agent-gate#v1.1.6
+npm install --save-dev github:tjwitko/agent-gate#v1.1.7
 ```
 
 The four control servers come with it as dependencies — there is nothing else to clone or wire up.
 They are pinned to specific release tags, so this installs the same five components every time;
 `npx agent-gate --version` shows which.
-Drop the `#v1.1.6` to track `main` instead, which moves.
+Drop the `#v1.1.7` to track `main` instead, which moves.
 
 ### Run it
 
@@ -310,9 +310,9 @@ jobs:
 
       # Everything the controls drive, at the versions this release was tested with: Terraform,
       # gitleaks, osv-scanner, checkov, ruff and pytest, each checked after install.
-      - uses: tjwitko/agent-gate/.github/actions/control-tooling@v1.1.6
+      - uses: tjwitko/agent-gate/.github/actions/control-tooling@v1.1.7
 
-      - uses: tjwitko/agent-gate@v1.1.6
+      - uses: tjwitko/agent-gate@v1.1.7
         with:
           project: .
           task-file: task.txt
@@ -366,7 +366,7 @@ upgrades them. You only upgrade a control separately if you wired it into an edi
 
 ```text
 $ npx agent-gate --version
-agent-gate 1.1.6
+agent-gate 1.1.7
   terraform-guard  v1.1.1  node_modules @tjwitko/terraform-guard-mcp
   dep-audit        v1.0.1  node_modules @tjwitko/dep-audit-mcp
   secret-guard     v1.0.1  node_modules @tjwitko/secret-guard-mcp
@@ -383,8 +383,8 @@ each control beside where it was found, in the CLI and in the Action's log alike
 **GitHub Action** — bump **both** references, which name one repository at one version:
 
 ```yaml
-- uses: tjwitko/agent-gate/.github/actions/control-tooling@v1.1.6
-- uses: tjwitko/agent-gate@v1.1.6
+- uses: tjwitko/agent-gate/.github/actions/control-tooling@v1.1.7
+- uses: tjwitko/agent-gate@v1.1.7
 ```
 
 A workflow left at two versions runs one release's gate on another's toolchain. It is an easy one to
@@ -393,7 +393,7 @@ miss: a search for `agent-gate@` does not match the first line.
 **npm:**
 
 ```bash
-npm install --save-dev github:tjwitko/agent-gate#v1.1.6
+npm install --save-dev github:tjwitko/agent-gate#v1.1.7
 ```
 
 ### 3. Refresh what setup wrote

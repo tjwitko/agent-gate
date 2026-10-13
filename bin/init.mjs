@@ -25,7 +25,10 @@ import { resolveControls, readConfig, CONFIG_FILE } from "../lib/resolve-control
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = path.resolve(__dirname, "..");
-const EXIT = { OK: 0, LEFT_ALONE: 1, USAGE: 2 };
+// FAILED is 70, sysexits' EX_SOFTWARE, and not 1: a crash used to exit 1, which here means "left a
+// file alone" -- an unwritable project read as an install that had politely declined to overwrite.
+// Not 3 either, which is the gate's "could not run"; this is a different command's contract.
+const EXIT = { OK: 0, LEFT_ALONE: 1, USAGE: 2, FAILED: 70 };
 
 const VERSION = JSON.parse(readFileSync(path.join(PKG_ROOT, "package.json"), "utf8")).version;
 
@@ -447,7 +450,28 @@ function invokedDirectly() {
   }
 }
 
-if (invokedDirectly()) await main();
+// Nothing here overwrites, so a rerun after fixing the cause only writes what is still missing.
+function failed(err) {
+  return (
+    `agent-gate-init failed: ${(err && err.message) || err}\n` +
+    `Files listed above as "wrote" or "updated" were written; nothing after them was. Fix the cause and\n` +
+    `rerun -- files already in place are reported, not rewritten.\n`
+  );
+}
+
+if (invokedDirectly()) {
+  const crash = (err) => {
+    process.stderr.write(failed(err));
+    process.exit(EXIT.FAILED);
+  };
+  process.on("uncaughtException", crash);
+  process.on("unhandledRejection", crash);
+  try {
+    await main();
+  } catch (err) {
+    crash(err);
+  }
+}
 
 export {
   parseArgs, writeMcpJson, writeStanza, writeHook, validateCommand, HOOK, EXIT, STANZA_START,

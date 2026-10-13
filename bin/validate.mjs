@@ -15,7 +15,7 @@
 // and printed "BLOCKING: none", and a control that connected and was never asked anything for ten
 // graded runs while a similarly-named check ran beside it.
 import path from "path";
-import { readFileSync, realpathSync } from "fs";
+import { readFileSync, realpathSync, existsSync, statSync } from "fs";
 import { fileURLToPath } from "url";
 
 import { validateProject, localTools, McpClient } from "../lib/gate-core.mjs";
@@ -23,8 +23,47 @@ import { resolveControls, readConfig, CONFIG_FILE } from "../lib/resolve-control
 
 const EXIT = { CLEAN: 0, BLOCKED: 1, USAGE: 2, INCOMPLETE: 3 };
 
+// Input the gate cannot use. Thrown rather than left to surface as ENOENT, ENOTDIR or EISDIR from
+// deep inside -- each of which crashed the process with Node's exit 1, which is this gate's
+// "blocked". A mistyped path was reported as a verdict on the project.
+export class UsageError extends Error {}
+
+function checkInputs(projectDir, taskFile) {
+  if (!existsSync(projectDir)) throw new UsageError(`${projectDir} does not exist`);
+  if (!statSync(projectDir).isDirectory()) throw new UsageError(`${projectDir} is not a directory`);
+  if (taskFile) {
+    if (!existsSync(taskFile)) throw new UsageError(`the task file ${taskFile} does not exist`);
+    if (!statSync(taskFile).isFile()) throw new UsageError(`the task file ${taskFile} is not a file`);
+  }
+}
+
+/**
+ * The last resort, for anything not foreseen. It returns what to print and the code to exit with,
+ * so it can be tested without crashing a process.
+ *
+ * Exit 3, never Node's default 1. Exit 1 says the gate ran in full and found blocking problems; a
+ * gate that fell over did neither. In --json mode it still writes one document, because the Action
+ * and the corpus parse stdout, and an empty one made the Action print "? blocking finding(s). The
+ * gate ran in full; these are real." -- unless the result was already written, since two documents
+ * are as unparseable as none.
+ */
+export function failClosed(err, { json, wroteResult }) {
+  const reason = (err && err.message) || String(err);
+  const stderr =
+    `agent-gate: the gate itself failed: ${(err && err.stack) || reason}\n` +
+    `This is not a verdict on the project. Exit 3: the gate could not run.\n`;
+  const stdout =
+    json && !wroteResult
+      ? `${JSON.stringify({ exitCode: EXIT.INCOMPLETE, incomplete: true, error: `the gate itself failed: ${reason}` })}\n`
+      : "";
+  return { code: EXIT.INCOMPLETE, stdout, stderr };
+}
+
+let wroteResult = false;
+
 export async function runGate(projectDirArg, taskFile, { env = process.env, preCommit = false } = {}) {
   const projectDir = path.resolve(projectDirArg);
+  checkInputs(projectDir, taskFile);
   // Several checks are gated on what the task asked for -- immutability, retention, secret rotation
   // and both quality checks stay silent unless the requirement is stated. Without the task text
   // they report "not checked", which is correct and much less useful.
@@ -231,9 +270,17 @@ async function main() {
   let result;
   try {
     result = await runGate(positional[0], positional[1], { preCommit });
+  } catch (err) {
+    if (!(err instanceof UsageError)) throw err;
+    console.log = narrate;
+    console.error(`agent-gate: ${err.message}`);
+    console.error("usage: agent-gate <project-dir> [task-file] [--json] [--pre-commit]");
+    if (json) process.stdout.write(`${JSON.stringify({ exitCode: EXIT.USAGE, error: err.message })}\n`);
+    process.exit(EXIT.USAGE);
   } finally {
     console.log = narrate;
   }
+  wroteResult = true;
   process.stdout.write(`${json ? machine(result) : human(result)}\n`);
   process.exit(result.exitCode);
 }
@@ -258,6 +305,21 @@ function invokedDirectly() {
   }
 }
 
+// Anything that escapes main() -- a throw, a rejected promise, an 'error' event nobody listened for
+// -- would otherwise end the process with Node's exit 1, which is "blocked".
 if (invokedDirectly()) {
-  await main();
+  const json = process.argv.includes("--json");
+  const crash = (err) => {
+    const r = failClosed(err, { json, wroteResult });
+    if (r.stdout) process.stdout.write(r.stdout);
+    process.stderr.write(r.stderr);
+    process.exit(r.code);
+  };
+  process.on("uncaughtException", crash);
+  process.on("unhandledRejection", crash);
+  try {
+    await main();
+  } catch (err) {
+    crash(err);
+  }
 }

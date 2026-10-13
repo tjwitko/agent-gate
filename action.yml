@@ -98,6 +98,12 @@ runs:
 
         node -e '
           const r = require(process.argv[1]);
+          // A usage error or a gate that fell over writes a document with only the reason in it.
+          // Rendering it as a result would print nothing useful before failing on r.controls.
+          if (r.error) {
+            console.log(`agent-gate did not produce a verdict: ${r.error}`);
+            process.exit(0);
+          }
           for (const c of r.controls) console.log(`control  : ${c.name.padEnd(16)} ${c.status.padEnd(14)} ${(c.version ? `v${c.version}` : c.status === "ran" ? "v?" : "").padEnd(8)} ${c.resolvedFrom || c.error}`);
           console.log(`validators: ${r.validatorsRun.join(", ")}`);
           // Printed BEFORE the verdict, and printed at all. The result document carried these
@@ -114,8 +120,9 @@ runs:
         ' "$RESULT" || echo "(could not render the result; the JSON is at $RESULT)"
 
         echo "result=$RESULT" >> "$GITHUB_OUTPUT"
-        BLOCKING=$(node -e "process.stdout.write(String(require(process.argv[1]).blocking))" "$RESULT" 2>/dev/null || echo "?")
+        BLOCKING=$(node -e "process.stdout.write(String(require(process.argv[1]).blocking ?? \"?\"))" "$RESULT" 2>/dev/null || echo "?")
         echo "blocking=$BLOCKING" >> "$GITHUB_OUTPUT"
+        REASON=$(node -e "process.stdout.write(String(require(process.argv[1]).error || \"\"))" "$RESULT" 2>/dev/null || true)
 
         # Exit 3 is a DISTINCT outcome from exit 1 and must stay that way. Both fail the build; what
         # must never happen is reporting them identically. "Could not run" is not "found nothing",
@@ -134,12 +141,16 @@ runs:
             ;;
           3)
             echo "outcome=incomplete" >> "$GITHUB_OUTPUT"
-            echo "::error title=agent-gate: INCOMPLETE::Part of the gate could not run. This is not a pass and not a clean failure — the project was not fully checked. See the control list in the log."
+            if [ -n "$REASON" ]; then
+              echo "::error title=agent-gate: INCOMPLETE::The gate could not run: $REASON. This is not a verdict on the project."
+            else
+              echo "::error title=agent-gate: INCOMPLETE::Part of the gate could not run. This is not a pass and not a clean failure — the project was not fully checked. See the control list in the log."
+            fi
             exit 1
             ;;
           2)
             echo "outcome=incomplete" >> "$GITHUB_OUTPUT"
-            echo "::error title=agent-gate: usage error::The action invoked the gate incorrectly."
+            echo "::error title=agent-gate: usage error::The gate refused its inputs${REASON:+: $REASON}. Check the project and task-file inputs. This is not a verdict on the project."
             exit 1
             ;;
           *)

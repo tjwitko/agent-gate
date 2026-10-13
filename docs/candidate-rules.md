@@ -642,7 +642,7 @@ after sixteen seconds on a fifteen-second bound, INCOMPLETE, nothing left runnin
 estate's usual one — the test passed because it modelled the failure as the author imagined it, not
 as it behaved.
 
-### 6. A crash exits 1, which reads as "blocked"
+### 6. A crash exits 1, which reads as "blocked" — fixed
 
 Found while testing the Docker fix, by pointing the gate at a directory that had been deleted:
 
@@ -650,19 +650,46 @@ Found while testing the Docker fix, by pointing the gate at a directory that had
 agent-gate /nonexistent/project   →   exit 1, and a stack trace saying `spawn node ENOENT`
 ```
 
-Node reports a missing *working directory* as the command being missing, so the message blames
-`node`, which is on PATH. Worse is the exit code. Node exits 1 on any uncaught exception, and exit 1
-is this gate's **blocked — ran in full**. So a typo in a path, or any crash at all, is
+Node reports a missing *working directory* as the command being missing, so the message blamed
+`node`, which is on PATH. Worse was the exit code. Node exits 1 on any uncaught exception, and exit 1
+is this gate's **blocked — ran in full**. So a typo in a path, or any crash at all, was
 indistinguishable from a project with real findings: exactly the collapse of 1 and 3 the contract
-exists to prevent. The pre-commit hook happens to be safe — it blocks on anything non-zero — but CI
-and anything reading the result would report a gate that fell over as one that ran and found
-problems.
+exists to prevent. The pre-commit hook happened to be safe — it blocks on anything non-zero — but in
+CI the Action printed "? blocking finding(s). The gate ran in full; these are real." over a gate that
+had never started.
 
-Three parts, smallest first:
-1. Refuse a project directory that does not exist, with exit 2.
-2. Handle `McpClient`'s child `error` event, so a control that cannot start is reported as one that
-   could not run — exit 3 — rather than an unhandled event.
-3. A last-resort handler: any uncaught exception exits 3 with a message, never Node's default 1.
+Probed before fixing: a missing project, a project that is a file, a missing task file and a task
+file that is a directory all exited 1. In `--json` mode stdout was not JSON, so anything parsing it
+failed on the parse rather than on the reason.
+
+Three parts, as planned, and a fourth the probing turned up:
+
+1. **Bad inputs are usage errors, exit 2**, said in one sentence with no stack. In `--json` mode
+   stdout still carries one document, `{exitCode: 2, error}`.
+2. **A control that cannot start is could-not-run, exit 3, and fast.** `McpClient` now listens for
+   the child's `error` and `exit` events and settles every pending request when either fires. The
+   unhandled event was only half of it: a control that started and then died — a script that throws
+   on load — was waited on for **ten minutes per request**, and then registered with no tools. Now it
+   comes back in under a second naming the control and saying it exited before answering.
+3. **A last resort.** Anything that escapes — a throw, a rejected promise, an `error` event nobody
+   listened for — goes through `failClosed()`, which exits 3 with "This is not a verdict on the
+   project", and in `--json` mode writes `{exitCode: 3, incomplete: true, error}`, unless the result
+   was already written, because two documents are as unparseable as none. Verified with an injected
+   asynchronous throw in both modes.
+4. **`agent-gate-init` had the same flaw with a different meaning.** Its exit 1 is "left a file
+   alone", so a project it could not write to — EACCES, with a stack — read as an install that had
+   politely declined to overwrite. It now exits **70** (sysexits' `EX_SOFTWARE`) and says to rerun,
+   which is safe because nothing it writes overwrites. Not 3: that is the gate's code, and init does
+   not share the gate's contract.
+
+The Action renders an error document as "agent-gate did not produce a verdict: <reason>" rather than
+failing on its missing fields, puts the reason in the exit 2 and exit 3 annotations, and reports
+`blocking=?` rather than `undefined`.
+
+Each new test was run against the old code and fails there: the dead-control test hits its 120-second
+limit waiting, and the unwritable-init test gets exit 1. `bin/exit-codes.test.mjs` runs the real CLI,
+because an exit code is a property of a process.
+
 ## Resolved (found by slack-sonnet-1)
 
 ### A parameterised retention period reads as no retention at all — `retention.mjs`

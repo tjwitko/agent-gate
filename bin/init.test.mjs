@@ -1,13 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, existsSync } from "fs";
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, existsSync, chmodSync } from "fs";
 import { spawnSync } from "child_process";
 import { tmpdir } from "os";
 import path from "path";
 
 import {
   parseArgs, writeMcpJson, writeStanza, writeHook, validateCommand, HOOK, STANZA_START,
-  upgradeMcp, upgradeStanza, upgradeHook, recoverTask, VERSION,
+  upgradeMcp, upgradeStanza, upgradeHook, recoverTask, VERSION, EXIT,
 } from "./init.mjs";
 
 function project(files = {}, { git = true } = {}) {
@@ -308,4 +308,22 @@ test("recoverTask reads back the task file setup was given", () => {
   assert.equal(recoverTask("node /x/bin/validate.mjs . t.txt --pre-commit"), "t.txt");
   assert.equal(recoverTask("npx agent-gate . --pre-commit"), null, "a flag is not a task file");
   assert.equal(recoverTask("npx agent-gate ."), null);
+});
+
+// A crash exited 1, which here means "left a file alone". Run as the real CLI, because an exit code
+// is a property of a process. Root ignores file modes, so the premise does not hold there.
+test("an init that cannot write is exit 70, not 1, and says what to do", { skip: process.getuid?.() === 0 && "root ignores file modes" }, () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "init-ro-"));
+  chmodSync(dir, 0o555);
+  try {
+    const r = spawnSync(process.execPath, [new URL("./init.mjs", import.meta.url).pathname, dir], { encoding: "utf8" });
+    assert.equal(r.status, EXIT.FAILED, `exit ${r.status}; stderr: ${r.stderr.slice(0, 300)}`);
+    assert.notEqual(EXIT.FAILED, EXIT.LEFT_ALONE);
+    assert.match(r.stderr, /agent-gate-init failed: .*EACCES|permission denied/i);
+    assert.match(r.stderr, /rerun/);
+    assert.ok(!/\n\s+at .+:\d+:\d+/.test(r.stderr), "a sentence, not a stack trace");
+  } finally {
+    chmodSync(dir, 0o755);
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

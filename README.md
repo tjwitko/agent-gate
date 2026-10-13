@@ -472,6 +472,14 @@ hook — where a commit in progress always has uncommitted work — and block ev
 and it is not a normal failure. Treating it as either is the failure mode this project exists to
 remove — and it has bitten this codebase twice, which is why the distinction is enforced and tested.
 
+A gate that crashes exits 3 too, never Node's default 1, and in `--json` mode still writes one
+document: `{"exitCode": 3, "incomplete": true, "error": "..."}`. A usage error writes
+`{"exitCode": 2, "error": "..."}`.
+
+`agent-gate-init` has its own codes: `0` done, `1` left an existing file alone (reported, and
+`--force` overrides), `2` usage error, `70` failed partway — rerun after fixing the cause, since
+nothing it writes overwrites.
+
 ---
 
 ## What it checks

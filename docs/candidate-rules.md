@@ -627,6 +627,42 @@ are now named as timeouts, and a build that runs out of time is could-not-run, n
 
 Tested against a fake `docker` on PATH that hangs the way the real one did. Before the fix the test
 run could not finish; after, it takes five seconds and leaves nothing running.
+
+**That fix did not work, and v1.1.5 shipped it.** On a timeout `spawnSync` sends its kill signal —
+SIGTERM by default — and then *waits for the child to exit*. A docker CLI blocked on Docker Desktop's
+credential helper ignores SIGTERM, so `spawnSync` kept waiting and the timeout bounded nothing. The
+fake died on SIGTERM because it ran `exec sleep`; the real failure does not. Found two weeks later
+when the real wedge recurred during a corpus re-measure and a pull outlived its five minutes by
+another one and twenty seconds; confirmed by sending SIGTERM to the live process by hand.
+
+Corrected in v1.1.6 with `killSignal: "SIGKILL"`, which cannot be ignored. The fake now ignores
+SIGTERM as the real one does, and was checked in both directions: it hangs against v1.1.5's SIGTERM
+and passes in five seconds against SIGKILL. Then against the **real** wedged Docker, no fake: exit 3
+after sixteen seconds on a fifteen-second bound, INCOMPLETE, nothing left running. The lesson is the
+estate's usual one — the test passed because it modelled the failure as the author imagined it, not
+as it behaved.
+
+### 6. A crash exits 1, which reads as "blocked"
+
+Found while testing the Docker fix, by pointing the gate at a directory that had been deleted:
+
+```
+agent-gate /nonexistent/project   →   exit 1, and a stack trace saying `spawn node ENOENT`
+```
+
+Node reports a missing *working directory* as the command being missing, so the message blames
+`node`, which is on PATH. Worse is the exit code. Node exits 1 on any uncaught exception, and exit 1
+is this gate's **blocked — ran in full**. So a typo in a path, or any crash at all, is
+indistinguishable from a project with real findings: exactly the collapse of 1 and 3 the contract
+exists to prevent. The pre-commit hook happens to be safe — it blocks on anything non-zero — but CI
+and anything reading the result would report a gate that fell over as one that ran and found
+problems.
+
+Three parts, smallest first:
+1. Refuse a project directory that does not exist, with exit 2.
+2. Handle `McpClient`'s child `error` event, so a control that cannot start is reported as one that
+   could not run — exit 3 — rather than an unhandled event.
+3. A last-resort handler: any uncaught exception exits 3 with a message, never Node's default 1.
 ## Resolved (found by slack-sonnet-1)
 
 ### A parameterised retention period reads as no retention at all — `retention.mjs`

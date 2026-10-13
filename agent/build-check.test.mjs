@@ -121,9 +121,13 @@ test("unavailableCheckers reads only its own marker", () => {
 // installs a pre-commit hook that runs this check, a Go project on a machine in that state would
 // hang every commit, indefinitely, with no message.
 //
-// These drive the real check against a fake `docker` on PATH that hangs the way the real one did.
-// `exec sleep` so that killing the docker process kills the sleep with it, rather than leaving it
-// running after the test.
+// These drive the real check against a fake `docker` on PATH that hangs the way the real one did --
+// including ignoring SIGTERM. The first version of this fake ran `exec sleep`, which dies on SIGTERM,
+// so it passed against a fix that sent SIGTERM and waited: the real docker CLI, blocked on Docker
+// Desktop's credential helper, ignores SIGTERM, and that fix bounded nothing. `trap '' TERM` makes
+// the fake ignore it too, and an ignored signal stays ignored across exec, so nothing in its tree
+// dies of SIGTERM either. Only SIGKILL ends it. The loop sleeps one second at a time so that once
+// the shell is killed, the orphaned sleep is gone within a second.
 
 import { chmodSync } from "fs";
 
@@ -136,8 +140,8 @@ function withFakeDocker(mode, fn) {
     docker,
     "#!/bin/sh\n" +
       'case "$1" in\n' +
-      `  pull) [ "${mode}" = hang-pull ] && exec sleep 600; exit 0 ;;\n` +
-      `  run)  [ "${mode}" = hang-run ] && exec sleep 600; exit 0 ;;\n` +
+      `  pull) [ "${mode}" = hang-pull ] && { trap '' TERM; while :; do sleep 1; done; }; exit 0 ;;\n` +
+      `  run)  [ "${mode}" = hang-run ] && { trap '' TERM; while :; do sleep 1; done; }; exit 0 ;;\n` +
       "esac\nexit 0\n"
   );
   chmodSync(docker, 0o755);

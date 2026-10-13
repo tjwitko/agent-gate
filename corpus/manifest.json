@@ -52,8 +52,9 @@
       "name": "webhook-haiku",
       "path": "corpus/fixtures/webhook-haiku",
       "taskFile": "agent/fixtures/webhook-receiver-task.txt",
-      "expectedBlocking": 4,
+      "expectedBlocking": 5,
       "expectedFindings": {
+        "check_dependencies": 1,
         "immutability": 1,
         "tests": 1,
         "workload identity": 2
@@ -61,8 +62,9 @@
       "upstreamHead": "3e38a405925f",
       "digest": "6aa3d8e808764530",
       "upstream": "../webhook-haiku",
-      "asDelivered": 4,
-      "asDeliveredMeasured": "against the original deliverable, same gate"
+      "asDelivered": 5,
+      "asDeliveredMeasured": "against the original deliverable, same gate",
+      "remeasured": "check_dependencies 0 -> 1 on 2026-10-13: a control change, not the advisory database. This deliverable's package.json declares dependencies and it has no lockfile, which osv-scanner does not read on its own -- so its dependencies were never scanned, and the gate reported a check that ran and found nothing (candidate-rules #7). The original at ../webhook-haiku has no lockfile either, so the as-delivered verdict moves with it. Measured locally with a responsive Docker: the other eleven fixtures matched exactly."
     },
     {
       "name": "webhook-haiku-2",
@@ -105,16 +107,18 @@
       "name": "webhook-haiku-4",
       "path": "corpus/fixtures/webhook-haiku-4",
       "taskFile": "agent/fixtures/webhook-receiver-task.txt",
-      "expectedBlocking": 4,
+      "expectedBlocking": 5,
       "expectedFindings": {
+        "check_dependencies": 1,
         "tests": 1,
         "workload identity": 3
       },
       "upstreamHead": "359e76dcf386",
       "digest": "2f157e073bc87c28",
       "upstream": "../webhook-haiku-4",
-      "asDelivered": 4,
-      "asDeliveredMeasured": "against the original deliverable, same gate"
+      "asDelivered": 5,
+      "asDeliveredMeasured": "against the original deliverable, same gate",
+      "remeasured": "check_dependencies 0 -> 1 on 2026-10-13: a control change, not the advisory database. This deliverable's package.json declares dependencies and it has no lockfile, which osv-scanner does not read on its own -- so its dependencies were never scanned, and the gate reported a check that ran and found nothing (candidate-rules #7). The original at ../webhook-haiku-4 has no lockfile either, so the as-delivered verdict moves with it. Measured locally with a responsive Docker: the other eleven fixtures matched exactly."
     },
     {
       "name": "webhook-haiku-6",

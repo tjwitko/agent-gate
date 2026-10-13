@@ -284,7 +284,11 @@ for (const entry of manifest.entries) {
     // this way when GHSA-jqcg-44mw-7w3h was published on 5 October, twelve days after their verdicts
     // were measured, under a banner saying a control had changed behaviour. Said here so the next
     // reader checks the advisory's date before suspecting dep-audit.
-    if (drift.length && drift.every((x) => x.startsWith("check_dependencies:"))) {
+    //
+    // Not when the finding is about a manifest no scanner read. That one is a property of the
+    // fixture's files and the gate's rules, and the hint misattributed it the day the rule landed.
+    const unscanned = r.findings.some((f) => f.message.startsWith("check_dependencies:") && /no scanner read/.test(f.message));
+    if (drift.length && drift.every((x) => x.startsWith("check_dependencies:")) && !unscanned) {
       console.log(
         `      only check_dependencies moved: most likely a new advisory against this fixture's own\n` +
           `      dependencies, not a control change. If it was published after ${manifest.measured},\n` +

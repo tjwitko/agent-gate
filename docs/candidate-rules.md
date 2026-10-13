@@ -690,6 +690,134 @@ Each new test was run against the old code and fails there: the dead-control tes
 limit waiting, and the unwritable-init test gets exit 1. `bin/exit-codes.test.mjs` runs the real CLI,
 because an exit code is a property of a process.
 
+### Found by an outside review (7–12)
+
+An outside review of the README (Gemini, October 2026) listed seven gaps. Each was checked by running
+a small probe project through the gate rather than argued from the README, because the README is
+what was reviewed and it is not always what the code does. The verdicts:
+
+| claim | verdict |
+| --- | --- |
+| no SAST | accurate — see #9 |
+| checks can be switched off by omitting words from the task | mostly wrong; one real defect — see #8 |
+| limited language support | accurate — see #11 |
+| no lockfile downgrades dependency findings to advisory | **understated** — see #7 |
+| no container scanning | accurate — see #10 |
+| secret scanning is regex-only | partly wrong — see #12 |
+| `--no-verify` bypasses the hook | accurate, and by design — see #12 |
+
+The probes also found two defects the review did not name, #7's silence and #11's exemption by path.
+
+### 7. A Node project without a lockfile has its dependencies scanned by nothing — fixed
+
+The README said a project without a lockfile gets its dependency findings as advisories. For npm it
+got nothing. osv-scanner 2.4.0 does not read `package.json` — "No package sources found" — so a probe
+depending on `lodash 4.17.4` with no lockfile exited 0, with no advisory, and with
+`check_dependencies` in the list of validators that ran. The same project with a lockfile blocked on
+four high-severity findings. A check that did not run, reported as one that passed.
+
+It made the review's attack real in a stronger form than the review gave it: deleting the lockfile
+before committing did not downgrade a critical finding, it removed it.
+
+**npm was not the only case.** Measured against osv-scanner 2.4.0 with a known-vulnerable pin per
+ecosystem: without a lockfile it reads `requirements*.txt`, `go.mod` and `pom.xml`, and nothing
+from `package.json`, `Cargo.toml`, `Pipfile`, `pyproject.toml` (PEP 621 or Poetry),
+`build.gradle(.kts)`, `Gemfile` or `composer.json`. Two lockfile results documentation would not have
+predicted: `bun.lockb` is not read, being binary, and `requirements.lock` is not read while
+`requirements-lock.txt` is.
+
+**And it was silent twice.** dep-audit parsed `scan.stdout || "{}"`, and osv-scanner writes nothing
+to stdout on exit 128 (no package sources) or 127 (error). Both became zero findings. So a scanner
+that crashed was also reported clean.
+
+Fixed in both places:
+
+- **The gate** (`agent/unscanned-manifests.mjs`): a manifest that declares dependencies osv-scanner
+  cannot read, with no lockfile it can in its directory or above, is a **blocking** finding naming
+  the manifest and the command that writes its lockfile. Blocking rather than could-not-run because
+  the gate ran fine and the fix is in the project. Per manifest rather than per project: a lockfile
+  beside one manifest says nothing about another, and the existing "is there a lockfile anywhere"
+  test would have passed a monorepo with one locked service. A manifest that declares nothing needs
+  no lockfile.
+- **dep-audit** reads osv-scanner's exit status before its stdout: 128 is reported as
+  `"scanned": false` with a note, and any failure without parseable output is an error.
+
+The measured table is held to the real scanner by tests that run it, and CI installs osv-scanner and
+sets `AGENT_GATE_REQUIRE_SCANNERS` so a missing scanner fails rather than skips — a version bump that
+changes what it reads fails a test instead of making the table quietly wrong.
+
+Two corpus fixtures moved, `webhook-haiku` and `webhook-haiku-4`: Node deliverables with dependencies
+and no lockfile, whose dependencies had never been scanned. Eleven did not. The corpus's own hint
+called the move "most likely a new advisory", which was right for the last re-measure and wrong for
+this one; it no longer says that about an unscanned manifest.
+
+**Left for later:** `agent/lockfiles.mjs` counts `requirements.lock` as a lockfile, and the advisory
+text tells Python users to write one, but osv-scanner does not read it. The list is mirrored in
+local-copilot-stack and a test requires the two to agree, so it changes in both or neither.
+
+### 8. The task file can be edited by whoever writes the code
+
+The review's claim — that authentication, secrets and the like can be switched off by leaving words
+out of the task — is wrong as stated. Authentication, secret scanning, dependencies, IaC and workload
+identity run with no task file at all; a probe with none was blocked by the authentication check.
+The six task-gated checks verify *stated requirements*, and cannot be universal: a retention check
+has nothing to compare against until the task names a period.
+
+What is real is narrower. The task file lives in the repository, and nothing protects it. An agent
+blocked by "the API key must be rotated every 90 days" can delete that sentence and commit, which is
+the `.identity-exception` defect again — the guard the model can edit is not a guard — with the task
+file in the role of the suppression file. And an organisation has no way to require a check, tests
+for instance, regardless of what a task says.
+
+Planned: treat the task file as a guarded file in the agent loop's commit gate, and add an Action
+input for a baseline set of required checks. The baseline must come from CI configuration rather
+than a file in the repository, or it moves the problem rather than solving it.
+
+### 9. No SAST: injection passes
+
+A probe Flask service with a command injection (`subprocess.run("ping -c1 " + request.args[...],
+shell=True)`) and a SQL injection (an f-string query) was blocked only because a route lacked
+authentication. Neither injection was mentioned. ruff runs with `--select F` — undefined names — and
+no security rules.
+
+Planned: Semgrep as a fifth control, multi-language, which also narrows #11. Only high-confidence
+rules block; the rest are advisories. Measured on the corpus before anything blocks, because a noisy
+blocking check is how a gate gets switched off. CodeQL needs a build and SonarQube a server; both are
+heavier than the problem.
+
+### 10. Dockerfiles are checked for existence, not content
+
+`FROM node:14` — end of life — passed. `artifact_presence` confirms a Dockerfile exists when the task
+names one, and nothing reads it. checkov, already installed for Terraform, has a Dockerfile
+framework, so the cheap half needs no new tool. Scanning the built image (Trivy, Grype) needs a build
+or a pull, so it would be opt-in, for CI.
+
+### 11. Exemptions and coverage gaps are silent
+
+Two instances of one shape: the gate decided not to look, and said so nowhere a reader would see.
+
+- **Authentication exempts routes by path.** `/ping`, `/health`, `/metrics` and similar are open by
+  convention. A probe's `/ping` took a request parameter and passed it to a shell; it was exempt,
+  and the finding read "1 of 1 endpoint(s)" without mentioning the second. The path is chosen by
+  whoever writes the code.
+- **A project in a language no check reads exits 0.** A Rust probe passed, and each check's
+  "not checked — no source files in a language this check recognises" was an advisory among others.
+
+Planned: report exemptions by route, and put a coverage line in the summary when most of the source
+is in a language no check reads.
+
+### 12. Considered and deferred
+
+- **Split-string secrets** (`"abc" + "def"`). Missed, as the review says. The rest of its claim did not
+  hold: a probe's invented `ACME_API_KEY` and a database password were both caught — gitleaks' generic
+  entropy rule, and identity-guard flagged the password a second time. No static scanner catches
+  concatenation reliably; a narrow rule for credential-named variables built from literals is
+  possible later.
+- **Toolchains per language** (Java, Rust, PHP builds and test runners). Semgrep (#9) widens coverage
+  for less.
+- **`git commit --no-verify`**. By design: the hook is a convenience, and CI with required checks is
+  the enforcement point. The README says so.
+
 ## Resolved (found by slack-sonnet-1)
 
 ### A parameterised retention period reads as no retention at all — `retention.mjs`

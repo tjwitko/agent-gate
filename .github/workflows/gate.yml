@@ -44,7 +44,21 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - run: npm ci --ignore-scripts
+      # agent/unscanned-manifests.test.mjs holds a measured table of what osv-scanner reads to the
+      # real scanner, at the version control-tooling pins. Locally it skips without one; here the
+      # variable makes a missing scanner a failure, because a skipped test verified nothing.
+      - name: osv-scanner
+        env:
+          OSV_VERSION: "2.4.0"
+        run: |
+          set -euo pipefail
+          sudo curl -fsSL -o /usr/local/bin/osv-scanner \
+            "https://github.com/google/osv-scanner/releases/download/v${OSV_VERSION}/osv-scanner_linux_amd64"
+          sudo chmod +x /usr/local/bin/osv-scanner
+          osv-scanner --version
       - run: npm test
+        env:
+          AGENT_GATE_REQUIRE_SCANNERS: "1"
 
   corpus:
     name: regression corpus

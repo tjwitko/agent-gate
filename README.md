@@ -542,10 +542,18 @@ somewhere stale.
 **`exit 3` and "COULD NOT RUN"** — a scanner is missing from `PATH`. The message names the binary.
 Install it and re-run; the verdict before it was installed proves nothing about your code.
 
-**`check_dependencies` findings that look wrong** — if the project has no lockfile, `osv-scanner`
-resolves the dependency graph to minimum-satisfying versions that no real install produces. Those
-findings are reported as advisory rather than blocking, and the message says so. Commit a lockfile
-to make the result authoritative.
+**"declare dependencies that no scanner read"** — `osv-scanner` reads lockfiles, and of manifests
+only `requirements*.txt`, `go.mod` and `pom.xml`. A `package.json`, `Cargo.toml`, `pyproject.toml`,
+`Pipfile`, `build.gradle`, `Gemfile` or `composer.json` that declares dependencies is scanned through
+its lockfile or not at all, so without one this blocks: the alternative is reporting a dependency
+check that looked at nothing as one that passed. The message names each manifest and the command
+that writes its lockfile. `bun.lockb` does not count — it is binary and the scanner cannot read it;
+`bun install --save-text-lockfile` writes `bun.lock`, which it can.
+
+**`check_dependencies` findings that look wrong** — for the three manifests it does read without a
+lockfile, `osv-scanner` resolves the dependency graph to minimum-satisfying versions that no real
+install produces. Those findings are reported as advisory rather than blocking, and the message says
+so. Commit a lockfile to make the result authoritative.
 
 **Terraform findings about credentials** — a plan needs to authenticate to your cloud provider. With
 no credentials the plan-based rules cannot run, and the gate says the configuration is UNSCANNED

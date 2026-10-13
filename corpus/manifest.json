@@ -6,16 +6,18 @@
       "name": "webhook-claude",
       "path": "corpus/fixtures/webhook-claude",
       "taskFile": "agent/fixtures/webhook-receiver-task.txt",
-      "expectedBlocking": 1,
+      "expectedBlocking": 2,
       "expectedFindings": {
-        "tests": 1
+        "tests": 1,
+        "check_dependencies": 1
       },
       "upstreamHead": "759d43a53636",
       "digest": "daa79cbbf63305a8",
       "upstream": "../webhook-claude",
       "asDelivered": 0,
       "differsFromAsDelivered": "the vendored copy scores 1 where the original scores 0, because node_modules is not vendored: the suite cannot run, so the tests check fires",
-      "asDeliveredMeasured": "against the original deliverable, same gate"
+      "asDeliveredMeasured": "against the original deliverable, same gate",
+      "remeasured": "check_dependencies 0 -> 1 on 2026-10-13: proxy-addr 2.0.7 in this deliverable's own dependencies, GHSA-jqcg-44mw-7w3h (critical), published 2026-10-05 -- after these verdicts were measured. The advisory database moved; the deliverable and the controls did not. Applied from the CI run on 425c4ec, which measured all thirteen with a working Docker: nine matched exactly and these four moved by this one finding and nothing else. Not re-derived locally, because Docker on the measuring machine was wedged and a local --update would have frozen an incomplete Go verdict."
     },
     {
       "name": "webhook-sonnet-2",
@@ -33,16 +35,18 @@
       "name": "webhook-sonnet-3",
       "path": "corpus/fixtures/webhook-sonnet-3",
       "taskFile": "agent/fixtures/webhook-receiver-task.txt",
-      "expectedBlocking": 1,
+      "expectedBlocking": 2,
       "expectedFindings": {
-        "tests": 1
+        "tests": 1,
+        "check_dependencies": 1
       },
       "upstreamHead": "dd978eff1785",
       "digest": "c105b7d97262dbf7",
       "upstream": "../webhook-sonnet-3",
       "asDelivered": 0,
       "differsFromAsDelivered": "the vendored copy scores 1 where the original scores 0, because node_modules is not vendored: the suite cannot run, so the tests check fires",
-      "asDeliveredMeasured": "against the original deliverable, same gate"
+      "asDeliveredMeasured": "against the original deliverable, same gate",
+      "remeasured": "check_dependencies 0 -> 1 on 2026-10-13: proxy-addr 2.0.7 in this deliverable's own dependencies, GHSA-jqcg-44mw-7w3h (critical), published 2026-10-05 -- after these verdicts were measured. The advisory database moved; the deliverable and the controls did not. Applied from the CI run on 425c4ec, which measured all thirteen with a working Docker: nine matched exactly and these four moved by this one finding and nothing else. Not re-derived locally, because Docker on the measuring machine was wedged and a local --update would have frozen an incomplete Go verdict."
     },
     {
       "name": "webhook-haiku",
@@ -83,17 +87,19 @@
       "name": "webhook-haiku-3",
       "path": "corpus/fixtures/webhook-haiku-3",
       "taskFile": "agent/fixtures/webhook-receiver-task.txt",
-      "expectedBlocking": 7,
+      "expectedBlocking": 8,
       "expectedFindings": {
         "code quality": 1,
         "retention": 1,
-        "workload identity": 5
+        "workload identity": 5,
+        "check_dependencies": 1
       },
       "upstreamHead": "bfd6840c1979",
       "digest": "e32ea1584eb6f3ba",
       "upstream": "../webhook-haiku-3",
       "asDelivered": 7,
-      "asDeliveredMeasured": "against the original deliverable, same gate"
+      "asDeliveredMeasured": "against the original deliverable, same gate",
+      "remeasured": "check_dependencies 0 -> 1 on 2026-10-13: proxy-addr 2.0.7 in this deliverable's own dependencies, GHSA-jqcg-44mw-7w3h (critical), published 2026-10-05 -- after these verdicts were measured. The advisory database moved; the deliverable and the controls did not. Applied from the CI run on 425c4ec, which measured all thirteen with a working Docker: nine matched exactly and these four moved by this one finding and nothing else. Not re-derived locally, because Docker on the measuring machine was wedged and a local --update would have frozen an incomplete Go verdict."
     },
     {
       "name": "webhook-haiku-4",
@@ -160,20 +166,22 @@
       "name": "webhook-haiku-12",
       "path": "corpus/fixtures/webhook-haiku-12",
       "taskFile": "agent/fixtures/webhook-receiver-task.txt",
-      "expectedBlocking": 6,
+      "expectedBlocking": 7,
       "expectedFindings": {
         "iam": 2,
         "immutability": 1,
         "manifest contract": 1,
         "terraform_plan": 1,
-        "tests": 1
+        "tests": 1,
+        "check_dependencies": 1
       },
       "upstreamHead": "ad7dc2081089",
       "digest": "da6ebee30eb69d3d",
       "upstream": "../webhook-haiku-12",
       "asDelivered": 5,
       "differsFromAsDelivered": "the vendored copy scores 6 where the original scores 5, because node_modules is not vendored: the suite cannot run, so the tests check fires",
-      "asDeliveredMeasured": "against the original deliverable, same gate"
+      "asDeliveredMeasured": "against the original deliverable, same gate",
+      "remeasured": "check_dependencies 0 -> 1 on 2026-10-13: proxy-addr 2.0.7 in this deliverable's own dependencies, GHSA-jqcg-44mw-7w3h (critical), published 2026-10-05 -- after these verdicts were measured. The advisory database moved; the deliverable and the controls did not. Applied from the CI run on 425c4ec, which measured all thirteen with a working Docker: nine matched exactly and these four moved by this one finding and nothing else. Not re-derived locally, because Docker on the measuring machine was wedged and a local --update would have frozen an incomplete Go verdict."
     },
     {
       "name": "shape-node-library",

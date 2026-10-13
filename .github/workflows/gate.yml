@@ -48,6 +48,12 @@ jobs:
 
   corpus:
     name: regression corpus
+    # Not on the weekly schedule. This job's subject is a frozen deliverable scanned against a live
+    # advisory database, and controls only change on a push -- so on a schedule it can only report
+    # that the database moved, under a message blaming a control. Four fixtures drifted exactly that
+    # way when GHSA-jqcg-44mw-7w3h was published on 5 October. The schedule exists for this
+    # repository's own dependencies, which the `self` job checks.
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -82,7 +88,7 @@ jobs:
           case "$CODE" in
             0) echo "::notice title=corpus::all fixtures match" ;;
             3) echo "::error title=corpus: DID NOT RUN::The fixtures are not present, so nothing was verified. Set CORPUS_FIXTURES or check them out beside this repository." ;;
-            *) echo "::error title=corpus: drift::A control changed behaviour against a frozen deliverable." ;;
+            *) echo "::error title=corpus: drift::A frozen verdict moved. Either a control changed behaviour or the advisory database did -- the log says which validators moved." ;;
           esac
           exit $CODE
 
@@ -109,6 +115,12 @@ jobs:
 
   action:
     name: the action, against fixtures with known verdicts
+    # Not on the weekly schedule. This job's subject is a frozen deliverable scanned against a live
+    # advisory database, and controls only change on a push -- so on a schedule it can only report
+    # that the database moved, under a message blaming a control. Four fixtures drifted exactly that
+    # way when GHSA-jqcg-44mw-7w3h was published on 5 October. The schedule exists for this
+    # repository's own dependencies, which the `self` job checks.
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

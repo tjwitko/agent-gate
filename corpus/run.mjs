@@ -167,6 +167,7 @@ if (!UPDATE) {
 let failed = 0;
 let missing = 0;
 let unmeasured = 0;
+let advisoryOnly = 0;
 for (const entry of manifest.entries) {
   // Relative to the repository root, not to corpus/ — the fixtures are siblings of the repo.
   // From the archive the fixtures sit at their bare names; from a directory they sit where the
@@ -278,6 +279,19 @@ for (const entry of manifest.entries) {
         console.log(`        ${f.message.replace(/\n/g, "\n        ")}`);
       }
     }
+    // When the dependency check is the only thing that moved, the likeliest cause is not a control
+    // at all but the advisory database, which this corpus does not pin. Four fixtures drifted exactly
+    // this way when GHSA-jqcg-44mw-7w3h was published on 5 October, twelve days after their verdicts
+    // were measured, under a banner saying a control had changed behaviour. Said here so the next
+    // reader checks the advisory's date before suspecting dep-audit.
+    if (drift.length && drift.every((x) => x.startsWith("check_dependencies:"))) {
+      console.log(
+        `      only check_dependencies moved: most likely a new advisory against this fixture's own\n` +
+          `      dependencies, not a control change. If it was published after ${manifest.measured},\n` +
+          `      re-measure with --update and record why.`
+      );
+      advisoryOnly++;
+    }
     failed++;
   } else {
     // Both numbers on the line. Four of eleven fixtures score differently vendored than delivered,
@@ -330,6 +344,12 @@ if (unmeasured) {
 }
 if (failed) {
   console.log(`${failed} deliverable(s) drifted.`);
+  if (advisoryOnly === failed) {
+    console.log(
+      `In every one, only check_dependencies moved. That is the signature of the advisory database ` +
+        `moving, not a control: check the advisories' publication dates against ${manifest.measured}.`
+    );
+  }
   console.log("A control that stops firing is as much a regression as one that starts over-firing.");
   console.log("If the change was deliberate, re-derive corpus/manifest.json and say so in the commit.");
   process.exit(1);

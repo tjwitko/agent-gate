@@ -863,7 +863,13 @@ routes, and `build_check` still ran `go build ./...` over them. Six source-readi
 whether a directory was a declared fixture: authentication, build_check (including ruff, which walks
 the tree itself and is now given each fixture as `--extend-exclude`), code quality, secret rotation,
 Kubernetes manifests, IAM, and artifact presence — where honouring it is the stricter direction, since
-a fixture's Dockerfile must not satisfy "the project has a Dockerfile". The two dependency walks are
+a fixture's Dockerfile must not satisfy "the project has a Dockerfile". Honouring markers surfaced a false block they had been hiding: artifact presence read identity-guard's
+"Parse Kubernetes manifests with a real YAML parser" as a requirement to ship them, and ignored the
+same task's "No deployment artifacts". Its fixtures' manifests had satisfied the misread requirement;
+once they stopped counting, identity-guard's own CI went red on v1.1.12. An explicit opt-out — "no
+deployment artifacts", "no Dockerfile", "no Terraform", "no Kubernetes manifests" — now wins over a
+mention, and the overridden mention is reported as an advisory rather than dropped. Fixed in v1.1.13.
+The two dependency walks are
 left whole-tree on purpose: osv-scanner reads fixtures too, and exempting a fixture's manifest there
 could only loosen the check. The samples became `.sample` files regardless; vulnerable code stored as
 source is source to every tool that reads it.

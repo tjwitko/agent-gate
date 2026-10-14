@@ -109,6 +109,20 @@ function walkAll(dir, acc = [], root = dir) {
   return acc;
 }
 
+// A task can name an artifact without asking for one. identity-guard's says "Parse Kubernetes
+// manifests with a real YAML parser" -- it is a scanner of them -- and, under NOT IN SCOPE, "No
+// deployment artifacts. This is an MCP server distributed as a package." The matcher above read the
+// first sentence as a requirement and ignored the second, and the false block went unseen for weeks
+// because the project's declared fixtures held manifests that satisfied it. When fixtures stopped
+// counting as the project's own artifacts, it surfaced. An explicit opt-out wins over a mention.
+const OPT_OUT_ALL = /\bno\s+deployment\s+artifacts?\b|\bdeployment\s+artifacts?\s+(?:are\s+)?(?:out\s+of|not\s+in)\s+scope\b/i;
+const OPT_OUT = {
+  kubernetes: /\bno\s+(?:kubernetes|k8s)(?:\s+manifests?)?\b/i,
+  dockerfile: /\bno\s+(?:dockerfiles?|container\s+images?)\b/i,
+  terraform: /\bno\s+(?:terraform|infrastructure[-\s]as[-\s]code|IaC)\b/i,
+};
+const optedOut = (r, taskText) => OPT_OUT_ALL.test(taskText) || Boolean(OPT_OUT[r.id]?.test(taskText));
+
 export function checkArtifactPresence(projectDir, taskText = "") {
   const files = walkAll(projectDir);
   if (files.length === 0) return { ran: false, unknown: "no files in the project", empty: [], missing: [] };
@@ -120,11 +134,11 @@ export function checkArtifactPresence(projectDir, taskText = "") {
       f.text.trim() === ""
   );
 
-  const missing = ARTIFACT_REQUIREMENTS.filter(
-    (r) => r.taskPhrase(taskText) && !r.satisfied(files)
-  );
+  const named = ARTIFACT_REQUIREMENTS.filter((r) => r.taskPhrase(taskText));
+  const ruledOut = named.filter((r) => optedOut(r, taskText));
+  const missing = named.filter((r) => !optedOut(r, taskText) && !r.satisfied(files));
 
-  return { ran: true, unknown: null, empty, missing };
+  return { ran: true, unknown: null, empty, missing, ruledOut };
 }
 
 /** Blocking failures for the gate. */
@@ -159,7 +173,14 @@ export function artifactPresenceFailures(projectDir, taskText = "") {
     );
   }
 
-  return { failures, advisories: [] };
+  // Said, so that a mention the opt-out overrode is visible rather than silently dropped.
+  const advisories = (r.ruledOut || []).length
+    ? [
+        `artifact presence: the task mentions ${r.ruledOut.map((m) => m.label).join(", ")} but rules out ` +
+          `deployment artifacts, so none is required.`,
+      ]
+    : [];
+  return { failures, advisories };
 }
 
 /**

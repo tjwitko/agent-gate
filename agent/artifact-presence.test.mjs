@@ -197,3 +197,32 @@ test("plural nouns match", () => {
   );
   assert.ok(failures.length > 0);
 });
+
+// identity-guard's task: a scanner OF Kubernetes manifests, which says outright it ships none. The
+// mention was read as a requirement, hidden while its fixtures' manifests satisfied it.
+const SCANNER_TASK =
+  "An MCP server that checks workload identity.\n- Parse Kubernetes manifests with a real YAML parser.\n\n" +
+  "NOT IN SCOPE\n- No deployment artifacts. This is an MCP server distributed as a package.\n";
+
+test("an explicit opt-out wins over a mention, and says so", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "presence-optout-"));
+  try {
+    writeFileSync(path.join(dir, "index.js"), "module.exports = 1;\n");
+    const r = artifactPresenceFailures(dir, SCANNER_TASK);
+    assert.deepEqual(r.failures, []);
+    assert.match(r.advisories.join("\n"), /mentions Kubernetes manifests but rules out deployment artifacts/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("an opt-out for one artifact leaves the others required", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "presence-optout-"));
+  try {
+    writeFileSync(path.join(dir, "index.js"), "module.exports = 1;\n");
+    const r = artifactPresenceFailures(dir, "Deploy to Kubernetes with a Dockerfile. No Terraform.");
+    assert.match(r.failures.join("\n"), /asks for Kubernetes manifests, a Dockerfile, and the project contains none/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

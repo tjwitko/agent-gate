@@ -805,12 +805,45 @@ rules block; the rest are advisories. Measured on the corpus before anything blo
 blocking check is how a gate gets switched off. CodeQL needs a build and SonarQube a server; both are
 heavier than the problem.
 
-### 10. Dockerfiles are checked for existence, not content
+### 10. Dockerfiles are checked for existence, not content — fixed
 
-`FROM node:14` — end of life — passed. `artifact_presence` confirms a Dockerfile exists when the task
-names one, and nothing reads it. checkov, already installed for Terraform, has a Dockerfile
-framework, so the cheap half needs no new tool. Scanning the built image (Trivy, Grype) needs a build
-or a pull, so it would be opt-in, for CI.
+`FROM node:14` — end of life since April 2023 — passed. `artifact_presence` confirmed a Dockerfile
+existed when the task named one, and nothing read it.
+
+**checkov alone would not have caught it.** It was already installed, and its Dockerfile framework was
+the obvious answer; run over the probe, checkov 3.3.10 flagged a missing HEALTHCHECK and USER and had
+nothing to say about the base image. It has no end-of-life rule. So the new `dockerfile` validator
+(`agent/dockerfile.mjs`) has two parts at different strengths:
+
+- **Blocking: a base image past end of life**, in any stage — a build stage on an unsupported Go
+  compiles its unpatched standard library into the binary that ships. Official `node`, `python`,
+  `golang`, `ruby`, `php`, `debian`, `ubuntu`, `alpine` and `eclipse-temurin` images, plus the OS a
+  language image's tag names (`python:3.12-slim-buster`, `golang:1.22-alpine3.19`). One finding per
+  Dockerfile, naming each line, the date and the supported releases. ARG defaults are substituted; a
+  variable with no default is reported as unjudgeable rather than guessed. Floating tags and other
+  publishers' images are not judged.
+- **Advisory: checkov's Dockerfile rules.** Most real Dockerfiles miss a HEALTHCHECK, and a blocking
+  check that fires on most projects gets switched off. When checkov is absent the advisory says which
+  rules did not run.
+
+The dates are `agent/eol-data.mjs`, generated from endoflife.date's API by
+`scripts/refresh-eol-data.mjs` — fetched at release time, not run time, because the gate runs offline
+in hooks and CI and a verdict that depends on a third-party API would be could-not-run whenever it is
+down. A stale table degrades gently: dates already in it pass on schedule, and a release newer than it
+is not judged.
+
+**The verdict depends on the date**, which a frozen corpus cannot have: a fixture's verdict would move
+the day a release aged out, with nothing changed. `AGENT_GATE_TODAY` sets the date judged against, and
+`corpus/run.mjs` pins it to the manifest's `measured` date (`--update` measures as of today and records
+today).
+
+Eight of thirteen corpus fixtures moved, each by exactly one `dockerfile` finding and nothing else:
+every deliverable on Node.js 18 or 20, Go 1.21 or 1.22, or Alpine 3.18 or 3.19 — all past end of life
+as of the corpus's date. The three on Node.js 22 did not. That is the check working; the
+deliverables were written when those releases were current, and they ship unsupported runtimes now.
+
+**Deferred:** scanning the built image (Trivy, Grype) needs a build or a pull, so it would be an
+opt-in for CI.
 
 ### 11. Exemptions and coverage gaps are silent — fixed
 

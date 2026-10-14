@@ -18,6 +18,7 @@
     "agent/",
     "!bin/*.test.mjs",
     "!agent/*.test.mjs",
+    "!lib/*.test.mjs",
     "!agent/agent-loop.mjs",
     "!agent/anthropic-adapter.mjs",
     "!agent/README.md",

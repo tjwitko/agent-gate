@@ -148,6 +148,12 @@ function toolchainDrift(recorded, current) {
 
 const manifestPath = path.join(__dirname, "manifest.json");
 const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+
+// The dockerfile check judges base images against end-of-life dates, so its verdict on a frozen
+// fixture moves on the day a release ages out, with nothing changed. Comparing against frozen
+// verdicts, the gate is asked to judge as of the date they were measured; --update measures as of
+// today and records today. An explicit AGENT_GATE_TODAY still wins.
+if (!UPDATE && !process.env.AGENT_GATE_TODAY) process.env.AGENT_GATE_TODAY = manifest.measured;
 console.log(`corpus: ${manifest.entries.length} deliverables${UPDATE ? " — RE-DERIVING expected values" : `, verdicts measured ${manifest.measured}`}\n`);
 
 const CURRENT_TOOLCHAIN = toolchain();

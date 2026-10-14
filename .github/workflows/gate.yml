@@ -170,6 +170,11 @@ jobs:
             git -C "$d" add -A
             git -C "$d" -c user.name=ci -c user.email=ci@localhost commit -qm "fixture"
           done
+          # The dockerfile check judges base images against end-of-life dates, so the clean fixture's
+          # verdict would change on the day its node:22 ages out, with nothing changed here. Judged as
+          # of the date the corpus was measured, like corpus/run.mjs does, so this job tests the
+          # action rather than the calendar.
+          echo "AGENT_GATE_TODAY=$(node -p 'require("./corpus/manifest.json").measured')" >> "$GITHUB_ENV"
 
       - id: clean
         uses: ./

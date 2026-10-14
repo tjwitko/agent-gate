@@ -525,7 +525,7 @@ Four control servers, each in its own repository and each installed as a depende
 
 Plus in-process validators: `build_check`, `tests`, `immutability`, `authentication`,
 `manifest_contract`, `k8s_manifest`, `secret_rotation`, `retention`, `iam_contract`,
-`artifact_presence`, `code_quality`, `artifact_census`, `uncommitted_work`.
+`artifact_presence`, `dockerfile`, `code_quality`, `artifact_census`, `uncommitted_work`.
 
 A few are worth calling out because they exist in response to measured failures:
 
@@ -537,6 +537,12 @@ A few are worth calling out because they exist in response to measured failures:
   that authenticates POST and leaves GET open. One did.
 - **`uncommitted_work` blocks.** Work that was never committed was never seen by whatever runs at
   commit time.
+- **`dockerfile` reads the Dockerfile.** It blocks on a base image whose release is past end of life
+  — `FROM node:14` passed until it existed, because the only check confirmed the file was there. The
+  dates come from [endoflife.date](https://endoflife.date), for the official `node`, `python`,
+  `golang`, `ruby`, `php`, `debian`, `ubuntu`, `alpine` and `eclipse-temurin` images, and the OS
+  named in a language image's tag (`-buster`, `-alpine3.18`) is judged too. checkov's Dockerfile
+  rules — no `USER`, no `HEALTHCHECK` — are reported as advisories.
 
 ---
 
@@ -571,6 +577,12 @@ somewhere stale.
 
 **`exit 3` and "COULD NOT RUN"** — a scanner is missing from `PATH`. The message names the binary.
 Install it and re-run; the verdict before it was installed proves nothing about your code.
+
+**"builds on a base image past end of life"** — the release in a `FROM` line no longer gets security
+fixes. The finding names the line, the date it ended and the supported releases. Every stage counts:
+a build stage on an unsupported compiler ships its unpatched standard library in the binary. Floating
+tags (`node:lts`, `python:3`) and other publishers' images (`bitnami/node`) are not judged; the
+dates are refreshed with each release, so a release newer than the table is simply not judged yet.
 
 **"NOT READ" above the verdict** — part of the project is in a language no language-aware check reads
 (Rust, PHP, C#, Kotlin, Swift, C/C++, Scala, Elixir, Dart, Lua, Perl, JSX, Vue, Svelte). The
@@ -609,6 +621,7 @@ cd agent-gate
 npm install
 npm test          # unit tests
 npm run corpus    # regression corpus — thirteen frozen projects
+node scripts/refresh-eol-data.mjs   # end-of-life dates for the dockerfile check, before a release
 ```
 
 The corpus is the important one. **Every control defect in this project's history was found by

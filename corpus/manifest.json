@@ -52,9 +52,10 @@
       "name": "webhook-haiku",
       "path": "corpus/fixtures/webhook-haiku",
       "taskFile": "agent/fixtures/webhook-receiver-task.txt",
-      "expectedBlocking": 5,
+      "expectedBlocking": 6,
       "expectedFindings": {
         "check_dependencies": 1,
+        "dockerfile": 1,
         "immutability": 1,
         "tests": 1,
         "workload identity": 2
@@ -62,17 +63,21 @@
       "upstreamHead": "3e38a405925f",
       "digest": "6aa3d8e808764530",
       "upstream": "../webhook-haiku",
-      "asDelivered": 5,
+      "asDelivered": 6,
       "asDeliveredMeasured": "against the original deliverable, same gate",
-      "remeasured": "check_dependencies 0 -> 1 on 2026-10-13: a control change, not the advisory database. This deliverable's package.json declares dependencies and it has no lockfile, which osv-scanner does not read on its own -- so its dependencies were never scanned, and the gate reported a check that ran and found nothing (candidate-rules #7). The original at ../webhook-haiku has no lockfile either, so the as-delivered verdict moves with it. Measured locally with a responsive Docker: the other eleven fixtures matched exactly."
+      "remeasured": [
+        "check_dependencies 0 -> 1 on 2026-10-13: a control change, not the advisory database. This deliverable's package.json declares dependencies and it has no lockfile, which osv-scanner does not read on its own -- so its dependencies were never scanned, and the gate reported a check that ran and found nothing (candidate-rules #7). The original at ../webhook-haiku has no lockfile either, so the as-delivered verdict moves with it. Measured locally with a responsive Docker: the other eleven fixtures matched exactly.",
+        "dockerfile 0 -> 1 on 2026-10-14: a new check, not a change in the deliverable. Its Dockerfile builds on a base image past end of life as of this manifest's measured date (Node.js 18 or 20, Go 1.21 or 1.22, Alpine 3.18 or 3.19 -- see the finding), which nothing read before candidate-rules #10. The original's FROM lines are identical, so the as-delivered verdict moves with it. Judged as of `measured`, which corpus/run.mjs pins through AGENT_GATE_TODAY so these do not move again the day another release ages out."
+      ]
     },
     {
       "name": "webhook-haiku-2",
       "path": "corpus/fixtures/webhook-haiku-2",
       "taskFile": "agent/fixtures/webhook-receiver-task.txt",
-      "expectedBlocking": 8,
+      "expectedBlocking": 9,
       "expectedFindings": {
         "check_dependencies": 1,
+        "dockerfile": 1,
         "retention": 2,
         "terraform_plan": 1,
         "tests": 1,
@@ -81,111 +86,138 @@
       "upstreamHead": "9678afa7ec3e",
       "digest": "23de9d9ae62eb2e4",
       "upstream": "../webhook-haiku-2",
-      "asDelivered": 7,
+      "asDelivered": 8,
       "differsFromAsDelivered": "the vendored copy scores 8 where the original scores 7, because node_modules is not vendored: the suite cannot run, so the tests check fires",
-      "asDeliveredMeasured": "against the original deliverable, same gate"
+      "asDeliveredMeasured": "against the original deliverable, same gate",
+      "remeasured": [
+        "dockerfile 0 -> 1 on 2026-10-14: a new check, not a change in the deliverable. Its Dockerfile builds on a base image past end of life as of this manifest's measured date (Node.js 18 or 20, Go 1.21 or 1.22, Alpine 3.18 or 3.19 -- see the finding), which nothing read before candidate-rules #10. The original's FROM lines are identical, so the as-delivered verdict moves with it. Judged as of `measured`, which corpus/run.mjs pins through AGENT_GATE_TODAY so these do not move again the day another release ages out."
+      ]
     },
     {
       "name": "webhook-haiku-3",
       "path": "corpus/fixtures/webhook-haiku-3",
       "taskFile": "agent/fixtures/webhook-receiver-task.txt",
-      "expectedBlocking": 8,
+      "expectedBlocking": 9,
       "expectedFindings": {
+        "check_dependencies": 1,
         "code quality": 1,
+        "dockerfile": 1,
         "retention": 1,
-        "workload identity": 5,
-        "check_dependencies": 1
+        "workload identity": 5
       },
       "upstreamHead": "bfd6840c1979",
       "digest": "e32ea1584eb6f3ba",
       "upstream": "../webhook-haiku-3",
-      "asDelivered": 7,
+      "asDelivered": 8,
       "asDeliveredMeasured": "against the original deliverable, same gate",
-      "remeasured": "check_dependencies 0 -> 1 on 2026-10-13: proxy-addr 2.0.7 in this deliverable's own dependencies, GHSA-jqcg-44mw-7w3h (critical), published 2026-10-05 -- after these verdicts were measured. The advisory database moved; the deliverable and the controls did not. Applied from the CI run on 425c4ec, which measured all thirteen with a working Docker: nine matched exactly and these four moved by this one finding and nothing else. Not re-derived locally, because Docker on the measuring machine was wedged and a local --update would have frozen an incomplete Go verdict."
+      "remeasured": [
+        "check_dependencies 0 -> 1 on 2026-10-13: proxy-addr 2.0.7 in this deliverable's own dependencies, GHSA-jqcg-44mw-7w3h (critical), published 2026-10-05 -- after these verdicts were measured. The advisory database moved; the deliverable and the controls did not. Applied from the CI run on 425c4ec, which measured all thirteen with a working Docker: nine matched exactly and these four moved by this one finding and nothing else. Not re-derived locally, because Docker on the measuring machine was wedged and a local --update would have frozen an incomplete Go verdict.",
+        "dockerfile 0 -> 1 on 2026-10-14: a new check, not a change in the deliverable. Its Dockerfile builds on a base image past end of life as of this manifest's measured date (Node.js 18 or 20, Go 1.21 or 1.22, Alpine 3.18 or 3.19 -- see the finding), which nothing read before candidate-rules #10. The original's FROM lines are identical, so the as-delivered verdict moves with it. Judged as of `measured`, which corpus/run.mjs pins through AGENT_GATE_TODAY so these do not move again the day another release ages out."
+      ]
     },
     {
       "name": "webhook-haiku-4",
       "path": "corpus/fixtures/webhook-haiku-4",
       "taskFile": "agent/fixtures/webhook-receiver-task.txt",
-      "expectedBlocking": 5,
+      "expectedBlocking": 6,
       "expectedFindings": {
         "check_dependencies": 1,
+        "dockerfile": 1,
         "tests": 1,
         "workload identity": 3
       },
       "upstreamHead": "359e76dcf386",
       "digest": "2f157e073bc87c28",
       "upstream": "../webhook-haiku-4",
-      "asDelivered": 5,
+      "asDelivered": 6,
       "asDeliveredMeasured": "against the original deliverable, same gate",
-      "remeasured": "check_dependencies 0 -> 1 on 2026-10-13: a control change, not the advisory database. This deliverable's package.json declares dependencies and it has no lockfile, which osv-scanner does not read on its own -- so its dependencies were never scanned, and the gate reported a check that ran and found nothing (candidate-rules #7). The original at ../webhook-haiku-4 has no lockfile either, so the as-delivered verdict moves with it. Measured locally with a responsive Docker: the other eleven fixtures matched exactly."
+      "remeasured": [
+        "check_dependencies 0 -> 1 on 2026-10-13: a control change, not the advisory database. This deliverable's package.json declares dependencies and it has no lockfile, which osv-scanner does not read on its own -- so its dependencies were never scanned, and the gate reported a check that ran and found nothing (candidate-rules #7). The original at ../webhook-haiku-4 has no lockfile either, so the as-delivered verdict moves with it. Measured locally with a responsive Docker: the other eleven fixtures matched exactly.",
+        "dockerfile 0 -> 1 on 2026-10-14: a new check, not a change in the deliverable. Its Dockerfile builds on a base image past end of life as of this manifest's measured date (Node.js 18 or 20, Go 1.21 or 1.22, Alpine 3.18 or 3.19 -- see the finding), which nothing read before candidate-rules #10. The original's FROM lines are identical, so the as-delivered verdict moves with it. Judged as of `measured`, which corpus/run.mjs pins through AGENT_GATE_TODAY so these do not move again the day another release ages out."
+      ]
     },
     {
       "name": "webhook-haiku-6",
       "path": "corpus/fixtures/webhook-haiku-6",
       "taskFile": "agent/fixtures/webhook-receiver-task.txt",
-      "expectedBlocking": 7,
+      "expectedBlocking": 8,
       "expectedFindings": {
         "check_dependencies": 1,
+        "dockerfile": 1,
         "tests": 1,
         "workload identity": 5
       },
       "upstreamHead": "68a078c60c66",
       "digest": "7c7115f37424d7be",
       "upstream": "../webhook-haiku-6",
-      "asDelivered": 7,
-      "asDeliveredMeasured": "against the original deliverable, same gate"
+      "asDelivered": 8,
+      "asDeliveredMeasured": "against the original deliverable, same gate",
+      "remeasured": [
+        "dockerfile 0 -> 1 on 2026-10-14: a new check, not a change in the deliverable. Its Dockerfile builds on a base image past end of life as of this manifest's measured date (Node.js 18 or 20, Go 1.21 or 1.22, Alpine 3.18 or 3.19 -- see the finding), which nothing read before candidate-rules #10. The original's FROM lines are identical, so the as-delivered verdict moves with it. Judged as of `measured`, which corpus/run.mjs pins through AGENT_GATE_TODAY so these do not move again the day another release ages out."
+      ]
     },
     {
       "name": "webhook-haiku-7",
       "path": "corpus/fixtures/webhook-haiku-7",
       "taskFile": "agent/fixtures/webhook-receiver-task.txt",
-      "expectedBlocking": 2,
+      "expectedBlocking": 3,
       "expectedFindings": {
+        "dockerfile": 1,
         "tests": 1,
         "workload identity": 1
       },
       "upstreamHead": "a5cc5f4797da",
       "digest": "a4bcaa7101adbccf",
       "upstream": "../webhook-haiku-7",
-      "asDelivered": 2,
-      "asDeliveredMeasured": "against the original deliverable, same gate"
+      "asDelivered": 3,
+      "asDeliveredMeasured": "against the original deliverable, same gate",
+      "remeasured": [
+        "dockerfile 0 -> 1 on 2026-10-14: a new check, not a change in the deliverable. Its Dockerfile builds on a base image past end of life as of this manifest's measured date (Node.js 18 or 20, Go 1.21 or 1.22, Alpine 3.18 or 3.19 -- see the finding), which nothing read before candidate-rules #10. The original's FROM lines are identical, so the as-delivered verdict moves with it. Judged as of `measured`, which corpus/run.mjs pins through AGENT_GATE_TODAY so these do not move again the day another release ages out."
+      ]
     },
     {
       "name": "webhook-haiku-8",
       "path": "corpus/fixtures/webhook-haiku-8",
       "taskFile": "agent/fixtures/webhook-receiver-task.txt",
-      "expectedBlocking": 3,
+      "expectedBlocking": 4,
       "expectedFindings": {
+        "dockerfile": 1,
         "tests": 1,
         "workload identity": 2
       },
       "upstreamHead": "902418a005da",
       "digest": "9f19819a103cfed6",
       "upstream": "../webhook-haiku-8",
-      "asDelivered": 3,
-      "asDeliveredMeasured": "against the original deliverable, same gate"
+      "asDelivered": 4,
+      "asDeliveredMeasured": "against the original deliverable, same gate",
+      "remeasured": [
+        "dockerfile 0 -> 1 on 2026-10-14: a new check, not a change in the deliverable. Its Dockerfile builds on a base image past end of life as of this manifest's measured date (Node.js 18 or 20, Go 1.21 or 1.22, Alpine 3.18 or 3.19 -- see the finding), which nothing read before candidate-rules #10. The original's FROM lines are identical, so the as-delivered verdict moves with it. Judged as of `measured`, which corpus/run.mjs pins through AGENT_GATE_TODAY so these do not move again the day another release ages out."
+      ]
     },
     {
       "name": "webhook-haiku-12",
       "path": "corpus/fixtures/webhook-haiku-12",
       "taskFile": "agent/fixtures/webhook-receiver-task.txt",
-      "expectedBlocking": 7,
+      "expectedBlocking": 8,
       "expectedFindings": {
+        "check_dependencies": 1,
+        "dockerfile": 1,
         "iam": 2,
         "immutability": 1,
         "manifest contract": 1,
         "terraform_plan": 1,
-        "tests": 1,
-        "check_dependencies": 1
+        "tests": 1
       },
       "upstreamHead": "ad7dc2081089",
       "digest": "da6ebee30eb69d3d",
       "upstream": "../webhook-haiku-12",
-      "asDelivered": 5,
+      "asDelivered": 6,
       "differsFromAsDelivered": "the vendored copy scores 6 where the original scores 5, because node_modules is not vendored: the suite cannot run, so the tests check fires",
       "asDeliveredMeasured": "against the original deliverable, same gate",
-      "remeasured": "check_dependencies 0 -> 1 on 2026-10-13: proxy-addr 2.0.7 in this deliverable's own dependencies, GHSA-jqcg-44mw-7w3h (critical), published 2026-10-05 -- after these verdicts were measured. The advisory database moved; the deliverable and the controls did not. Applied from the CI run on 425c4ec, which measured all thirteen with a working Docker: nine matched exactly and these four moved by this one finding and nothing else. Not re-derived locally, because Docker on the measuring machine was wedged and a local --update would have frozen an incomplete Go verdict."
+      "remeasured": [
+        "check_dependencies 0 -> 1 on 2026-10-13: proxy-addr 2.0.7 in this deliverable's own dependencies, GHSA-jqcg-44mw-7w3h (critical), published 2026-10-05 -- after these verdicts were measured. The advisory database moved; the deliverable and the controls did not. Applied from the CI run on 425c4ec, which measured all thirteen with a working Docker: nine matched exactly and these four moved by this one finding and nothing else. Not re-derived locally, because Docker on the measuring machine was wedged and a local --update would have frozen an incomplete Go verdict.",
+        "dockerfile 0 -> 1 on 2026-10-14: a new check, not a change in the deliverable. Its Dockerfile builds on a base image past end of life as of this manifest's measured date (Node.js 18 or 20, Go 1.21 or 1.22, Alpine 3.18 or 3.19 -- see the finding), which nothing read before candidate-rules #10. The original's FROM lines are identical, so the as-delivered verdict moves with it. Judged as of `measured`, which corpus/run.mjs pins through AGENT_GATE_TODAY so these do not move again the day another release ages out."
+      ]
     },
     {
       "name": "shape-node-library",

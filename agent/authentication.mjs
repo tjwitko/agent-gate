@@ -39,6 +39,7 @@ import { readdirSync, readFileSync, statSync } from "fs";
 import path from "path";
 
 import { SKIP_DIRS } from "./skip-dirs.mjs";
+import { isDeclaredFixture } from "./fixture-markers.mjs";
 
 // Endpoints that are conventionally open, and should be: a liveness probe that requires a
 // credential is a liveness probe that fails.
@@ -1026,7 +1027,8 @@ function walk(dir, acc = [], root = dir) {
   for (const e of entries) {
     const full = path.join(dir, e.name);
     if (e.isDirectory()) {
-      if (!SKIP_DIRS.has(e.name) && !TEST_DIRS.has(e.name)) walk(full, acc, root);
+      // A declared fixture is deliberately unrepresentative; see fixture-markers.mjs.
+      if (!SKIP_DIRS.has(e.name) && !TEST_DIRS.has(e.name) && !isDeclaredFixture(full)) walk(full, acc, root);
       continue;
     }
     if (TEST_FILE.test(e.name)) continue;

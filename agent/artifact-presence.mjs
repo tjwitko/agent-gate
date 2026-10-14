@@ -16,6 +16,7 @@ import path from "path";
 
 import { taskMatcher } from "./task-phrases.mjs";
 import { SKIP_DIRS } from "./skip-dirs.mjs";
+import { isDeclaredFixture } from "./fixture-markers.mjs";
 
 // Extensions where an empty file is never deliberate work. Deliberately excludes .gitignore,
 // __init__.py and similar, which are legitimately empty.
@@ -87,7 +88,9 @@ function walkAll(dir, acc = [], root = dir) {
   for (const e of entries) {
     const full = path.join(dir, e.name);
     if (e.isDirectory()) {
-      if (!SKIP_DIRS.has(e.name)) walkAll(full, acc, root);
+      // A fixture's Dockerfile or manifests are not the project's, and must not satisfy a requirement
+      // the project's own files do not meet.
+      if (!SKIP_DIRS.has(e.name) && !isDeclaredFixture(full)) walkAll(full, acc, root);
       continue;
     }
     try {

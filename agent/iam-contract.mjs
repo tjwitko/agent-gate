@@ -8,6 +8,7 @@ import { readdirSync, readFileSync, statSync } from "fs";
 import path from "path";
 import { parseAllDocuments } from "yaml";
 import { SKIP_DIRS } from "./skip-dirs.mjs";
+import { isDeclaredFixture } from "./fixture-markers.mjs";
 import { hclResources, hclBlocks, hclAttr, TF_SERVICE_ACCOUNT, hclVariableDefaults } from "./hcl-blocks.mjs";
 
 const MAX_FILE_BYTES = 512 * 1024;
@@ -68,7 +69,8 @@ function walkFiles(dir, exts, acc = [], root = dir) {
   for (const e of entries) {
     const full = path.join(dir, e.name);
     if (e.isDirectory()) {
-      if (!SKIP_DIRS.has(e.name)) walkFiles(full, exts, acc, root);
+      // A declared fixture is deliberately unrepresentative; see fixture-markers.mjs.
+      if (!SKIP_DIRS.has(e.name) && !isDeclaredFixture(full)) walkFiles(full, exts, acc, root);
       continue;
     }
     if (!exts.includes(path.extname(e.name))) continue;

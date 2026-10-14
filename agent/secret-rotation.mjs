@@ -18,6 +18,7 @@
 import { readdirSync, readFileSync, statSync } from "fs";
 import path from "path";
 import { SKIP_DIRS } from "./skip-dirs.mjs";
+import { isDeclaredFixture } from "./fixture-markers.mjs";
 
 const MAX_FILE_BYTES = 512 * 1024;
 const CODE_EXT = [".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".go", ".rb", ".java"];
@@ -148,7 +149,8 @@ function walkCode(dir, acc = [], root = dir) {
   for (const e of entries) {
     const full = path.join(dir, e.name);
     if (e.isDirectory()) {
-      if (!SKIP_DIRS.has(e.name)) walkCode(full, acc, root);
+      // A declared fixture is deliberately unrepresentative; see fixture-markers.mjs.
+      if (!SKIP_DIRS.has(e.name) && !isDeclaredFixture(full)) walkCode(full, acc, root);
       continue;
     }
     if (!CODE_EXT.includes(path.extname(e.name))) continue;

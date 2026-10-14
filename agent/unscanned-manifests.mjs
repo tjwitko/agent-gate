@@ -200,6 +200,9 @@ export function unscannedManifests(projectDir) {
     }
     for (const e of entries) {
       if (e.isDirectory()) {
+        // Fixtures are NOT skipped here. dep-audit's osv-scanner reads the whole tree, fixtures
+        // included, so the dependency checks treat it as one unit; exempting a fixture's manifest
+        // here would only loosen the check, never correct a false finding.
         if (!SKIP_DIRS.has(e.name)) walk(path.join(dir, e.name));
         continue;
       }

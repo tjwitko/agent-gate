@@ -751,9 +751,12 @@ and no lockfile, whose dependencies had never been scanned. Eleven did not. The 
 called the move "most likely a new advisory", which was right for the last re-measure and wrong for
 this one; it no longer says that about an unscanned manifest.
 
-**Left for later:** `agent/lockfiles.mjs` counts `requirements.lock` as a lockfile, and the advisory
-text tells Python users to write one, but osv-scanner does not read it. The list is mirrored in
-local-copilot-stack and a test requires the two to agree, so it changes in both or neither.
+**And the lockfile list itself was wrong.** `agent/lockfiles.mjs`, which decides whether a dependency
+scan is authoritative, counted `requirements.lock` and `bun.lockb` — neither of which osv-scanner
+reads — and the advisory told Python users to write the first. A project whose only lockfile was one
+of those had its findings treated as authoritative for a scan that never read it. Fixed in both
+copies (here and local-copilot-stack, which a test requires to agree), and the list is now held to
+the measured table by a test, so the two cannot drift apart again.
 
 ### 8. The task file can be edited by whoever writes the code — fixed
 
@@ -830,6 +833,17 @@ rejects.
 walk the other validators use. And `--disable-nosem`, because an inline `# nosemgrep` silenced both of
 a probe's findings — a suppression the code's author writes, the `.gitleaksignore` defect in another
 form.
+
+**It exposed a gap in fixture markers.** The samples were first kept as real `.py`, `.go` and `.js`
+files in a directory declared a fixture — and the gate's own authentication check still reported their
+routes, and `build_check` still ran `go build ./...` over them. Six source-reading walks did not ask
+whether a directory was a declared fixture: authentication, build_check (including ruff, which walks
+the tree itself and is now given each fixture as `--extend-exclude`), code quality, secret rotation,
+Kubernetes manifests, IAM, and artifact presence — where honouring it is the stricter direction, since
+a fixture's Dockerfile must not satisfy "the project has a Dockerfile". The two dependency walks are
+left whole-tree on purpose: osv-scanner reads fixtures too, and exempting a fixture's manifest there
+could only loosen the check. The samples became `.sample` files regardless; vulnerable code stored as
+source is source to every tool that reads it.
 
 **A missing semgrep is could-not-run, exit 3,** for a project with code in a language the rules cover —
 the same rule as a missing ruff for Python. control-tooling installs it (1.180.0, pinned). It adds about

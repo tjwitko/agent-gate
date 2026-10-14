@@ -76,3 +76,13 @@ test("the sibling copy agrees, when there is one to compare against", async () =
     "agent-gate and local-copilot-stack disagree about what a lockfile is"
   );
 });
+
+// The list that decides whether a dependency scan is authoritative must be the list of files the
+// scanner reads. It held requirements.lock and bun.lockb, neither of which osv-scanner reads, while
+// unscanned-manifests.mjs measured what it does read. go.sum is the one addition: osv-scanner reads
+// go.mod, whose versions are exact once go.sum exists.
+test("a lockfile here is a file osv-scanner reads, per the measured table", async () => {
+  const { NEEDS_LOCKFILE } = await import("./unscanned-manifests.mjs");
+  const measured = new Set([...Object.values(NEEDS_LOCKFILE).flatMap((r) => r.locks), "requirements-lock.txt", "go.sum"]);
+  assert.deepEqual([...LOCKFILES].sort(), [...measured].sort());
+});

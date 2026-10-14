@@ -23,10 +23,14 @@ import path from "path";
 
 import { SKIP_DIRS } from "./skip-dirs.mjs";
 
+// Only files osv-scanner actually reads, measured against 2.4.0 (see agent-gate's
+// agent/unscanned-manifests.mjs): a "lockfile" the scanner ignores made a scan authoritative that had
+// never read it. requirements.lock and bun.lockb were on this list and are not read; their
+// replacements, requirements-lock.txt and bun.lock, are.
 export const LOCKFILES = [
-  "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb",
-  "requirements.lock", "poetry.lock", "Pipfile.lock", "pdm.lock", "uv.lock",
-  "go.sum", "Cargo.lock", "Gemfile.lock", "composer.lock",
+  "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lock",
+  "requirements-lock.txt", "poetry.lock", "Pipfile.lock", "pdm.lock", "uv.lock", "pylock.toml",
+  "go.sum", "Cargo.lock", "Gemfile.lock", "composer.lock", "gradle.lockfile",
 ];
 
 /**
@@ -53,4 +57,4 @@ export function findsLockfile(dir) {
 export const NOT_AUTHORITATIVE_NOTE =
   "no lockfile, so osv-scanner resolved minimum-satisfying versions and these may not be what " +
   "installs. `==` pins in requirements.txt are not enough — they constrain direct dependencies " +
-  "only. Commit a lockfile (for pip: `pip freeze > requirements.lock`) to make this authoritative.";
+  "only. Commit a lockfile (for pip: `pip freeze > requirements-lock.txt`) to make this authoritative.";

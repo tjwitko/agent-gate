@@ -14,6 +14,15 @@ inputs:
       report "not checked", which is accurate and much less useful.
     required: false
     default: ""
+  baseline:
+    description: >-
+      Requirement sentences the project is held to whatever its task file says — "Include automated
+      tests that someone else can run.", "Every API key must be rotatable without a redeploy." They
+      are added to the task text, so they switch on the same gated checks. The task file is in the
+      repository the code's author edits; this input is not, when the workflow that sets it is kept
+      out of their reach (an organisation ruleset's required workflow, for instance).
+    required: false
+    default: ""
   terraform-guard:
     description: "Path to terraform-guard-mcp/index.mjs. Overrides .agent-gate.json and node_modules."
     required: false
@@ -63,6 +72,8 @@ runs:
         DEPAUDIT_SERVER: ${{ inputs.dep-audit }}
         SECRETGUARD_SERVER: ${{ inputs.secret-guard }}
         IDENTITYGUARD_SERVER: ${{ inputs.identity-guard }}
+        # Through the environment, never interpolated into the script: it is free text.
+        AGENT_GATE_BASELINE: ${{ inputs.baseline }}
       run: |
         # GitHub runs composite `run:` steps as `bash --noprofile --norc -e -o pipefail`, and
         # `set -uo pipefail` does NOT clear that inherited -e. The gate's exit code is this action's
@@ -89,6 +100,12 @@ runs:
         RESULT="${RUNNER_TEMP:-/tmp}/agent-gate.json"
         ARGS=("${{ inputs.project }}")
         [ -n "${{ inputs.task-file }}" ] && ARGS+=("${{ inputs.task-file }}")
+        # Written outside the workspace, so nothing in the checkout can stand in for it.
+        if [ -n "$AGENT_GATE_BASELINE" ]; then
+          BASELINE_FILE="${RUNNER_TEMP:-/tmp}/agent-gate-baseline.txt"
+          printf '%s\n' "$AGENT_GATE_BASELINE" > "$BASELINE_FILE"
+          ARGS+=("--baseline=$BASELINE_FILE")
+        fi
 
         # Once, not twice. terraform plan and checkov dominate the runtime here, and running the
         # gate a second time to get human output would double them on every CI job. The log view is
@@ -104,6 +121,7 @@ runs:
             console.log(`agent-gate did not produce a verdict: ${r.error}`);
             process.exit(0);
           }
+          if (r.baseline) console.log(`baseline : set by the workflow (${r.baseline})`);
           for (const c of r.controls) console.log(`control  : ${c.name.padEnd(16)} ${c.status.padEnd(14)} ${(c.version ? `v${c.version}` : c.status === "ran" ? "v?" : "").padEnd(8)} ${c.resolvedFrom || c.error}`);
           console.log(`validators: ${r.validatorsRun.join(", ")}`);
           // Printed BEFORE the verdict, and printed at all. The result document carried these

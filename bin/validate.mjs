@@ -17,6 +17,7 @@
 import path from "path";
 import { readFileSync, realpathSync, existsSync, statSync } from "fs";
 import { fileURLToPath } from "url";
+import { loadRequirements, checkBaselineInput } from "../lib/requirements.mjs";
 
 import { validateProject, localTools, McpClient } from "../lib/gate-core.mjs";
 import { resolveControls, readConfig, CONFIG_FILE } from "../lib/resolve-controls.mjs";
@@ -28,12 +29,16 @@ const EXIT = { CLEAN: 0, BLOCKED: 1, USAGE: 2, INCOMPLETE: 3 };
 // "blocked". A mistyped path was reported as a verdict on the project.
 export class UsageError extends Error {}
 
-function checkInputs(projectDir, taskFile) {
+function checkInputs(projectDir, taskFile, baselineFile) {
   if (!existsSync(projectDir)) throw new UsageError(`${projectDir} does not exist`);
   if (!statSync(projectDir).isDirectory()) throw new UsageError(`${projectDir} is not a directory`);
   if (taskFile) {
     if (!existsSync(taskFile)) throw new UsageError(`the task file ${taskFile} does not exist`);
     if (!statSync(taskFile).isFile()) throw new UsageError(`the task file ${taskFile} is not a file`);
+  }
+  if (baselineFile) {
+    const bad = checkBaselineInput(baselineFile);
+    if (bad) throw new UsageError(bad);
   }
 }
 
@@ -61,13 +66,15 @@ export function failClosed(err, { json, wroteResult }) {
 
 let wroteResult = false;
 
-export async function runGate(projectDirArg, taskFile, { env = process.env, preCommit = false } = {}) {
+export async function runGate(projectDirArg, taskFile, { env = process.env, preCommit = false, baselineFile = null } = {}) {
   const projectDir = path.resolve(projectDirArg);
-  checkInputs(projectDir, taskFile);
+  checkInputs(projectDir, taskFile, baselineFile);
   // Several checks are gated on what the task asked for -- immutability, retention, secret rotation
   // and both quality checks stay silent unless the requirement is stated. Without the task text
-  // they report "not checked", which is correct and much less useful.
-  const taskText = taskFile ? readFileSync(taskFile, "utf8") : "";
+  // they report "not checked", which is correct and much less useful. The baseline, when there is
+  // one, is requirement text from outside the project; see lib/requirements.mjs for why both exist.
+  const requirements = loadRequirements(projectDir, taskFile, { preCommit, baselineFile });
+  const taskText = requirements.text;
 
   const { config, error: configError } = readConfig(projectDir);
   const controls = resolveControls(projectDir, { config, env });
@@ -103,6 +110,8 @@ export async function runGate(projectDirArg, taskFile, { env = process.env, preC
   }
 
   const r = await validateProject(projectDir, registry, taskText, { preCommit });
+  r.failures.unshift(...requirements.failures);
+  r.advisories.unshift(...requirements.advisories);
   for (const c of clients) c.proc?.kill();
 
   // A server that connected but whose tool the gate never invoked. Not the same as one that could
@@ -133,6 +142,7 @@ export async function runGate(projectDirArg, taskFile, { env = process.env, preC
   return {
     projectDir,
     taskFile: taskFile || null,
+    baseline: requirements.baseline,
     configError,
     controls,
     ran: r.ran,
@@ -151,7 +161,8 @@ export async function runGate(projectDirArg, taskFile, { env = process.env, preC
 function human(result) {
   const out = [];
   out.push(`project        : ${result.projectDir}`);
-  out.push(`task text      : ${result.taskFile || "NONE — checks gated on the task will report as not checked"}`);
+  out.push(`task text      : ${result.taskFile || (result.baseline ? "NONE — the baseline only" : "NONE — checks gated on the task will report as not checked")}`);
+  if (result.baseline) out.push(`baseline       : ${result.baseline}`);
   for (const c of result.controls) {
     const v = c.entry ? (c.version ? `v${c.version}` : "v?").padEnd(8) : "";
     out.push(`control        : ${c.name.padEnd(16)} ${v}${c.entry ? c.source : `NOT RESOLVED — ${c.error}`}`);
@@ -202,6 +213,7 @@ function machine(result) {
     {
       project: result.projectDir,
       taskFile: result.taskFile,
+      baseline: result.baseline,
       exitCode: result.exitCode,
       incomplete: result.incomplete,
       blocking: result.failures.length,
@@ -250,8 +262,16 @@ async function main() {
   // whose premise a commit satisfies by existing; everything else runs, and the skip is reported.
   const preCommit = args.includes("--pre-commit");
   const positional = args.filter((a) => !a.startsWith("--"));
+  // Requirement text from outside the project, which the project cannot edit. `=` form only: a
+  // separate value would be read as the task file.
+  const baselineArg = args.find((a) => a.startsWith("--baseline"));
+  if (baselineArg !== undefined && !/^--baseline=.+/.test(baselineArg)) {
+    console.error("agent-gate: --baseline takes a file: --baseline=<file>");
+    process.exit(EXIT.USAGE);
+  }
+  const baselineFile = baselineArg ? baselineArg.slice("--baseline=".length) : null;
   if (positional.length < 1) {
-    console.error("usage: agent-gate <project-dir> [task-file] [--json] [--pre-commit]");
+    console.error("usage: agent-gate <project-dir> [task-file] [--baseline=<file>] [--json] [--pre-commit]");
     console.error(`\ncontrols resolve from, in order: an env var, ${CONFIG_FILE} in the project,`);
     console.error("node_modules, then a sibling checkout. A control that resolves from nowhere exits 3.");
     process.exit(EXIT.USAGE);
@@ -269,12 +289,12 @@ async function main() {
   if (json) console.log = (...a) => console.error(...a);
   let result;
   try {
-    result = await runGate(positional[0], positional[1], { preCommit });
+    result = await runGate(positional[0], positional[1], { preCommit, baselineFile });
   } catch (err) {
     if (!(err instanceof UsageError)) throw err;
     console.log = narrate;
     console.error(`agent-gate: ${err.message}`);
-    console.error("usage: agent-gate <project-dir> [task-file] [--json] [--pre-commit]");
+    console.error("usage: agent-gate <project-dir> [task-file] [--baseline=<file>] [--json] [--pre-commit]");
     if (json) process.stdout.write(`${JSON.stringify({ exitCode: EXIT.USAGE, error: err.message })}\n`);
     process.exit(EXIT.USAGE);
   } finally {

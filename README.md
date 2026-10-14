@@ -134,6 +134,22 @@ four control repositories each keep one of these at `.github/gate-task.txt` if y
 worked example: they state tests and error distinction, and deliberately state nothing about
 retention or immutability, because they store no records.
 
+#### Requirements the code's author cannot remove
+
+The task file usually lives in the repository it describes, so whoever writes the code can edit the
+requirement the code is checked against. An agent blocked by "tokens must be rotatable" could delete
+the sentence and commit. Two things stop that from being quiet:
+
+- **At commit time**, a commit that changes or deletes a tracked task file is blocked, and the code is
+  checked against the requirements as they were. The gate reads the version being committed, not the
+  file on disk, so an unstaged edit does not loosen it either. Adding a task file is not changing
+  one, so a project's first commit is unaffected. To change a requirement on purpose, commit it on its
+  own: `git commit --no-verify -- task.txt`.
+- **A baseline**, for requirements no project gets to opt out of: `--baseline=<file>` on the command
+  line, or the Action's `baseline` input. Its sentences are added to the task text, so they switch on
+  the same checks. It only does its job if it lives somewhere the code's author cannot edit — a
+  baseline inside the project is reported as such.
+
 ### What you get
 
 ```
@@ -338,10 +354,24 @@ Then make it a required check in **Settings → Branches → Branch protection**
 |---|---|---|
 | `project` | `.` | Directory to validate |
 | `task-file` | *(none)* | The task the code was written to satisfy |
+| `baseline` | *(none)* | Requirement sentences the project is held to whatever its task file says — see [Requirements the code's author cannot remove](#requirements-the-codes-author-cannot-remove) |
 | `terraform-guard` | *(auto)* | Override path to a control server |
 | `dep-audit` | *(auto)* | " |
 | `secret-guard` | *(auto)* | " |
 | `identity-guard` | *(auto)* | " |
+
+A `baseline` set in a workflow in the same repository is only as protected as that workflow file. For
+a requirement every project must meet, set it in a workflow the project cannot edit — one an
+organisation ruleset requires, for instance:
+
+```yaml
+      - uses: tjwitko/agent-gate@v1.1.8
+        with:
+          task-file: task.txt
+          baseline: |
+            Include automated tests that someone else can run.
+            A client error must not be reported as a 500.
+```
 
 | output | values |
 |---|---|

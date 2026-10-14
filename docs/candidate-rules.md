@@ -755,7 +755,7 @@ this one; it no longer says that about an unscanned manifest.
 text tells Python users to write one, but osv-scanner does not read it. The list is mirrored in
 local-copilot-stack and a test requires the two to agree, so it changes in both or neither.
 
-### 8. The task file can be edited by whoever writes the code
+### 8. The task file can be edited by whoever writes the code — fixed
 
 The review's claim — that authentication, secrets and the like can be switched off by leaving words
 out of the task — is wrong as stated. Authentication, secret scanning, dependencies, IaC and workload
@@ -763,15 +763,35 @@ identity run with no task file at all; a probe with none was blocked by the auth
 The six task-gated checks verify *stated requirements*, and cannot be universal: a retention check
 has nothing to compare against until the task names a period.
 
-What is real is narrower. The task file lives in the repository, and nothing protects it. An agent
-blocked by "the API key must be rotated every 90 days" can delete that sentence and commit, which is
-the `.identity-exception` defect again — the guard the model can edit is not a guard — with the task
-file in the role of the suppression file. And an organisation has no way to require a check, tests
-for instance, regardless of what a task says.
+What was real is narrower. The task file lives in the repository, and nothing protected it. An agent
+blocked by "the API key must be rotated every 90 days" could delete that sentence and commit, which
+is the `.identity-exception` defect again — the guard the model can edit is not a guard — with the
+task file in the role of the suppression file. And an organisation had no way to require a check,
+tests for instance, regardless of what a task says.
 
-Planned: treat the task file as a guarded file in the agent loop's commit gate, and add an Action
-input for a baseline set of required checks. The baseline must come from CI configuration rather
-than a file in the repository, or it moves the problem rather than solving it.
+The agent loop was already mostly safe, which was worth finding out before building anything: it
+reads the task once at startup and validates against that copy, so an edit mid-run changes nothing
+the run checks. The exposure was the pre-commit hook and CI, which read the file at the moment they
+run — and those are how the gate is used with coding agents. Fixed in three places
+(`lib/requirements.mjs`):
+
+- **Pre-commit.** A commit that modifies or deletes a tracked task file is blocked, and the code is
+  checked against the requirements as they were (`HEAD`'s version), so the requirement the commit
+  removed is still enforced in the same report. The task is read from the version being committed,
+  not the working tree, so an unstaged edit cannot loosen it either. Adding a task file is allowed,
+  so a project's first commit is unaffected. The deliberate way to change a requirement is to commit
+  it alone with `--no-verify`.
+- **Baseline.** `--baseline=<file>`, and the Action's `baseline` input: requirement sentences
+  appended to the task, switching on the same gated checks. The Action writes it outside the
+  workspace and passes it through the environment, never into the script. A baseline file inside the
+  project is reported as editable by the code's author.
+- **Agent loop.** `write_file` and `delete_file` refuse the task file by resolved path, beside the
+  suppression files they already refused by name.
+
+Neither of the first two stops someone with a shell who means to get past — `--no-verify` exists,
+and a workflow file is in the repository too unless an organisation ruleset requires it from
+elsewhere. What changes is that weakening a requirement is a deliberate, visible act rather than an
+edit indistinguishable from the work. Both end-to-end tests fail against the previous CLI.
 
 ### 9. No SAST: injection passes
 

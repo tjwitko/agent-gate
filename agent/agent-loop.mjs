@@ -545,7 +545,7 @@ async function main() {
 
   protectRepo(opts.project);
   const secretScanner = await loadSecretScanner();
-  const local = localTools(opts.project, secretScanner);
+  const local = localTools(opts.project, secretScanner, { protect: [opts.task] });
   for (const [name, def] of Object.entries(local)) {
     toolRegistry.set(name, { kind: "local", run: def.run });
     toolSchemas.push(def.schema);

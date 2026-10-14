@@ -793,17 +793,47 @@ and a workflow file is in the repository too unless an organisation ruleset requ
 elsewhere. What changes is that weakening a requirement is a deliberate, visible act rather than an
 edit indistinguishable from the work. Both end-to-end tests fail against the previous CLI.
 
-### 9. No SAST: injection passes
+### 9. No SAST: injection passes — fixed
 
 A probe Flask service with a command injection (`subprocess.run("ping -c1 " + request.args[...],
 shell=True)`) and a SQL injection (an f-string query) was blocked only because a route lacked
-authentication. Neither injection was mentioned. ruff runs with `--select F` — undefined names — and
+authentication. Neither injection was mentioned. ruff ran with `--select F` — undefined names — and
 no security rules.
 
-Planned: Semgrep as a fifth control, multi-language, which also narrows #11. Only high-confidence
-rules block; the rest are advisories. Measured on the corpus before anything blocks, because a noisy
-blocking check is how a gate gets switched off. CodeQL needs a build and SonarQube a server; both are
-heavier than the problem.
+**The `sast` validator** (`agent/sast.mjs`) runs Semgrep with rules written for this project, in
+`agent/sast-rules/`, for Python, JavaScript/TypeScript and Go:
+
+- **Blocking: taint rules.** Request data — Flask, Django, FastAPI parameters, Express, `net/http`,
+  gin — reaching a shell, a SQL statement, or an evaluator, within one function. Command injection,
+  SQL injection, code injection, one finding per category with a remedy each.
+- **Advisory: pattern rules.** A SQL statement built by formatting, a shell command built from a
+  non-literal. They catch what taint cannot follow: open-source Semgrep's taint analysis is
+  intraprocedural, so request data passed to a helper that builds the query is not traced. Measured
+  on realistic shapes — destructured request fields, values through a variable, TypeScript, FastAPI
+  `Query()` — the taint rules caught five of seven; the two misses were both cross-function, and the
+  advisories catch the construction in both.
+
+**Why not the registry's rules.** They are under the Semgrep Rules License, which restricts
+redistribution, and fetching them at scan time would make a gate that runs offline in hooks depend on
+the network. Semgrep itself is LGPL and invoked as a CLI.
+
+**Measured before anything was allowed to block.** Zero findings, blocking or advisory, across 9,940
+files of real code: every deliverable and control repository on the development machine, 4,593 files
+of installed Python packages, and 5,066 of installed JavaScript including Express. No corpus fixture
+moved. The rules are tested by Semgrep's own runner against annotated samples (`agent/sast-samples/`, kept as `.sample` files so no scanner reads them as source) where every `ruleid:` line must match and every `ok:` line must not — which caught
+a false positive in the JavaScript shell rule (a literal command) and two rule files that loaded in
+the scanner but failed `--validate`, because Semgrep's loader accepts YAML anchors its validator
+rejects.
+
+**Two ways to hide code, both closed.** Given a directory, Semgrep obeys the project's
+`.semgrepignore`: a probe with `src/` in one scanned nothing. Files are passed explicitly, from the same
+walk the other validators use. And `--disable-nosem`, because an inline `# nosemgrep` silenced both of
+a probe's findings — a suppression the code's author writes, the `.gitleaksignore` defect in another
+form.
+
+**A missing semgrep is could-not-run, exit 3,** for a project with code in a language the rules cover —
+the same rule as a missing ruff for Python. control-tooling installs it (1.180.0, pinned). It adds about
+six seconds to a run, most of it Semgrep's start-up.
 
 ### 10. Dockerfiles are checked for existence, not content — fixed
 

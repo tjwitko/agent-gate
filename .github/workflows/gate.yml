@@ -56,6 +56,10 @@ jobs:
             "https://github.com/google/osv-scanner/releases/download/v${OSV_VERSION}/osv-scanner_linux_amd64"
           sudo chmod +x /usr/local/bin/osv-scanner
           osv-scanner --version
+      # agent/sast.test.mjs runs the rules through semgrep's own test runner, at the version
+      # control-tooling pins. The same variable makes its absence a failure rather than a skip.
+      - name: semgrep
+        run: pipx install semgrep==1.180.0 && semgrep --version
       - run: npm test
         env:
           AGENT_GATE_REQUIRE_SCANNERS: "1"

@@ -1,0 +1,15 @@
+import { Request, Response } from "express";
+import { exec } from "child_process";
+
+declare const pool: { query(q: string, p?: unknown[]): Promise<unknown> };
+
+export async function remove(req: Request, res: Response) {
+  const name: string = req.params.name as string;
+  // ruleid: javascript-command-injection, javascript-shell-nonliteral
+  exec(`echo ${name}`);
+  // ruleid: javascript-sql-injection, javascript-sql-string-built
+  await pool.query(`DELETE FROM t WHERE name = '${name}'`);
+  // ok: javascript-sql-injection, javascript-sql-string-built
+  await pool.query("DELETE FROM t WHERE name = $1", [name]);
+  res.end();
+}

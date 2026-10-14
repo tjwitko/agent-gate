@@ -30,7 +30,7 @@ is fine" are different facts, and collapsing them is how a gate quietly stops pr
 - The scanners the controls drive. Install the ones matching your stack:
 
   ```bash
-  brew install terraform gitleaks osv-scanner   # macOS
+  brew install terraform gitleaks osv-scanner semgrep   # macOS
   pipx install checkov ruff
   python3 -m pip install pytest      # only if your project has a Python test suite
   ```
@@ -40,7 +40,8 @@ is fine" are different facts, and collapsing them is how a gate quietly stops pr
   | `gitleaks` | credential scanning | yes |
   | `osv-scanner` | dependency vulnerabilities | yes |
   | `terraform` | Terraform plan and policy checks | if the project has `.tf` files |
-  | `checkov` | extra Terraform coverage | optional, advisory only |
+  | `semgrep` | injection checks (`sast`) | if the project has Python, JavaScript/TypeScript or Go |
+  | `checkov` | extra Terraform and Dockerfile coverage | optional, advisory only |
   | `ruff` | Python static checks | if the project has Python |
   | `pytest` | running a Python test suite | if the project has Python tests |
   | `docker`, `go` | Go build and test | if the project has Go |
@@ -525,7 +526,7 @@ Four control servers, each in its own repository and each installed as a depende
 
 Plus in-process validators: `build_check`, `tests`, `immutability`, `authentication`,
 `manifest_contract`, `k8s_manifest`, `secret_rotation`, `retention`, `iam_contract`,
-`artifact_presence`, `dockerfile`, `code_quality`, `artifact_census`, `uncommitted_work`.
+`artifact_presence`, `dockerfile`, `sast`, `code_quality`, `artifact_census`, `uncommitted_work`.
 
 A few are worth calling out because they exist in response to measured failures:
 
@@ -543,6 +544,12 @@ A few are worth calling out because they exist in response to measured failures:
   `golang`, `ruby`, `php`, `debian`, `ubuntu`, `alpine` and `eclipse-temurin` images, and the OS
   named in a language image's tag (`-buster`, `-alpine3.18`) is judged too. checkov's Dockerfile
   rules — no `USER`, no `HEALTHCHECK` — are reported as advisories.
+- **`sast` blocks on injection** — request data reaching a shell, a SQL statement or `eval`, in
+  Python, JavaScript/TypeScript and Go. It runs Semgrep with this project's own rules, and only the
+  ones that trace data from an HTTP request to the dangerous call block; they produced no findings
+  across 9,940 files of real code before they were allowed to. Code that builds a query or a shell
+  command from a value of unknown origin is an advisory. Neither `.semgrepignore` nor an inline
+  `# nosemgrep` hides code from it.
 
 ---
 
@@ -583,6 +590,12 @@ fixes. The finding names the line, the date it ended and the supported releases.
 a build stage on an unsupported compiler ships its unpatched standard library in the binary. Floating
 tags (`node:lts`, `python:3`) and other publishers' images (`bitnami/node`) are not judged; the
 dates are refreshed with each release, so a release newer than the table is simply not judged yet.
+
+**`sast: command injection` / `SQL injection` / `code injection`** — data from an HTTP request reaches
+a shell, a SQL statement or an evaluator in the same function. The finding names each line and the
+fix. The check follows data within a function, not across calls, so a request value passed to a helper
+that builds the query shows up as an advisory about the helper instead ("built by string formatting…
+not blocking").
 
 **"NOT READ" above the verdict** — part of the project is in a language no language-aware check reads
 (Rust, PHP, C#, Kotlin, Swift, C/C++, Scala, Elixir, Dart, Lua, Perl, JSX, Vue, Svelte). The

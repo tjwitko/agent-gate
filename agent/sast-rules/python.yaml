@@ -1,0 +1,189 @@
+# Injection rules for Python, written for agent-gate. Taint rules (ERROR) block: they fire only when
+# data from an HTTP request reaches a shell, a SQL string or an evaluator. Pattern rules (WARNING) are
+# advisories: they see the dangerous construction without knowing where its input came from.
+rules:
+  - id: python-command-injection
+    mode: taint
+    languages: [python]
+    severity: ERROR
+    message: request data reaches a shell command
+    metadata: { category: command injection }
+    pattern-sources:
+      - pattern-either:
+          - pattern: flask.request.$ATTR
+          - pattern: request.args
+          - pattern: request.form
+          - pattern: request.values
+          - pattern: request.json
+          - pattern: request.data
+          - pattern: request.headers
+          - pattern: request.cookies
+          - pattern: request.files
+          - pattern: request.get_json(...)
+          - pattern: request.GET
+          - pattern: request.POST
+          - pattern: request.query_params
+          - pattern: request.path_params
+      # FastAPI: a route handler's parameters are request data.
+      - patterns:
+          - pattern-inside: |
+              @$APP.$METHOD(...)
+              def $F(..., $P, ...):
+                ...
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: ^(get|post|put|patch|delete|api_route)$
+          - pattern: $P
+      - patterns:
+          - pattern-inside: |
+              @$APP.$METHOD(...)
+              async def $F(..., $P, ...):
+                ...
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: ^(get|post|put|patch|delete|api_route)$
+          - pattern: $P
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: subprocess.$FN($CMD, ..., shell=True, ...)
+              - pattern: os.system($CMD)
+              - pattern: os.popen($CMD, ...)
+              - pattern: subprocess.getoutput($CMD)
+              - pattern: subprocess.getstatusoutput($CMD)
+          - focus-metavariable: $CMD
+
+  - id: python-sql-injection
+    mode: taint
+    languages: [python]
+    severity: ERROR
+    message: request data is built into a SQL statement
+    metadata: { category: SQL injection }
+    pattern-sources:
+      - pattern-either:
+          - pattern: flask.request.$ATTR
+          - pattern: request.args
+          - pattern: request.form
+          - pattern: request.values
+          - pattern: request.json
+          - pattern: request.data
+          - pattern: request.headers
+          - pattern: request.cookies
+          - pattern: request.files
+          - pattern: request.get_json(...)
+          - pattern: request.GET
+          - pattern: request.POST
+          - pattern: request.query_params
+          - pattern: request.path_params
+      # FastAPI: a route handler's parameters are request data.
+      - patterns:
+          - pattern-inside: |
+              @$APP.$METHOD(...)
+              def $F(..., $P, ...):
+                ...
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: ^(get|post|put|patch|delete|api_route)$
+          - pattern: $P
+      - patterns:
+          - pattern-inside: |
+              @$APP.$METHOD(...)
+              async def $F(..., $P, ...):
+                ...
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: ^(get|post|put|patch|delete|api_route)$
+          - pattern: $P
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $CUR.execute($Q, ...)
+              - pattern: $CUR.executemany($Q, ...)
+              - pattern: $CUR.executescript($Q)
+              - pattern: sqlalchemy.text($Q)
+              - pattern: text($Q)
+              - pattern: $M.objects.raw($Q, ...)
+          - focus-metavariable: $Q
+    pattern-sanitizers:
+      - pattern: int(...)
+      - pattern: float(...)
+
+  - id: python-code-injection
+    mode: taint
+    languages: [python]
+    severity: ERROR
+    message: request data is evaluated as code
+    metadata: { category: code injection }
+    pattern-sources:
+      - pattern-either:
+          - pattern: flask.request.$ATTR
+          - pattern: request.args
+          - pattern: request.form
+          - pattern: request.values
+          - pattern: request.json
+          - pattern: request.data
+          - pattern: request.headers
+          - pattern: request.cookies
+          - pattern: request.files
+          - pattern: request.get_json(...)
+          - pattern: request.GET
+          - pattern: request.POST
+          - pattern: request.query_params
+          - pattern: request.path_params
+      # FastAPI: a route handler's parameters are request data.
+      - patterns:
+          - pattern-inside: |
+              @$APP.$METHOD(...)
+              def $F(..., $P, ...):
+                ...
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: ^(get|post|put|patch|delete|api_route)$
+          - pattern: $P
+      - patterns:
+          - pattern-inside: |
+              @$APP.$METHOD(...)
+              async def $F(..., $P, ...):
+                ...
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: ^(get|post|put|patch|delete|api_route)$
+          - pattern: $P
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: eval($X, ...)
+              - pattern: exec($X, ...)
+              - pattern: pickle.loads($X, ...)
+              - pattern: yaml.load($X)
+              - pattern: yaml.unsafe_load($X)
+          - focus-metavariable: $X
+
+  - id: python-sql-string-built
+    languages: [python]
+    severity: WARNING
+    message: a SQL statement is built by string formatting rather than passed parameters
+    metadata: { category: SQL injection }
+    patterns:
+      - pattern-either:
+          - pattern: $CUR.execute(f"...", ...)
+          - pattern: $CUR.execute("..." % $X, ...)
+          - pattern: $CUR.execute("...".format(...), ...)
+          - pattern: $CUR.execute("..." + $X, ...)
+          # `"a" + x + "b"` is `("a" + x) + "b"`: the literal is on the right of the outer `+`.
+          - pattern: $CUR.execute($X + "...", ...)
+          - pattern: text(f"...")
+          - pattern: text("..." + $X)
+          - pattern: text($X + "...")
+
+  - id: python-shell-nonliteral
+    languages: [python]
+    severity: WARNING
+    message: a shell command is built from a value that is not a literal
+    metadata: { category: command injection }
+    patterns:
+      - pattern-either:
+          - pattern: subprocess.$FN($CMD, ..., shell=True, ...)
+          - pattern: os.system($CMD)
+      - pattern-not: subprocess.$FN("...", ..., shell=True, ...)
+      - pattern-not: os.system("...")

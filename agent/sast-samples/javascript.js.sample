@@ -1,0 +1,76 @@
+const express = require("express");
+const { exec, execFile } = require("child_process");
+const { Pool } = require("pg");
+
+const app = express();
+const pool = new Pool();
+
+app.get("/ping", (req, res) => {
+  // ruleid: javascript-command-injection, javascript-shell-nonliteral
+  exec(`ping -c1 ${req.query.host}`, (err, out) => res.send(out));
+});
+
+app.get("/ping-safe", (req, res) => {
+  // ok: javascript-command-injection
+  execFile("ping", ["-c1", req.query.host], (err, out) => res.send(out));
+});
+
+app.get("/user", async (req, res) => {
+  // ruleid: javascript-sql-injection, javascript-sql-string-built
+  const r = await pool.query(`SELECT * FROM users WHERE name = '${req.query.n}'`);
+  res.json(r.rows);
+});
+
+app.get("/user-safe", async (req, res) => {
+  // ok: javascript-sql-injection, javascript-sql-string-built
+  const r = await pool.query("SELECT * FROM users WHERE name = $1", [req.query.n]);
+  res.json(r.rows);
+});
+
+app.get("/page", async (req, res) => {
+  const limit = parseInt(req.query.limit, 10);
+  // A sanitised value: the flow is not flagged; the construction still is.
+  // ok: javascript-sql-injection
+  // ruleid: javascript-sql-string-built
+  const r = await pool.query(`SELECT * FROM users LIMIT ${limit}`);
+  res.json(r.rows);
+});
+
+app.post("/calc", (req, res) => {
+  // ruleid: javascript-code-injection
+  res.send(String(eval(req.body.expr)));
+});
+
+app.get("/match", (req, res) => {
+  const re = /^[a-z]+$/;
+  // ok: javascript-command-injection
+  res.send(String(re.exec(req.query.s)));
+});
+
+function report(table) {
+  // ok: javascript-sql-injection
+  // ruleid: javascript-sql-string-built
+  return pool.query(`SELECT count(*) FROM ${table}`);
+}
+
+app.get("/destructured", (req, res) => {
+  const { host } = req.query;
+  // ruleid: javascript-command-injection, javascript-shell-nonliteral
+  exec("ping -c1 " + host);
+});
+
+app.get("/via-helper", (req, res) => {
+  ping(req.query.host);
+});
+
+function ping(host) {
+  // Not followed across the call; the construction is reported on its own.
+  // ok: javascript-command-injection
+  // ruleid: javascript-shell-nonliteral
+  exec("ping -c1 " + host);
+}
+
+function housekeeping() {
+  // ok: javascript-command-injection, javascript-shell-nonliteral
+  exec("rm -rf /tmp/cache");
+}

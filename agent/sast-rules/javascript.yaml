@@ -1,0 +1,164 @@
+# Injection rules for JavaScript and TypeScript, written for agent-gate. See python.yaml for the split
+# between blocking taint rules and advisory pattern rules.
+rules:
+  - id: javascript-command-injection
+    mode: taint
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: request data reaches a shell command
+    metadata: { category: command injection }
+    pattern-sources:
+      - pattern-either:
+          - pattern: $REQ.query
+          - pattern: $REQ.body
+          - pattern: $REQ.params
+          - pattern: $REQ.headers
+          - pattern: $REQ.cookies
+          - pattern: $REQ.url
+          - pattern: $URL.searchParams.get(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: require("child_process").exec($CMD, ...)
+              - pattern: require("child_process").execSync($CMD, ...)
+              - pattern: child_process.exec($CMD, ...)
+              - pattern: child_process.execSync($CMD, ...)
+              - patterns:
+                  - pattern-inside: |
+                      import { ..., exec, ... } from "child_process";
+                      ...
+                  - pattern: exec($CMD, ...)
+              - patterns:
+                  - pattern-inside: |
+                      import { ..., execSync, ... } from "child_process";
+                      ...
+                  - pattern: execSync($CMD, ...)
+              - patterns:
+                  - pattern-inside: |
+                      const { ..., exec, ... } = require("child_process");
+                      ...
+                  - pattern: exec($CMD, ...)
+              - patterns:
+                  - pattern-inside: |
+                      const { ..., execSync, ... } = require("child_process");
+                      ...
+                  - pattern: execSync($CMD, ...)
+              - pattern: '$CP.spawn($CMD, $ARGS, {..., shell: true, ...})'
+              - pattern: '$CP.spawnSync($CMD, $ARGS, {..., shell: true, ...})'
+          - focus-metavariable: $CMD
+
+  - id: javascript-sql-injection
+    mode: taint
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: request data is built into a SQL statement
+    metadata: { category: SQL injection }
+    pattern-sources:
+      - pattern-either:
+          - pattern: $REQ.query
+          - pattern: $REQ.body
+          - pattern: $REQ.params
+          - pattern: $REQ.headers
+          - pattern: $REQ.cookies
+          - pattern: $REQ.url
+          - pattern: $URL.searchParams.get(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $DB.query($Q, ...)
+              - pattern: $DB.execute($Q, ...)
+              - pattern: $DB.raw($Q, ...)
+              - pattern: $DB.$queryRawUnsafe($Q, ...)
+              - pattern: $DB.$executeRawUnsafe($Q, ...)
+          - focus-metavariable: $Q
+          # A template literal handed to a tagged query helper is parameterised, not concatenated.
+          - pattern-not: sql`...`
+    pattern-sanitizers:
+      - pattern: parseInt(...)
+      - pattern: Number(...)
+
+  - id: javascript-code-injection
+    mode: taint
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: request data is evaluated as code
+    metadata: { category: code injection }
+    pattern-sources:
+      - pattern-either:
+          - pattern: $REQ.query
+          - pattern: $REQ.body
+          - pattern: $REQ.params
+          - pattern: $REQ.headers
+          - pattern: $REQ.cookies
+          - pattern: $REQ.url
+          - pattern: $URL.searchParams.get(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: eval($X)
+              - pattern: new Function(..., $X)
+              - pattern: Function(..., $X)
+              - pattern: $VM.runInNewContext($X, ...)
+              - pattern: $VM.runInThisContext($X, ...)
+          - focus-metavariable: $X
+
+  - id: javascript-sql-string-built
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: a SQL statement is built by string concatenation or interpolation rather than passed parameters
+    metadata: { category: SQL injection }
+    patterns:
+      - pattern-either:
+          - pattern: $DB.query(`...${$X}...`, ...)
+          - pattern: $DB.query("..." + $X, ...)
+          - pattern: $DB.query($X + "...", ...)
+          - pattern: $DB.execute(`...${$X}...`, ...)
+          - pattern: $DB.execute("..." + $X, ...)
+          - pattern: $DB.execute($X + "...", ...)
+      - metavariable-regex:
+          metavariable: $DB
+          regex: (?i)(db|pool|client|conn|connection|knex|sequelize|pg|mysql|sqlite|database)
+
+  # Request data that crosses a function boundary is not followed by the taint rule above -- Semgrep's
+  # open-source taint analysis is intraprocedural -- so the construction is reported on its own.
+  - id: javascript-shell-nonliteral
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: a shell command is built from a value that is not a literal
+    metadata: { category: command injection }
+    patterns:
+      - pattern-either:
+          - pattern: require("child_process").exec($CMD, ...)
+          - pattern: require("child_process").execSync($CMD, ...)
+          - pattern: child_process.exec($CMD, ...)
+          - pattern: child_process.execSync($CMD, ...)
+          - patterns:
+              - pattern-inside: |
+                  import { ..., exec, ... } from "child_process";
+                  ...
+              - pattern: exec($CMD, ...)
+          - patterns:
+              - pattern-inside: |
+                  import { ..., execSync, ... } from "child_process";
+                  ...
+              - pattern: execSync($CMD, ...)
+          - patterns:
+              - pattern-inside: |
+                  const { ..., exec, ... } = require("child_process");
+                  ...
+              - pattern: exec($CMD, ...)
+          - patterns:
+              - pattern-inside: |
+                  const { ..., execSync, ... } = require("child_process");
+                  ...
+              - pattern: execSync($CMD, ...)
+          - pattern: '$CP.spawn($CMD, $ARGS, {..., shell: true, ...})'
+          - pattern: '$CP.spawnSync($CMD, $ARGS, {..., shell: true, ...})'
+      # A literal command -- a string, or a template with no substitutions -- is not built from anything.
+      - metavariable-pattern:
+          metavariable: $CMD
+          patterns:
+            - pattern: $X
+            - pattern-not: '"..."'
+            - pattern-not: '`...`'
+      - focus-metavariable: $CMD

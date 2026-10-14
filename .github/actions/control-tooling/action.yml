@@ -56,6 +56,12 @@ runs:
       shell: bash
       run: pipx install ruff==0.16.2
 
+    # The sast validator's engine. It runs this repository's own rules from agent/sast-rules, never
+    # the registry's, so nothing is fetched at scan time.
+    - name: semgrep
+      shell: bash
+      run: pipx install semgrep==1.180.0
+
     # The `tests` validator runs a Python suite with `python3 -m pytest`, so pytest has to be
     # IMPORTABLE by that interpreter -- a pipx install gives a binary and not an import, which is
     # the whole reason this is pip and the others are pipx. Without it the corpus's Python fixture
@@ -97,6 +103,7 @@ runs:
         check osv-scanner "2.4.0"  --version
         check checkov     "3.3.10" --version
         check ruff        "0.16.2" --version
+        check semgrep     "1.180.0" --version
         # Not `check pytest`: the gate probes `python3 -m pytest`, and a console script on PATH is
         # a different fact from the module being importable by that interpreter. Verify what the
         # gate actually does.

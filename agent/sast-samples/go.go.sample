@@ -1,0 +1,54 @@
+package main
+
+import (
+	"database/sql"
+	"fmt"
+	"log"
+	"net/http"
+	"os/exec"
+	"strconv"
+)
+
+var db *sql.DB
+
+func ping(w http.ResponseWriter, r *http.Request) {
+	host := r.URL.Query().Get("host")
+	// ruleid: go-command-injection
+	out, _ := exec.Command("sh", "-c", "ping -c1 "+host).Output()
+	w.Write(out)
+}
+
+func pingSafe(w http.ResponseWriter, r *http.Request) {
+	host := r.URL.Query().Get("host")
+	// ok: go-command-injection
+	out, _ := exec.Command("ping", "-c1", host).Output()
+	w.Write(out)
+}
+
+func user(w http.ResponseWriter, r *http.Request) {
+	name := r.FormValue("n")
+	// ruleid: go-sql-injection, go-sql-string-built
+	rows, _ := db.Query(fmt.Sprintf("SELECT * FROM users WHERE name = '%s'", name))
+	defer rows.Close()
+}
+
+func userSafe(w http.ResponseWriter, r *http.Request) {
+	name := r.FormValue("n")
+	// ok: go-sql-injection, go-sql-string-built
+	rows, _ := db.Query("SELECT * FROM users WHERE name = $1", name)
+	defer rows.Close()
+}
+
+func page(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	// A sanitised value: the flow is not flagged; the construction still is.
+	// ok: go-sql-injection
+	// ruleid: go-sql-string-built
+	rows, _ := db.Query(fmt.Sprintf("SELECT * FROM users LIMIT %d", limit))
+	defer rows.Close()
+}
+
+func logIt(r *http.Request) {
+	// ok: go-sql-string-built
+	log.Println(fmt.Sprintf("request from %s", r.RemoteAddr))
+}

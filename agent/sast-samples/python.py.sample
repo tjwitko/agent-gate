@@ -1,0 +1,98 @@
+import os
+import sqlite3
+import subprocess
+
+from fastapi import FastAPI, Query
+from flask import Flask, request
+from sqlalchemy import text
+
+app = Flask(__name__)
+api = FastAPI()
+db = sqlite3.connect("x.db")
+
+
+@app.get("/ping")
+def ping():
+    host = request.args["host"]
+    # ruleid: python-command-injection, python-shell-nonliteral
+    return subprocess.run("ping -c1 " + host, shell=True, capture_output=True).stdout
+
+
+@app.get("/ping-safe")
+def ping_safe():
+    host = request.args["host"]
+    # ok: python-command-injection, python-shell-nonliteral
+    return subprocess.run(["ping", "-c1", host], capture_output=True).stdout
+
+
+@app.get("/user")
+def user():
+    name = request.args.get("n")
+    # ruleid: python-sql-injection, python-sql-string-built
+    return str(db.execute(f"SELECT * FROM users WHERE name = '{name}'").fetchall())
+
+
+@app.get("/user-safe")
+def user_safe():
+    name = request.args.get("n")
+    # ok: python-sql-injection, python-sql-string-built
+    return str(db.execute("SELECT * FROM users WHERE name = ?", (name,)).fetchall())
+
+
+@app.get("/count")
+def count():
+    limit = int(request.args["limit"])
+    # A sanitised value: the flow is not flagged; the construction still is.
+    # ok: python-sql-injection
+    # ruleid: python-sql-string-built
+    return str(db.execute("SELECT * FROM users LIMIT %d" % limit).fetchall())
+
+
+@app.post("/calc")
+def calc():
+    # ruleid: python-code-injection
+    return str(eval(request.json["expr"]))
+
+
+@api.get("/items")
+async def items(q: str):
+    # ruleid: python-sql-injection, python-sql-string-built
+    return db.execute(text(f"SELECT * FROM items WHERE name = '{q}'"))
+
+
+@api.get("/run")
+def run(cmd: str):
+    # ruleid: python-command-injection, python-shell-nonliteral
+    os.system("echo " + cmd)
+
+
+def report(table):
+    # No request data anywhere: the construction is flagged, the flow is not.
+    # ok: python-sql-injection
+    # ruleid: python-sql-string-built
+    return db.execute(f"SELECT count(*) FROM {table}")
+
+
+def cleanup():
+    # ok: python-command-injection, python-shell-nonliteral
+    os.system("rm -rf /tmp/cache")
+
+
+@api.get("/trace")
+def trace(host: str = Query(...)):
+    cmd = "traceroute %s" % host
+    # ruleid: python-command-injection, python-shell-nonliteral
+    subprocess.check_output(cmd, shell=True)
+
+
+def lookup(name):
+    # Request data that arrives through a call is not followed -- open-source Semgrep's taint analysis
+    # stays inside one function -- so only the construction is reported here.
+    # ok: python-sql-injection
+    # ruleid: python-sql-string-built
+    return db.execute("SELECT * FROM u WHERE n='" + name + "'")
+
+
+@api.post("/lookup")
+def lookup_route(payload: dict):
+    return lookup(payload["name"])

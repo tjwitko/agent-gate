@@ -122,6 +122,7 @@ function toolchain() {
     checkov: probe("checkov", ["--version"], /(\d+\.\d+\.\d+)/),
     python3: probe("python3", ["--version"], /(\d+\.\d+\.\d+)/),
     ruff: probe("ruff", ["--version"], /(\d+\.\d+\.\d+)/),
+    semgrep: probe("semgrep", ["--version"], /(\d+\.\d+\.\d+)/),
     // `python3 -m pytest`, not the console script: that is what the tests validator probes, and a
     // binary on PATH is a different fact from the module being importable by this interpreter.
     // Recorded because it decides whether a Python fixture's suite runs at all -- the same thing

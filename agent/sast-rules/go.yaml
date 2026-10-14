@@ -1,0 +1,100 @@
+# Injection rules for Go, written for agent-gate. See python.yaml for the split between blocking taint
+# rules and advisory pattern rules.
+rules:
+  - id: go-command-injection
+    mode: taint
+    languages: [go]
+    severity: ERROR
+    message: request data reaches a shell command
+    metadata: { category: command injection }
+    pattern-sources:
+      - patterns:
+          - pattern-inside: |
+              func $F(..., $R *http.Request, ...) {
+                ...
+              }
+          - pattern-either:
+              - pattern: $R.URL.Query()
+              - pattern: $R.URL.Path
+              - pattern: $R.FormValue(...)
+              - pattern: $R.PostFormValue(...)
+              - pattern: $R.Header.Get(...)
+              - pattern: $R.Body
+              - pattern: $R.PathValue(...)
+      - patterns:
+          - pattern-inside: |
+              func $F(..., $C *gin.Context, ...) {
+                ...
+              }
+          - pattern-either:
+              - pattern: $C.Query(...)
+              - pattern: $C.Param(...)
+              - pattern: $C.PostForm(...)
+              - pattern: $C.GetHeader(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: exec.Command("sh", "-c", $CMD, ...)
+              - pattern: exec.Command("bash", "-c", $CMD, ...)
+              - pattern: exec.Command("/bin/sh", "-c", $CMD, ...)
+              - pattern: exec.CommandContext($CTX, "sh", "-c", $CMD, ...)
+              - pattern: exec.CommandContext($CTX, "bash", "-c", $CMD, ...)
+          - focus-metavariable: $CMD
+
+  - id: go-sql-injection
+    mode: taint
+    languages: [go]
+    severity: ERROR
+    message: request data is built into a SQL statement
+    metadata: { category: SQL injection }
+    pattern-sources:
+      - patterns:
+          - pattern-inside: |
+              func $F(..., $R *http.Request, ...) {
+                ...
+              }
+          - pattern-either:
+              - pattern: $R.URL.Query()
+              - pattern: $R.URL.Path
+              - pattern: $R.FormValue(...)
+              - pattern: $R.PostFormValue(...)
+              - pattern: $R.Header.Get(...)
+              - pattern: $R.Body
+              - pattern: $R.PathValue(...)
+      - patterns:
+          - pattern-inside: |
+              func $F(..., $C *gin.Context, ...) {
+                ...
+              }
+          - pattern-either:
+              - pattern: $C.Query(...)
+              - pattern: $C.Param(...)
+              - pattern: $C.PostForm(...)
+              - pattern: $C.GetHeader(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $DB.Query($Q, ...)
+              - pattern: $DB.QueryRow($Q, ...)
+              - pattern: $DB.Exec($Q, ...)
+              - pattern: $DB.QueryContext($CTX, $Q, ...)
+              - pattern: $DB.QueryRowContext($CTX, $Q, ...)
+              - pattern: $DB.ExecContext($CTX, $Q, ...)
+          - focus-metavariable: $Q
+    pattern-sanitizers:
+      - pattern: strconv.Atoi(...)
+
+  - id: go-sql-string-built
+    languages: [go]
+    severity: WARNING
+    message: a SQL statement is built with fmt.Sprintf or concatenation rather than passed parameters
+    metadata: { category: SQL injection }
+    patterns:
+      - pattern-either:
+          - pattern: $DB.$M(fmt.Sprintf(...), ...)
+          - pattern: $DB.$M($CTX, fmt.Sprintf(...), ...)
+          - pattern: $DB.$M("..." + $X, ...)
+      # Only the database methods; Sprintf into a logger is not a query.
+      - metavariable-regex:
+          metavariable: $M
+          regex: ^(Query|QueryRow|Exec|QueryContext|QueryRowContext|ExecContext)$

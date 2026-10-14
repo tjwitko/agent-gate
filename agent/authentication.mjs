@@ -1083,6 +1083,7 @@ export function checkAuthentication(projectDir) {
   }
 
   const routes = [];
+  const exempt = [];
   const languages = [];
   let leakySignature = false;
   let leakyCredential = false;   // { name, language, at } once found
@@ -1102,7 +1103,20 @@ export function checkAuthentication(projectDir) {
     let found = 0;
     for (const file of adapterFiles) {
       for (const r of adapter.routes(file.text)) {
-        if (OPEN_BY_CONVENTION.test(r.route) || CREDENTIAL_ISSUING.test(r.route)) continue;
+        // Exempt by path, and recorded rather than dropped. These were skipped silently, so a
+        // `/ping` that took a request parameter and passed it to a shell went unmentioned, and the
+        // finding counted "1 of 1 endpoint(s)" in a file declaring two. The path is chosen by
+        // whoever writes the code; the reader is owed the list of what was not looked at.
+        if (OPEN_BY_CONVENTION.test(r.route) || CREDENTIAL_ISSUING.test(r.route)) {
+          exempt.push({
+            file: file.rel,
+            method: r.method,
+            route: r.route,
+            line: r.line,
+            why: OPEN_BY_CONVENTION.test(r.route) ? "probe" : "issues a credential",
+          });
+          continue;
+        }
         found++;
         routes.push({
           file: file.rel,
@@ -1121,13 +1135,16 @@ export function checkAuthentication(projectDir) {
     return {
       ran: true,
       routes: [],
+      exempt,
       languages: [],
-      unknown:
-        "no HTTP routes were identified, so nothing was checked. If this service exposes endpoints, " +
-        "they are declared in a form this check does not recognise",
+      unknown: exempt.length
+        ? `the only routes identified are exempt by name, so nothing was checked — ${exemptList(exempt)}. ` +
+          `If any of them does more than report status or issue a credential, it needs authentication like any other`
+        : "no HTTP routes were identified, so nothing was checked. If this service exposes endpoints, " +
+          "they are declared in a form this check does not recognise",
     };
   }
-  return { ran: true, routes, languages, leakySignature, leakyCredential, vacuousCredentials: [...vacuous.keys()], vacuousAt: Object.fromEntries(vacuous), unknown: null };
+  return { ran: true, routes, exempt, languages, leakySignature, leakyCredential, vacuousCredentials: [...vacuous.keys()], vacuousAt: Object.fromEntries(vacuous), unknown: null };
 }
 
 // The advice has to be in the language that matched. The first version of these messages said
@@ -1147,11 +1164,24 @@ const UNSET = {
 const where = (at) =>
   at && at.length ? ` (${at.slice(0, 3).join(", ")}${at.length > 3 ? `, +${at.length - 3} more` : ""})` : "";
 
+const exemptList = (exempt) =>
+  exempt.map((r) => `${r.method} ${r.route} (${r.file}:${r.line}, ${r.why})`).join(", ");
+
 /** Blocking failures for the gate. */
 export function authenticationFailures(projectDir) {
   const report = checkAuthentication(projectDir);
   if (!report.ran) return { failures: [], advisories: [`authentication: not checked — ${report.unknown}`] };
   if (report.unknown) return { failures: [], advisories: [`authentication: ${report.unknown}`] };
+
+  const exempt = report.exempt || [];
+  const exemptAdvisories = exempt.length
+    ? [
+        `authentication: ${exempt.length} route(s) exempt by name, not checked — ${exemptList(exempt)}. ` +
+          `Probe paths (/health, /ping, /metrics and the like) are expected to be open, and an endpoint ` +
+          `that issues a credential cannot require it first. The exemption is by path alone: a route with ` +
+          `one of these names that reads request input or changes state needs authentication like any other.`,
+      ]
+    : [];
 
   // Reported whether or not any route is open, and separately from the open-route finding: a
   // service can authenticate every endpoint and still have a leaky comparison in the one control
@@ -1202,7 +1232,7 @@ export function authenticationFailures(projectDir) {
   }
 
   const open = report.routes.filter((r) => !r.protectedBy);
-  if (open.length === 0) return { failures: timing, advisories: [] };
+  if (open.length === 0) return { failures: timing, advisories: exemptAdvisories };
 
   const list = open.map((r) => `${r.method} ${r.route} (${r.file}:${r.line})`).join(", ");
   const someProtected = report.routes.some((r) => r.protectedBy);
@@ -1212,7 +1242,9 @@ export function authenticationFailures(projectDir) {
     failures: [
       ...timing,
       `authentication: ${open.length} of ${report.routes.length} endpoint(s) accept requests from ` +
-        `anyone who can reach the service — ${list}.\n` +
+        `anyone who can reach the service — ${list}.` +
+        (exempt.length ? ` ${exempt.length} more ${exempt.length === 1 ? "is" : "are"} exempt by name and listed separately.` : "") +
+        `\n` +
         (someProtected
           ? `Other routes here are authenticated, so this is a gap rather than an omission: an ` +
             `attacker uses the unprotected one. `
@@ -1223,6 +1255,6 @@ export function authenticationFailures(projectDir) {
         `caller identity on every route — ${idioms.join("; or ")}. Health and readiness probes are ` +
         `exempt and need no change, as are endpoints whose job is to issue a credential.`,
     ],
-    advisories: [],
+    advisories: exemptAdvisories,
   };
 }

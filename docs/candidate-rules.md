@@ -812,19 +812,28 @@ names one, and nothing reads it. checkov, already installed for Terraform, has a
 framework, so the cheap half needs no new tool. Scanning the built image (Trivy, Grype) needs a build
 or a pull, so it would be opt-in, for CI.
 
-### 11. Exemptions and coverage gaps are silent
+### 11. Exemptions and coverage gaps are silent — fixed
 
 Two instances of one shape: the gate decided not to look, and said so nowhere a reader would see.
 
-- **Authentication exempts routes by path.** `/ping`, `/health`, `/metrics` and similar are open by
-  convention. A probe's `/ping` took a request parameter and passed it to a shell; it was exempt,
-  and the finding read "1 of 1 endpoint(s)" without mentioning the second. The path is chosen by
-  whoever writes the code.
-- **A project in a language no check reads exits 0.** A Rust probe passed, and each check's
-  "not checked — no source files in a language this check recognises" was an advisory among others.
+- **Authentication exempted routes by path, silently.** `/ping`, `/health`, `/metrics` and similar
+  are open by convention, and login and token endpoints cannot require the credential they issue. A
+  probe's `/ping` took a request parameter and passed it to a shell; it was skipped, and the finding
+  read "1 of 1 endpoint(s)" in a file declaring two. A service whose *only* routes were exempt was
+  told "no HTTP routes were identified", which was false. Now every exempt route is listed by method,
+  path, file, line and reason, the finding says how many were left out, and the all-exempt case says
+  what it found. The exemptions themselves are unchanged: a liveness probe that requires a credential
+  still fails, and a check that blocks on it would be switched off.
+- **A project in a language no check reads exited 0** with each check's "not checked" as one
+  advisory among several. The CLI and the Action now print a NOT READ line above the verdict, naming
+  the languages and file counts — in capitals when they are most of the source. Not exit 3: the
+  project-wide scans (secrets, dependencies, infrastructure) did run; the gate could not read the
+  code it was given, and the reader is owed that before the verdict, not after it. Shell is
+  deliberately not counted; a line on every repository is a line nobody reads.
 
-Planned: report exemptions by route, and put a coverage line in the summary when most of the source
-is in a language no check reads.
+A consequence worth knowing: a requirement stated in the task or a baseline — "include unit tests" —
+cannot be enforced on code no check reads. On a Rust project it reports "not executed" rather than
+blocking. The NOT READ line is what makes that visible.
 
 ### 12. Considered and deferred
 

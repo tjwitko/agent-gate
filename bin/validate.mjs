@@ -18,6 +18,7 @@ import path from "path";
 import { readFileSync, realpathSync, existsSync, statSync } from "fs";
 import { fileURLToPath } from "url";
 import { loadRequirements, checkBaselineInput } from "../lib/requirements.mjs";
+import { sourceCoverage, coverageLine } from "../agent/coverage.mjs";
 
 import { validateProject, localTools, McpClient } from "../lib/gate-core.mjs";
 import { resolveControls, readConfig, CONFIG_FILE } from "../lib/resolve-controls.mjs";
@@ -143,6 +144,7 @@ export async function runGate(projectDirArg, taskFile, { env = process.env, preC
     projectDir,
     taskFile: taskFile || null,
     baseline: requirements.baseline,
+    coverage: sourceCoverage(projectDir),
     configError,
     controls,
     ran: r.ran,
@@ -184,6 +186,10 @@ function human(result) {
     out.push("   indistinguishable from a server that found nothing.");
     out.push("");
   }
+  // Above the verdict for the same reason as the lines before it: a Rust project exited 0, and the
+  // only sign that none of its code was read was one advisory among several.
+  const notRead = coverageLine(result.coverage);
+  if (notRead) out.push(`!! ${notRead}\n`);
 
   if (result.couldNotRun.length) {
     out.push(`!! ${result.couldNotRun.length} CHECK(S) COULD NOT RUN — this run is INCOMPLETE`);
@@ -214,6 +220,8 @@ function machine(result) {
       project: result.projectDir,
       taskFile: result.taskFile,
       baseline: result.baseline,
+      notRead: result.coverage.unread,
+      coverage: coverageLine(result.coverage),
       exitCode: result.exitCode,
       incomplete: result.incomplete,
       blocking: result.failures.length,

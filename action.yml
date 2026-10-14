@@ -130,6 +130,7 @@ runs:
           // directory the project exempted were indistinguishable from silence. That is the
           // failure this control set exists to remove, in its own output.
           for (const c of r.couldNotRun || []) console.log(`COULD NOT RUN : ${c}`);
+          if (r.coverage) console.log(`NOT READ      : ${r.coverage}`);
           for (const i of r.notApplicable || []) console.log(`not applicable: ${i.tool} — ${i.why}`);
           for (const e of r.exempt || []) console.log(`exempt        : ${e.path} — ${e.reason} (${e.marker})`);
           console.log(`\nBLOCKING : ${r.blocking}${r.incomplete ? " FROM THE CHECKS THAT RAN" : ""}\n`);

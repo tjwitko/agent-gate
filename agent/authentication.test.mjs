@@ -113,6 +113,50 @@ test("health and readiness probes are exempt", () => {
   assert.deepEqual(failures, []);
 });
 
+// Exempt is not invisible. A probe's /ping took a request parameter and passed it to a shell; it was
+// skipped by name, and the finding counted "1 of 1 endpoint(s)" in a file declaring two.
+test("exempt routes are named, with why, beside the finding", () => {
+  const { failures, advisories } = run(
+    {
+      "app.py":
+        "@app.get('/ping')\ndef ping():\n    return subprocess.run('ping -c1 ' + request.args['host'], shell=True)\n\n" +
+        "@app.post('/login')\ndef login():\n    pass\n\n" +
+        "@app.get('/user')\ndef user():\n    pass\n",
+    },
+    authenticationFailures
+  );
+  assert.equal(failures.length, 1);
+  assert.match(failures[0], /1 of 1 endpoint\(s\).*2 more are exempt by name/);
+  assert.equal(advisories.length, 1);
+  assert.match(advisories[0], /2 route\(s\) exempt by name, not checked/);
+  assert.match(advisories[0], /GET \/ping \(app\.py:1, probe\)/);
+  assert.match(advisories[0], /POST \/login \(app\.py:\d+, issues a credential\)/);
+});
+
+test("exemptions are reported when every other route is protected, too", () => {
+  const { failures, advisories } = run(
+    {
+      "app/main.py":
+        "app = FastAPI(dependencies=[Depends(verify_api_key)])\n\n" +
+        "@app.get('/health')\ndef health():\n    pass\n\n@app.get('/logs')\ndef logs():\n    pass\n",
+    },
+    authenticationFailures
+  );
+  assert.deepEqual(failures, []);
+  assert.match(advisories.join("\n"), /GET \/health \(app\/main\.py:3, probe\)/);
+});
+
+// It said "no HTTP routes were identified", which was false: they were identified, then skipped.
+test("a service whose only routes are exempt says so, rather than that it found none", () => {
+  const { failures, advisories } = run(
+    { "app.py": "@app.get('/ping')\ndef ping():\n    pass\n" },
+    authenticationFailures
+  );
+  assert.deepEqual(failures, []);
+  assert.match(advisories[0], /the only routes identified are exempt by name.*GET \/ping \(app\.py:1, probe\)/);
+  assert.doesNotMatch(advisories[0], /no HTTP routes were identified/);
+});
+
 // Narrow on purpose: an ordinary header is not a credential, and a check that says otherwise
 // reports every route as protected.
 test("an ordinary header is not authentication", () => {

@@ -572,6 +572,16 @@ somewhere stale.
 **`exit 3` and "COULD NOT RUN"** — a scanner is missing from `PATH`. The message names the binary.
 Install it and re-run; the verdict before it was installed proves nothing about your code.
 
+**"NOT READ" above the verdict** — part of the project is in a language no language-aware check reads
+(Rust, PHP, C#, Kotlin, Swift, C/C++, Scala, Elixir, Dart, Lua, Perl, JSX, Vue, Svelte). The
+verdict says nothing about that code: only the project-wide scans — secrets, dependencies,
+infrastructure — apply to it, and a requirement like "include unit tests" cannot be enforced on it.
+
+**Routes "exempt by name"** — the authentication check leaves probe paths (`/health`, `/ping`,
+`/metrics`…) and credential-issuing endpoints (`/login`, `/token`…) open, and lists each one it
+skipped. The exemption is by path alone, so check the list: a route with one of those names that
+reads input or changes state needs authentication like any other.
+
 **"declare dependencies that no scanner read"** — `osv-scanner` reads lockfiles, and of manifests
 only `requirements*.txt`, `go.mod` and `pom.xml`. A `package.json`, `Cargo.toml`, `pyproject.toml`,
 `Pipfile`, `build.gradle`, `Gemfile` or `composer.json` that declares dependencies is scanned through

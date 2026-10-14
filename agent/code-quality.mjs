@@ -62,13 +62,11 @@ const TASK_WANTS_ERROR_DISTINCTION = taskMatcher({
 const TEST_FILENAME = /(^|[\/._-])(tests?|spec)([._-]|$)|_test\.(go|py|rb)$|\.(test|spec)\.(js|mjs|ts|tsx)$/i;
 const ASSERTION = /\bassert\w*\s*[(\s]|\bexpect\s*\(|\brequire\.\w+\s*\(|\bt\.(Error|Fatal)f?\s*\(|\bshould\b|\.to(Be|Equal|Throw)\b/;
 
-// A handler that catches broadly and re-raises as a server fault. Observed in four separate
-// deliverables: `except Exception` swallows the HTTPException(400) raised a few lines above and
-// re-raises it as a 500, so a malformed request from the caller is reported as our own failure —
-// and in three of the four, the intended status leaked into the message as "400: Missing event id".
-const PY_BROAD_CATCH = /except\s+Exception[^\n]*:\s*\n([\s\S]{0,400}?)(?=\n\S|\n\s*except|\n\s*$)/g;
-const RAISES_SERVER_FAULT = /status_code\s*=\s*5\d\d|HTTPException\s*\(\s*5\d\d|abort\s*\(\s*5\d\d/;
-const RERAISES_DETAIL = /detail\s*=\s*(?:str\s*\(\s*e\s*\)|f?["'`][^"'`]*\{e\})/;
+// Broad handlers that turn a client error into a 500 were detected here by regex until 2026-10-14.
+// It flagged any `except Exception` that raised a 5xx -- including the corrected code its own message
+// recommended, with `except HTTPException: raise` first, and catch-alls around code that raises no
+// client error at all. It is now a Semgrep rule (agent/sast-rules/python-errors.yaml) reported by the
+// sast validator, under the same task gate.
 
 // A test that patches something the module does not have fails the moment it runs, and looks
 // entirely reasonable until then. One deliverable patched `app.main.SECRET_KEY` against a module
@@ -175,7 +173,7 @@ export function taskWantsErrorDistinction(taskText = "") {
 
 export function checkCodeQuality(projectDir, taskText = "") {
   const files = walk(projectDir, CODE_EXT);
-  if (files.length === 0) return { ran: false, unknown: "no source files to read", tests: [], swallowing: [] };
+  if (files.length === 0) return { ran: false, unknown: "no source files to read", tests: [] };
 
   const tests = files.filter((f) => TEST_FILENAME.test(f.rel) && ASSERTION.test(f.text));
 
@@ -189,20 +187,6 @@ export function checkCodeQuality(projectDir, taskText = "") {
   }
   const reach = testsReachingProject(tests, files, pkgName);
   const namedOnly = files.filter((f) => TEST_FILENAME.test(f.rel) && !ASSERTION.test(f.text));
-
-  const swallowing = [];
-  for (const f of files) {
-    if (!f.rel.endsWith(".py")) continue;
-    PY_BROAD_CATCH.lastIndex = 0;
-    let m;
-    while ((m = PY_BROAD_CATCH.exec(f.text))) {
-      const body = m[1] || "";
-      if (RAISES_SERVER_FAULT.test(body)) {
-        const line = f.text.slice(0, m.index).split("\n").length;
-        swallowing.push({ file: f.rel, line, leaksDetail: RERAISES_DETAIL.test(body) });
-      }
-    }
-  }
 
   // Patch targets that name an attribute the module does not define.
   const badPatches = [];
@@ -223,7 +207,7 @@ export function checkCodeQuality(projectDir, taskText = "") {
     }
   }
 
-  return { ran: true, unknown: null, tests, namedOnly, swallowing, badPatches, reach };
+  return { ran: true, unknown: null, tests, namedOnly, badPatches, reach };
 }
 
 /** Blocking when the task asks for the property; silent otherwise. */
@@ -296,24 +280,6 @@ export function codeQualityFailures(projectDir, taskText = "") {
         `unittest.mock.patch raises AttributeError at run time when the attribute is absent, so ` +
         `these tests fail the moment anyone runs them while reading as thorough coverage. Either ` +
         `the name is wrong, or the test was written against an interface the module never had.`
-    );
-  }
-
-  if (taskWantsErrorDistinction(taskText) && r.swallowing.length > 0) {
-    const list = r.swallowing.map((s) => `${s.file}:${s.line}`).join(", ");
-    const leaks = r.swallowing.filter((s) => s.leaksDetail).length;
-    failures.push(
-      `code quality: ${r.swallowing.length} broad exception handler(s) turn a caller's mistake into ` +
-        `a server fault — ${list}.\n` +
-        `\`except Exception\` catches the HTTPException your own code raised a few lines earlier, so ` +
-        `a malformed request comes back as 5xx instead of 4xx. The caller is told the service is ` +
-        `broken when the request was; a payment provider seeing 5xx will retry a request that can ` +
-        `never succeed.` +
-        (leaks
-          ? ` ${leaks} of them also pass the original exception into the response body, leaking the ` +
-            `intended status and internal detail to the caller.`
-          : "") +
-        ` Re-raise HTTPException untouched and catch only what you can actually handle.`
     );
   }
 

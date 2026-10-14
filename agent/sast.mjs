@@ -29,6 +29,7 @@ import { fileURLToPath } from "url";
 
 import { SKIP_DIRS } from "./skip-dirs.mjs";
 import { isDeclaredFixture } from "./fixture-markers.mjs";
+import { taskWantsErrorDistinction } from "./code-quality.mjs";
 
 const RULES = fileURLToPath(new URL("./sast-rules/", import.meta.url));
 export const SAST_EXT = new Set([".py", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".go"]);
@@ -97,14 +98,35 @@ function run(files) {
   return { doc };
 }
 
-const CATEGORY_ORDER = ["command injection", "SQL injection", "code injection"];
+const CATEGORY_ORDER = ["command injection", "SQL injection", "code injection", "error distinction", "error detail"];
 const REMEDY = {
   "command injection": "Pass arguments as a list to a call that does not start a shell, and never build a command string from input.",
   "SQL injection": "Use a parameterised query: placeholders in the statement, values passed separately.",
   "code injection": "Parse the input as data — JSON, a number, an allow-list — rather than evaluating it.",
+  "error distinction":
+    "A malformed request comes back as 5xx instead of 4xx: the caller is told the service is broken when the " +
+    "request was, and a webhook sender seeing 5xx retries a request that can never succeed. Add `except " +
+    "HTTPException: raise` before the broad handler, and catch only what you can handle.",
 };
 
-export function sastFailures(projectDir) {
+// Injection blocks whenever it is found. Error distinction blocks only when the task asks for it --
+// the same gate the regex this replaced was under (candidate-rules #3) -- and is otherwise an
+// advisory. Error detail is always an advisory: exception text in a response is a disclosure, but a
+// small one, and not what the task is judged on.
+const ADVISORY_WHY = {
+  "error distinction": " — the task does not ask for client errors to be kept distinct",
+  "error detail": " — a disclosure rather than a defect, but the caller sees internal detail",
+  "SQL injection": " — where the value comes from is not known here",
+  "command injection": " — where the value comes from is not known here",
+};
+
+function blocks(category, taskText) {
+  if (category === "error distinction") return taskWantsErrorDistinction(taskText);
+  if (category === "error detail") return false;
+  return true;
+}
+
+export function sastFailures(projectDir, { taskText = "" } = {}) {
   const files = sastTargets(projectDir);
   if (files.length === 0) return { failures: [], advisories: [] };
 
@@ -134,13 +156,17 @@ export function sastFailures(projectDir) {
   const blocking = new Map();
   const advisory = new Map();
   // An advisory at a line that already blocks for the same category says nothing the finding does not.
-  const blocked = new Set(
-    results.filter((x) => x.extra?.severity === "ERROR").map((x) => `${x.extra?.metadata?.category}@${at(x)}`)
-  );
-  for (const x of results) {
-    if (x.extra?.severity !== "ERROR" && blocked.has(`${x.extra?.metadata?.category}@${at(x)}`)) continue;
+  // Pattern rules (WARNING) see a construction; for injection only the taint rules (ERROR) block.
+  const isBlocking = (x) => {
     const category = x.extra?.metadata?.category || "injection";
-    const target = x.extra?.severity === "ERROR" ? blocking : advisory;
+    if (category === "error distinction" || category === "error detail") return blocks(category, taskText);
+    return x.extra?.severity === "ERROR";
+  };
+  const blocked = new Set(results.filter(isBlocking).map((x) => `${x.extra?.metadata?.category}@${at(x)}`));
+  for (const x of results) {
+    if (!isBlocking(x) && blocked.has(`${x.extra?.metadata?.category}@${at(x)}`)) continue;
+    const category = x.extra?.metadata?.category || "injection";
+    const target = isBlocking(x) ? blocking : advisory;
     if (!target.has(category)) target.set(category, { message: x.extra?.message, at: [] });
     target.get(category).at.push(at(x));
   }
@@ -153,7 +179,7 @@ export function sastFailures(projectDir) {
   );
   const advisories = order(advisory).map(
     ([category, { message, at }]) =>
-      `sast: ${message} (${category}, not blocking — where the value comes from is not known here): ${list(at)}.`
+      `sast: ${message} (${category}, not blocking${ADVISORY_WHY[category] || ""}): ${list(at)}.`
   );
   if (unparsed.size) {
     advisories.push(

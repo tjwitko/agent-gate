@@ -1,0 +1,102 @@
+# Error-handling rules for Python, written for agent-gate (candidate-rules #3).
+#
+# A broad `except Exception` around code that raises a client error catches that error too, and
+# re-raises it as a 500: a malformed request is reported as the service's own fault, and a webhook
+# sender seeing 5xx retries a request that can never succeed. Observed in four graded deliverables.
+#
+# The rule reports the line that raises the client error, and only when nothing lets it through
+# unchanged: an earlier `except HTTPException`, one in a tuple, a bare `raise` or `raise e`, or an
+# isinstance check. It replaced a regex that flagged the corrected code its own message recommended.
+#
+# Severity is not what decides blocking here: agent/sast.mjs blocks on "error distinction" only when
+# the task asks for it, like the check this replaced, and reports "error detail" as an advisory.
+rules:
+  - id: python-client-error-as-server-fault
+    languages: [python]
+    severity: WARNING
+    message: a client error raised here is caught by a broad handler and turned into a server fault
+    metadata: { category: error distinction }
+    patterns:
+      - pattern-either:
+          - pattern: raise HTTPException($S, ...)
+          - pattern: raise HTTPException(status_code=$S, ...)
+          - pattern: abort($S, ...)
+      - metavariable-regex:
+          metavariable: $S
+          regex: ^(4\d\d|status\.HTTP_4\d\d\w*)$
+      - pattern-either:
+          - pattern-inside: |
+              try:
+                ...
+              except Exception as $E:
+                ...
+          - pattern-inside: |
+              try:
+                ...
+              except Exception:
+                ...
+          - pattern-inside: |
+              try:
+                ...
+              except:
+                ...
+      # An earlier handler, or the broad one itself, that lets the client error through unchanged.
+      - pattern-not-inside: |
+          try:
+            ...
+          except HTTPException:
+            ...
+      - pattern-not-inside: |
+          try:
+            ...
+          except HTTPException as $H:
+            ...
+      - pattern-not-inside: |
+          try:
+            ...
+          except (..., HTTPException, ...):
+            ...
+      - pattern-not-inside: |
+          try:
+            ...
+          except Exception:
+            ...
+            raise
+      - pattern-not-inside: |
+          try:
+            ...
+          except Exception as $E:
+            ...
+            raise
+      - pattern-not-inside: |
+          try:
+            ...
+          except Exception as $E:
+            ...
+            raise $E
+      - pattern-not-inside: |
+          try:
+            ...
+          except Exception as $E:
+            ...
+            if isinstance($E, HTTPException):
+              ...
+            ...
+  - id: python-exception-detail-to-caller
+    languages: [python]
+    severity: WARNING
+    message: the caught exception's text is sent to the caller
+    metadata: { category: error detail }
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              try:
+                ...
+              except $X as $E:
+                ...
+      - pattern-either:
+          - pattern: HTTPException(..., detail=<... $E ...>, ...)
+          - pattern: HTTPException($S, <... $E ...>, ...)
+          - pattern: abort($S, <... $E ...>, ...)
+          - pattern: JSONResponse(..., content=<... $E ...>, ...)
+          - pattern: JSONResponse(<... $E ...>, ...)

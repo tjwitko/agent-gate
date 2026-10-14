@@ -80,28 +80,15 @@ const SWALLOWS =
   "            raise HTTPException(status_code=400, detail='Missing event id')\n" +
   "    except Exception as e:\n        raise HTTPException(status_code=500, detail=str(e))\n";
 
-test("a broad catch that re-raises as 5xx is reported", () => {
+// This shape is no longer judged here. The regex that did flagged the corrected code its own message
+// recommended; a Semgrep rule replaced it (agent/sast-rules/python-errors.yaml), and its cases --
+// detection, the corrected code, a specific exception, the task gate -- are tested in
+// agent/sast.test.mjs and the rule's annotated samples. One check reports it, not two.
+test("a broad catch that re-raises as 5xx is left to the sast check", () => {
   const { failures } = run({ "app/main.py": SWALLOWS, "tests/t_test.py": "def test_x():\n    assert 1\n" }, (d) =>
     codeQualityFailures(d, WANTS)
   );
-  const f = failures.find((x) => /server fault/.test(x));
-  assert.ok(f);
-  assert.match(f, /leaking the\s+intended status/);
-});
-
-test("catching a specific exception is clean", () => {
-  const good =
-    "@app.post('/webhook')\ndef hook():\n    try:\n        data = json.loads(body)\n" +
-    "    except json.JSONDecodeError:\n        raise HTTPException(status_code=400, detail='Invalid JSON')\n";
-  const { failures } = run({ "app/main.py": good, "tests/t_test.py": "def test_x():\n    assert 1\n" }, (d) =>
-    codeQualityFailures(d, WANTS)
-  );
-  assert.deepEqual(failures.filter((f) => /server fault/.test(f)), []);
-});
-
-test("the error finding is silent when the task never asked", () => {
-  const { failures } = run({ "app/main.py": SWALLOWS }, (d) => codeQualityFailures(d, NEUTRAL));
-  assert.deepEqual(failures.filter((f) => /server fault/.test(f)), []);
+  assert.deepEqual(failures.filter((x) => /server fault/.test(x)), []);
 });
 
 test("no source files is reported as not-checked", () => {

@@ -581,16 +581,39 @@ literal string `region` where the region belongs. Neither is currently checked e
 **Shape to test, not spelling:** a statement key that is not in the IAM grammar, and a condition
 key that no statement in the document actually uses. Both are cheap once the semantics are known.
 
-### 3. Client errors surfacing as 500
+### 3. Client errors surfacing as 500 — fixed
 
 webhook-5 wraps its handler body in `except Exception`, which catches the `HTTPException(400)` it
 raises itself and re-raises it as a 500 carrying `"400: Missing event ID"` — leaking the intended
 status into the message. A bad request is reported as a server fault, and the detail string exposes
 internals to the caller.
 
-Detectable in principle: a broad `except Exception` enclosing a `raise HTTPException`. Not yet built,
-and it competes for attention with the two above.
+**It had been built, two days after this entry was written, and the entry never said so.** A regex in
+`agent/code-quality.mjs` blocked, under the task's error-distinction requirement, on any
+`except Exception` whose body raised a 5xx. It had no tests, and probing it found it right on one case
+of four:
 
+| case | regex | correct |
+| --- | --- | --- |
+| webhook-5's shape | flagged | yes |
+| the fix its own message recommended — `except HTTPException: raise` before the broad handler | **flagged** | no |
+| a catch-all → 500 around code that raises no client error | **flagged** | no |
+| a 422 raised inside a loop, the exception leaked through `f"{exc}"` | flagged, leak missed | partly |
+
+A check that blocks the fix it recommends is one that gets switched off. It is replaced by two
+Semgrep rules (`agent/sast-rules/python-errors.yaml`), reported by the `sast` validator:
+
+- **error distinction** — reports the line raising the client error (`HTTPException` or `abort` with
+  a 4xx, numeric or `status.HTTP_4xx_…`), at any depth inside a `try` whose broad handler
+  (`except Exception`, bare `except`) converts it, and only when nothing lets it through unchanged:
+  an earlier `except HTTPException`, one in a tuple, a bare `raise` or `raise e`, an `isinstance`
+  check. Blocks when the task asks for error distinction, as before; an advisory otherwise.
+- **error detail** — the caught exception's text in an `HTTPException`, `abort` or `JSONResponse`, in
+  any form (`str(e)`, an f-string, the object itself). Always an advisory.
+
+Tested against ten annotated cases built from the probes, all correct; zero hits on 4,600 files of real
+Python, eleven of which use `HTTPException`. No corpus fixture moved — every graded deliverable on
+disk is Node or Go, which the regex never read either.
 
 ### 4. A credential held in a local whose name does not look like one — fixed
 

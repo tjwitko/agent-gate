@@ -57,7 +57,7 @@ def user():
 scanner("every rule matches its annotated samples, and nothing else", () => {
   const tmp = mkdtempSync(path.join(tmpdir(), "sast-samples-"));
   try {
-    for (const [rules, sample] of [["python.yaml", "python.py"], ["javascript.yaml", "javascript.js"], ["javascript.yaml", "javascript.ts"], ["go.yaml", "go.go"]]) {
+    for (const [rules, sample] of [["python.yaml", "python.py"], ["python-errors.yaml", "python-errors.py"], ["javascript.yaml", "javascript.js"], ["javascript.yaml", "javascript.ts"], ["go.yaml", "go.go"]]) {
       const target = path.join(tmp, sample);
       writeFileSync(target, readFileSync(path.join(HERE, "sast-samples", `${sample}.sample`)));
       const r = spawnSync(
@@ -95,6 +95,42 @@ scanner("a construction without a known source is an advisory, not a finding", (
   const r = within({ "report.py": 'def report(db, table):\n    return db.execute(f"SELECT count(*) FROM {table}")\n' }, sastFailures);
   assert.deepEqual(r.failures, []);
   assert.match(r.advisories.join("\n"), /SQL statement is built by string formatting .*not blocking.*report\.py:2/);
+});
+
+// Candidate #3: a broad handler that turns the handler's own 400 into a 500. Observed in four graded
+// deliverables, webhook-5 among them.
+const SWALLOWS = `from fastapi import HTTPException
+def hook(body):
+    try:
+        if "id" not in body:
+            raise HTTPException(status_code=400, detail="Missing event ID")
+        store(body)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+`;
+const DISTINCT = "A client error must not be reported as a 500.";
+
+scanner("a client error turned into a 500 blocks when the task asks for error distinction", () => {
+  const r = within({ "app.py": SWALLOWS }, (d) => sastFailures(d, { taskText: DISTINCT }));
+  assert.equal(r.failures.length, 1);
+  assert.match(r.failures[0], /^sast: error distinction — .*app\.py:5\. A malformed request comes back as 5xx/);
+  assert.match(r.advisories.join("\n"), /exception's text is sent to the caller \(error detail, not blocking.*app\.py:8/);
+});
+
+scanner("without that requirement it is an advisory, saying why", () => {
+  const r = within({ "app.py": SWALLOWS }, (d) => sastFailures(d, { taskText: "" }));
+  assert.deepEqual(r.failures, []);
+  assert.match(r.advisories.join("\n"), /error distinction, not blocking — the task does not ask/);
+});
+
+// The regex this replaced flagged exactly this: the fix its own message recommended.
+scanner("the corrected code passes", () => {
+  const fixed = SWALLOWS.replace(
+    "    except Exception as e:\n        raise HTTPException(status_code=500, detail=str(e))",
+    "    except HTTPException:\n        raise\n    except Exception:\n        raise HTTPException(status_code=500, detail=\"internal error\")"
+  );
+  assert.notEqual(fixed, SWALLOWS);
+  assert.deepEqual(within({ "app.py": fixed }, (d) => sastFailures(d, { taskText: DISTINCT })), { failures: [], advisories: [] });
 });
 
 // Two ways the code's author could hide code from the scan.

@@ -550,6 +550,8 @@ A few are worth calling out because they exist in response to measured failures:
   across 9,940 files of real code before they were allowed to. Code that builds a query or a shell
   command from a value of unknown origin is an advisory. Neither `.semgrepignore` nor an inline
   `# nosemgrep` hides code from it.
+  In Python it also catches a broad `except Exception` that turns the handler's own 400 into a 500 —
+  blocking when the task asks for error distinction — and exception text sent back to the caller.
 
 ---
 

@@ -1,0 +1,122 @@
+from fastapi import FastAPI, HTTPException, status
+from flask import abort, request
+
+app = FastAPI()
+
+
+@app.post("/hook")
+def hook(body: dict):
+    try:
+        if "id" not in body:
+            # ruleid: python-client-error-as-server-fault
+            raise HTTPException(status_code=400, detail="Missing event ID")
+        store(body)
+    except Exception as e:
+        # ruleid: python-exception-detail-to-caller
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/hook-fixed")
+def hook_fixed(body: dict):
+    try:
+        if "id" not in body:
+            # ok: python-client-error-as-server-fault
+            raise HTTPException(status_code=400, detail="Missing event ID")
+        store(body)
+    except HTTPException:
+        raise
+    except Exception:
+        # ok: python-exception-detail-to-caller
+        raise HTTPException(status_code=500, detail="internal error")
+
+
+@app.get("/items")
+def items():
+    # A catch-all around code that raises no client error is not this defect.
+    try:
+        return fetch_all()
+    except Exception:
+        raise HTTPException(status_code=500, detail="internal error")
+
+
+@app.post("/nested")
+def nested(body: dict):
+    try:
+        for k in body:
+            if not k:
+                # ruleid: python-client-error-as-server-fault
+                raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "empty key")
+    except Exception as exc:
+        # ruleid: python-exception-detail-to-caller
+        raise HTTPException(500, f"failed: {exc}")
+
+
+def reraises(body):
+    try:
+        if not body:
+            # ok: python-client-error-as-server-fault
+            raise HTTPException(status_code=400, detail="empty")
+    except Exception:
+        log("failed")
+        raise
+
+
+def reraises_named(body):
+    try:
+        if not body:
+            # ok: python-client-error-as-server-fault
+            raise HTTPException(400, "empty")
+    except Exception as e:
+        log("failed")
+        raise e
+
+
+def checks_type(body):
+    try:
+        if not body:
+            # ok: python-client-error-as-server-fault
+            raise HTTPException(400, "empty")
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise
+        raise HTTPException(500, "internal error")
+
+
+def tuple_passthrough(body):
+    try:
+        if not body:
+            # ok: python-client-error-as-server-fault
+            raise HTTPException(400, "empty")
+    except (HTTPException, ValueError):
+        raise
+    except Exception:
+        raise HTTPException(500, "internal error")
+
+
+def flask_view():
+    try:
+        if "id" not in request.json:
+            # ruleid: python-client-error-as-server-fault
+            abort(400, "missing id")
+        save()
+    except Exception as e:
+        # ruleid: python-exception-detail-to-caller
+        abort(500, str(e))
+
+
+def leak_only():
+    try:
+        return fetch_all()
+    except Exception as e:
+        # ruleid: python-exception-detail-to-caller
+        raise HTTPException(status_code=500, detail=f"database error: {e}")
+
+
+def specific(body):
+    # A specific exception mapped to a client error is the right shape, not this defect.
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError:
+        # ok: python-client-error-as-server-fault
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+    return data

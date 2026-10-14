@@ -1,6 +1,6 @@
 {
   "name": "@tjwitko/agent-gate",
-  "version": "1.1.11",
+  "version": "1.1.12",
   "description": "Deterministic security controls that run against a project and return one verdict: clean, blocked, or could-not-run.",
   "type": "module",
   "main": "./bin/validate.mjs",
@@ -37,9 +37,9 @@
   "license": "Apache-2.0",
   "dependencies": {
     "@tjwitko/dep-audit-mcp": "git+https://github.com/tjwitko/dep-audit-mcp.git#v1.0.2",
-    "@tjwitko/identity-guard-mcp": "git+https://github.com/tjwitko/identity-guard-mcp.git#v1.0.1",
-    "@tjwitko/secret-guard-mcp": "git+https://github.com/tjwitko/secret-guard-mcp.git#v1.0.1",
-    "@tjwitko/terraform-guard-mcp": "git+https://github.com/tjwitko/terraform-guard-mcp.git#v1.1.1",
+    "@tjwitko/identity-guard-mcp": "git+https://github.com/tjwitko/identity-guard-mcp.git#v1.0.2",
+    "@tjwitko/secret-guard-mcp": "git+https://github.com/tjwitko/secret-guard-mcp.git#v1.0.2",
+    "@tjwitko/terraform-guard-mcp": "git+https://github.com/tjwitko/terraform-guard-mcp.git#v1.1.2",
     "yaml": "^2.8.1"
   },
   "devDependencies": {

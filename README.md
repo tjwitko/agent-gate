@@ -57,16 +57,16 @@ script on `PATH` is a different fact and will not satisfy it.
 
 ### Install
 
-Latest release: **[v1.1.13](https://github.com/tjwitko/agent-gate/releases/latest)**
+Latest release: **[v1.1.14](https://github.com/tjwitko/agent-gate/releases/latest)**
 
 ```bash
-npm install --save-dev github:tjwitko/agent-gate#v1.1.13
+npm install --save-dev github:tjwitko/agent-gate#v1.1.14
 ```
 
 The four control servers come with it as dependencies — there is nothing else to clone or wire up.
 They are pinned to specific release tags, so this installs the same five components every time;
 `npx agent-gate --version` shows which.
-Drop the `#v1.1.13` to track `main` instead, which moves.
+Drop the `#v1.1.14` to track `main` instead, which moves.
 
 ### Run it
 
@@ -330,9 +330,9 @@ jobs:
 
       # Everything the controls drive, at the versions this release was tested with: Terraform,
       # gitleaks, osv-scanner, checkov, ruff and pytest, each checked after install.
-      - uses: tjwitko/agent-gate/.github/actions/control-tooling@v1.1.13
+      - uses: tjwitko/agent-gate/.github/actions/control-tooling@v1.1.14
 
-      - uses: tjwitko/agent-gate@v1.1.13
+      - uses: tjwitko/agent-gate@v1.1.14
         with:
           project: .
           task-file: task.txt
@@ -369,7 +369,7 @@ a requirement every project must meet, set it in a workflow the project cannot e
 organisation ruleset requires, for instance:
 
 ```yaml
-      - uses: tjwitko/agent-gate@v1.1.13
+      - uses: tjwitko/agent-gate@v1.1.14
         with:
           task-file: task.txt
           baseline: |
@@ -400,7 +400,7 @@ upgrades them. You only upgrade a control separately if you wired it into an edi
 
 ```text
 $ npx agent-gate --version
-agent-gate 1.1.13
+agent-gate 1.1.14
   terraform-guard  v1.1.2  node_modules @tjwitko/terraform-guard-mcp
   dep-audit        v1.0.2  node_modules @tjwitko/dep-audit-mcp
   secret-guard     v1.0.2  node_modules @tjwitko/secret-guard-mcp
@@ -417,8 +417,8 @@ each control beside where it was found, in the CLI and in the Action's log alike
 **GitHub Action** — bump **both** references, which name one repository at one version:
 
 ```yaml
-- uses: tjwitko/agent-gate/.github/actions/control-tooling@v1.1.13
-- uses: tjwitko/agent-gate@v1.1.13
+- uses: tjwitko/agent-gate/.github/actions/control-tooling@v1.1.14
+- uses: tjwitko/agent-gate@v1.1.14
 ```
 
 A workflow left at two versions runs one release's gate on another's toolchain. It is an easy one to
@@ -427,7 +427,7 @@ miss: a search for `agent-gate@` does not match the first line.
 **npm:**
 
 ```bash
-npm install --save-dev github:tjwitko/agent-gate#v1.1.13
+npm install --save-dev github:tjwitko/agent-gate#v1.1.14
 ```
 
 ### 3. Refresh what setup wrote

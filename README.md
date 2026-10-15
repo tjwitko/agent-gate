@@ -10,8 +10,11 @@ verdict: **clean**, **blocked**, or **could-not-run**.
 It is built for code that an AI agent wrote. Agents produce plausible work quickly, and the usual
 review signals — it builds, there are tests, the summary says "production-ready" — stop being
 reliable. agent-gate checks the things that plausible-looking work gets wrong: infrastructure that
-plans clean but is open to the world, dependencies with known CVEs, credentials hardcoded into
-source, endpoints with no authentication, and test suites that do not run.
+plans clean but is open to the world, dependencies with known CVEs — or with no lockfile, so nothing
+scanned them — credentials hardcoded into source, request data reaching a shell or a SQL query,
+endpoints with no authentication, container base images past end of life, and test suites that do
+not run. Where the task states a requirement — tests, secret rotation, a retention period — the code
+is held to it, and the code's author cannot quietly edit the requirement away.
 
 It is equally useful on code a human wrote. Nothing in it assumes an agent.
 
@@ -40,7 +43,7 @@ is fine" are different facts, and collapsing them is how a gate quietly stops pr
   | `gitleaks` | credential scanning | yes |
   | `osv-scanner` | dependency vulnerabilities | yes |
   | `terraform` | Terraform plan and policy checks | if the project has `.tf` files |
-  | `semgrep` | injection checks (`sast`) | if the project has Python, JavaScript/TypeScript or Go |
+  | `semgrep` | injection checks (`sast`) | if the project has Python, JavaScript/TypeScript, Go, Java or Ruby |
   | `checkov` | extra Terraform and Dockerfile coverage | optional, advisory only |
   | `ruff` | Python static checks | if the project has Python |
   | `pytest` | running a Python test suite | if the project has Python tests |
@@ -515,7 +518,23 @@ nothing it writes overwrites.
 
 ## What it checks
 
-Four control servers, each in its own repository and each installed as a dependency:
+| concern | blocks on | reports, without blocking | covers |
+|---|---|---|---|
+| secrets | credentials hardcoded in any file | — | every file |
+| dependencies | high or critical CVEs; a manifest that declares dependencies with no lockfile the scanner can read | CVEs in an unlocked `requirements.txt`, `go.mod` or `pom.xml` | npm, PyPI, Go, Maven, Cargo, RubyGems, Packagist and the rest of [OSV](https://osv.dev) |
+| injection | request data reaching a shell, a SQL statement or an evaluator | a query or command built from a value of unknown origin | Python, JavaScript/TypeScript, Go, Java, Ruby — Flask, Django, FastAPI, Express, `net/http`, gin, Spring, servlets, Rails, Sinatra |
+| authentication | routes anyone can call; a credential compared with `==` or accepted when unset | routes exempt by name, each listed | Python, JavaScript/TypeScript, Go, Java, Ruby |
+| infrastructure | Terraform plan and policy violations; IAM, IRSA and Kubernetes manifests that contradict the code; workloads authenticating with held credentials | checkov's Terraform findings | Terraform (AWS), Kubernetes YAML |
+| containers | a base image past end of life, in any build stage | checkov's Dockerfile rules — `USER`, `HEALTHCHECK` | official `node`, `python`, `golang`, `ruby`, `php`, `debian`, `ubuntu`, `alpine`, `eclipse-temurin` images |
+| build | syntax errors, undefined names, a Go build that fails | — | Python, JavaScript, Go |
+| task requirements | tests that fail or do not exist, a store that can be altered, a retention period not met, a secret that cannot rotate, client errors reported as 500s, a named artifact missing — **each only when the task or a [baseline](#requirements-the-codes-author-cannot-remove) states it** | — | tests run under `node --test`, jest, vitest, pytest and `go test`; error distinction in Python |
+| process | work not committed; a commit that edits the task file | — | — |
+
+A check that could not run — a scanner missing, a control unreachable — makes the whole run exit 3,
+never a pass. Code in a language nothing reads is named above the verdict.
+
+The checks live in four control servers, each in its own repository and each installed as a
+dependency:
 
 | control | checks | backed by |
 |---|---|---|
@@ -545,13 +564,42 @@ A few are worth calling out because they exist in response to measured failures:
   named in a language image's tag (`-buster`, `-alpine3.18`) is judged too. checkov's Dockerfile
   rules — no `USER`, no `HEALTHCHECK` — are reported as advisories.
 - **`sast` blocks on injection** — request data reaching a shell, a SQL statement or `eval`, in
-  Python, JavaScript/TypeScript and Go. It runs Semgrep with this project's own rules, and only the
+  Python, JavaScript/TypeScript, Go, Java and Ruby. It runs Semgrep with this project's own rules, and only the
   ones that trace data from an HTTP request to the dangerous call block; they produced no findings
   across 9,940 files of real code before they were allowed to. Code that builds a query or a shell
   command from a value of unknown origin is an advisory. Neither `.semgrepignore` nor an inline
   `# nosemgrep` hides code from it.
   In Python it also catches a broad `except Exception` that turns the handler's own 400 into a 500 —
   blocking when the task asks for error distinction — and exception text sent back to the caller.
+
+---
+
+## What it does not check
+
+Listed so that a clean verdict is read for what it is.
+
+- **Languages outside the table.** C#, Rust, C and C++, PHP, Kotlin and Swift get the project-wide scans —
+  secrets, dependencies, infrastructure — and nothing that reads the code itself. The run says so above
+  the verdict.
+- **Injection across a function call.** Request data is followed within one function; Semgrep's
+  open-source analysis does not cross calls. A helper that builds a query from its argument is reported
+  as an advisory, not a finding: SQL text built from a value is reported where it is built, whichever
+  function later runs it. A shell command built that way is reported only where it is run.
+- **Other classes of injection.** Shell, SQL and evaluators (`eval`, `exec`, `pickle.loads`,
+  `yaml.load`, `new Function`) are covered. Cross-site scripting, server-side request forgery, path
+  traversal and XML external entities are not.
+- **Authorisation.** `authentication` checks that a route requires a caller identity, not what that
+  caller may then do.
+- **The built image.** A Dockerfile's base image is judged; the packages inside a built image are not
+  scanned. That needs a build or a pull, so it is a job for a CI step with Trivy or Grype.
+- **Secrets assembled at run time.** gitleaks reads literals, including credentials that only look
+  random. A key split across concatenated strings, or decoded at startup, is not seen.
+- **Infrastructure beyond Terraform on AWS and Kubernetes.** CloudFormation, Pulumi, and Terraform
+  for other clouds are not judged by the policy rules.
+- **Requirements nobody stated.** The task-gated checks run only when the task or a baseline states
+  the requirement. Without either they report "not checked", which is accurate and much less useful.
+- **A commit made with `--no-verify`.** The hook is a convenience. CI with the gate as a required check
+  is the enforcement point; see [Use it in CI](#use-it-in-ci).
 
 ---
 

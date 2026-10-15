@@ -119,6 +119,59 @@ public class Samples {
         Runtime.getRuntime().exec(args);
     }
 
+    // A credential split or encoded is still a credential in the source.
+    // ruleid: java-assembled-credential
+    private static final String API_KEY = "sk-live-" + "4f9a8b7c6d5e";
+    // ruleid: java-assembled-credential
+    private final String dbPassword = new String(java.util.Base64.getDecoder().decode("aHVudGVyMi1wcm9k"));
+    // ok: java-assembled-credential
+    private final String tokenUrl = "https://" + "auth.example.com/token";
+
+    @GetMapping("/fetch")
+    public String fetch(@RequestParam String url) throws Exception {
+        // ruleid: java-ssrf
+        return new String(new java.net.URL(url).openStream().readAllBytes());
+    }
+
+    @GetMapping("/profile")
+    public String profile(@RequestParam String id) throws Exception {
+        // Scheme and host are fixed; request data only selects a path on that host.
+        // ok: java-ssrf
+        return new String(new java.net.URL("https://api.example.com/users/" + id).openStream().readAllBytes());
+    }
+
+    @GetMapping("/next")
+    public org.springframework.http.ResponseEntity<Void> next(@RequestParam String target) throws Exception {
+        // Building a URI to redirect to connects to nothing (WebGoat's open-redirect lessons).
+        // ok: java-ssrf
+        return org.springframework.http.ResponseEntity.status(302).location(URI.create(target)).build();
+    }
+
+    @GetMapping("/download")
+    public byte[] download(@RequestParam String file) throws Exception {
+        // ruleid: java-path-traversal
+        return java.nio.file.Files.readAllBytes(Paths.get("/srv/uploads", file));
+    }
+
+    @GetMapping("/download-safe")
+    public byte[] downloadSafe(@RequestParam String file) throws Exception {
+        // ok: java-path-traversal
+        return java.nio.file.Files.readAllBytes(Paths.get("/srv/uploads", FilenameUtils.getName(file)));
+    }
+
+    public Object parseUntrusted(java.io.InputStream in) throws Exception {
+        // ruleid: java-xxe
+        DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
+        return dbf.newDocumentBuilder().parse(in);
+    }
+
+    public Object parseSafely(java.io.InputStream in) throws Exception {
+        // ok: java-xxe
+        DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
+        dbf.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+        return dbf.newDocumentBuilder().parse(in);
+    }
+
     public void housekeeping() throws Exception {
         // ok: java-command-injection, java-shell-nonliteral
         Runtime.getRuntime().exec("rm -rf /tmp/cache");

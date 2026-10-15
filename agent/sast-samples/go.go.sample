@@ -6,7 +6,10 @@ import (
 	"log"
 	"net/http"
 	"os/exec"
+	"path/filepath"
+	"os"
 	"strconv"
+	"strings"
 )
 
 var db *sql.DB
@@ -70,4 +73,54 @@ func lookup(w http.ResponseWriter, r *http.Request) {
 func message(name string) string {
 	// ok: go-sql-text-built
 	return fmt.Sprintf("selected %s from the list", name)
+}
+
+// A credential split or joined is still a credential in the source.
+// ruleid: go-assembled-credential
+const apiKey = "sk-live-" + "4f9a8b7c6d5e"
+
+func credentials(t string) {
+	// ruleid: go-assembled-credential
+	secretToken := strings.Join([]string{"ghp_", "a1B2c3D4", "e5F6g7H8"}, "")
+	// ok: go-assembled-credential
+	tokenURL := "https://" + "auth.example.com/token"
+	// ok: go-assembled-credential
+	authToken := "Bearer " + t
+	_, _, _ = secretToken, tokenURL, authToken
+}
+
+func fetch(w http.ResponseWriter, r *http.Request) {
+	// ruleid: go-ssrf
+	resp, _ := http.Get(r.URL.Query().Get("url"))
+	defer resp.Body.Close()
+}
+
+func profile(w http.ResponseWriter, r *http.Request) {
+	// Scheme and host are fixed; request data only selects a path on that host.
+	// ok: go-ssrf
+	resp, _ := http.Get(fmt.Sprintf("https://api.example.com/users/%s", r.URL.Query().Get("id")))
+	defer resp.Body.Close()
+}
+
+func status(w http.ResponseWriter, r *http.Request) {
+	// ruleid: go-ssrf
+	resp, _ := http.Get("https://" + r.URL.Query().Get("host") + "/status")
+	defer resp.Body.Close()
+}
+
+func download(w http.ResponseWriter, r *http.Request) {
+	// ruleid: go-path-traversal
+	http.ServeFile(w, r, filepath.Join("/srv/uploads", r.URL.Query().Get("file")))
+}
+
+func readFile(w http.ResponseWriter, r *http.Request) {
+	// ruleid: go-path-traversal
+	data, _ := os.ReadFile("/srv/data/" + r.FormValue("name"))
+	w.Write(data)
+}
+
+func readSafe(w http.ResponseWriter, r *http.Request) {
+	// ok: go-path-traversal
+	data, _ := os.ReadFile(filepath.Join("/srv/data", filepath.Base(r.FormValue("name"))))
+	w.Write(data)
 }

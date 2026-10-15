@@ -8,14 +8,33 @@ rules:
     message: request data reaches a shell command
     metadata: { category: command injection }
     pattern-sources:
+      # The object must be the request. These matched $X.url on anything, and import.meta.url is not
+      # request data: the gate's own module-relative file reads were reported as path traversal.
+      - patterns:
+          - pattern-either:
+              - pattern: $REQ.query
+              - pattern: $REQ.body
+              - pattern: $REQ.params
+              - pattern: $REQ.headers
+              - pattern: $REQ.cookies
+              - pattern: $REQ.url
+              - pattern: $REQ.originalUrl
+          - metavariable-regex:
+              metavariable: $REQ
+              regex: ^(req|request|ctx\.request)$
+      # Koa, and AWS Lambda behind API Gateway.
       - pattern-either:
-          - pattern: $REQ.query
-          - pattern: $REQ.body
-          - pattern: $REQ.params
-          - pattern: $REQ.headers
-          - pattern: $REQ.cookies
-          - pattern: $REQ.url
-          - pattern: $URL.searchParams.get(...)
+          - pattern: ctx.query
+          - pattern: ctx.params
+          - pattern: event.body
+          - pattern: event.queryStringParameters
+          - pattern: event.pathParameters
+          - pattern: event.headers
+      - patterns:
+          - pattern: new URL($REQ.url, ...).searchParams.get(...)
+          - metavariable-regex:
+              metavariable: $REQ
+              regex: ^(req|request)$
     pattern-sinks:
       - patterns:
           - pattern-either:
@@ -54,14 +73,33 @@ rules:
     message: request data is built into a SQL statement
     metadata: { category: SQL injection }
     pattern-sources:
+      # The object must be the request. These matched $X.url on anything, and import.meta.url is not
+      # request data: the gate's own module-relative file reads were reported as path traversal.
+      - patterns:
+          - pattern-either:
+              - pattern: $REQ.query
+              - pattern: $REQ.body
+              - pattern: $REQ.params
+              - pattern: $REQ.headers
+              - pattern: $REQ.cookies
+              - pattern: $REQ.url
+              - pattern: $REQ.originalUrl
+          - metavariable-regex:
+              metavariable: $REQ
+              regex: ^(req|request|ctx\.request)$
+      # Koa, and AWS Lambda behind API Gateway.
       - pattern-either:
-          - pattern: $REQ.query
-          - pattern: $REQ.body
-          - pattern: $REQ.params
-          - pattern: $REQ.headers
-          - pattern: $REQ.cookies
-          - pattern: $REQ.url
-          - pattern: $URL.searchParams.get(...)
+          - pattern: ctx.query
+          - pattern: ctx.params
+          - pattern: event.body
+          - pattern: event.queryStringParameters
+          - pattern: event.pathParameters
+          - pattern: event.headers
+      - patterns:
+          - pattern: new URL($REQ.url, ...).searchParams.get(...)
+          - metavariable-regex:
+              metavariable: $REQ
+              regex: ^(req|request)$
     pattern-sinks:
       - patterns:
           - pattern-either:
@@ -84,14 +122,33 @@ rules:
     message: request data is evaluated as code
     metadata: { category: code injection }
     pattern-sources:
+      # The object must be the request. These matched $X.url on anything, and import.meta.url is not
+      # request data: the gate's own module-relative file reads were reported as path traversal.
+      - patterns:
+          - pattern-either:
+              - pattern: $REQ.query
+              - pattern: $REQ.body
+              - pattern: $REQ.params
+              - pattern: $REQ.headers
+              - pattern: $REQ.cookies
+              - pattern: $REQ.url
+              - pattern: $REQ.originalUrl
+          - metavariable-regex:
+              metavariable: $REQ
+              regex: ^(req|request|ctx\.request)$
+      # Koa, and AWS Lambda behind API Gateway.
       - pattern-either:
-          - pattern: $REQ.query
-          - pattern: $REQ.body
-          - pattern: $REQ.params
-          - pattern: $REQ.headers
-          - pattern: $REQ.cookies
-          - pattern: $REQ.url
-          - pattern: $URL.searchParams.get(...)
+          - pattern: ctx.query
+          - pattern: ctx.params
+          - pattern: event.body
+          - pattern: event.queryStringParameters
+          - pattern: event.pathParameters
+          - pattern: event.headers
+      - patterns:
+          - pattern: new URL($REQ.url, ...).searchParams.get(...)
+          - metavariable-regex:
+              metavariable: $REQ
+              regex: ^(req|request)$
     pattern-sinks:
       - patterns:
           - pattern-either:
@@ -187,3 +244,191 @@ rules:
       - patterns:
           - pattern-regex: (?is)(?<![\w.$])`\s*(?:select\s[^`]*?\sfrom\b|insert\s+into\b|update\s+\S+\s+set\b|delete\s+from\b)[^`]*?\$\{
           - pattern-not-regex: (?m)^[ \t]*(//|/\*|\*).*$
+
+  # A credential assembled from literals is still in the source, just not as one string, so
+  # gitleaks -- which reads literals -- does not see it. Matched by the shape of the assembly and the
+  # name it is assigned to; the name has to END like a credential, so TOKEN_URL and password_field
+  # are left alone. Blocks: every piece of the value is written in the file. Each assignment form is
+  # spelled out with each shape, because Semgrep would not match the shapes as sub-patterns of a
+  # bound value. The name pattern starts with `.*?` because metavariable-regex anchors at the START:
+  # without it only names beginning with a credential word matched, which looked like the shapes failing.
+  - id: javascript-assembled-credential
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: a credential is assembled from literals in the source
+    metadata: { category: hardcoded credential }
+    # Only literals as written. With constant propagation a variable holding a test password, plus
+    # ' this makes the password wrong', counted as two literals: Juice Shop's 2FA test matched.
+    options:
+      constant_propagation: false
+    patterns:
+      - pattern-either:
+          - pattern: '$V = "$A" + "$B"'
+          - pattern: '$V = "$A" + "$B" + "$C"'
+          - pattern: '$V = "$A" + "$B" + "$C" + "$D"'
+          - pattern: '$V = [...].join(...)'
+          - pattern: '$V = <... Buffer.from("$A", "base64") ...>'
+          - pattern: '$V = <... Buffer.from("$A", "hex") ...>'
+          - pattern: '$V = <... atob("$A") ...>'
+          - pattern: '$V = "$A".split("").reverse().join("")'
+          - pattern: '{..., $V: "$A" + "$B", ...}'
+          - pattern: '{..., $V: "$A" + "$B" + "$C", ...}'
+          - pattern: '{..., $V: "$A" + "$B" + "$C" + "$D", ...}'
+          - pattern: '{..., $V: [...].join(...), ...}'
+          - pattern: '{..., $V: <... Buffer.from("$A", "base64") ...>, ...}'
+          - pattern: '{..., $V: <... Buffer.from("$A", "hex") ...>, ...}'
+          - pattern: '{..., $V: <... atob("$A") ...>, ...}'
+          - pattern: '{..., $V: "$A".split("").reverse().join(""), ...}'
+      - metavariable-regex:
+          metavariable: $V
+          regex: (?i)^.*?(api_?key|access_?key|secret(_?key)?|signing_?key|private_?key|token|passw(or)?d|pwd|passphrase|credentials?)$
+      # A credential has no whitespace; prose does. The remedy text for this very category -- a key named
+      # "hardcoded credential" holding two concatenated sentences -- matched until this was added.
+      - metavariable-regex:
+          metavariable: $V
+          regex: ^\S+$
+      - pattern-not-regex: (["'])[^"'\n]*\s[^"'\n]*\1\s*\+|\+\s*(["'])[^"'\n]*\s[^"'\n]*\2
+
+  # SSRF: request data choosing where the server connects. A URL with a fixed scheme and host, with
+  # request data only after the first path slash, cannot be redirected, so that is a sanitizer.
+  - id: javascript-ssrf
+    mode: taint
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: request data chooses where the server sends a request
+    metadata: { category: SSRF }
+    pattern-sources:
+      # The object must be the request. These matched $X.url on anything, and import.meta.url is not
+      # request data: the gate's own module-relative file reads were reported as path traversal.
+      - patterns:
+          - pattern-either:
+              - pattern: $REQ.query
+              - pattern: $REQ.body
+              - pattern: $REQ.params
+              - pattern: $REQ.headers
+              - pattern: $REQ.cookies
+              - pattern: $REQ.url
+              - pattern: $REQ.originalUrl
+          - metavariable-regex:
+              metavariable: $REQ
+              regex: ^(req|request|ctx\.request)$
+      # Koa, and AWS Lambda behind API Gateway.
+      - pattern-either:
+          - pattern: ctx.query
+          - pattern: ctx.params
+          - pattern: event.body
+          - pattern: event.queryStringParameters
+          - pattern: event.pathParameters
+          - pattern: event.headers
+      - patterns:
+          - pattern: new URL($REQ.url, ...).searchParams.get(...)
+          - metavariable-regex:
+              metavariable: $REQ
+              regex: ^(req|request)$
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: fetch($URL, ...)
+              - pattern: axios($URL, ...)
+              - pattern: axios.$M($URL, ...)
+              - pattern: 'axios({..., url: $URL, ...})'
+              - pattern: got($URL, ...)
+              - pattern: got.$M($URL, ...)
+              - pattern: http.get($URL, ...)
+              - pattern: http.request($URL, ...)
+              - pattern: https.get($URL, ...)
+              - pattern: https.request($URL, ...)
+          - focus-metavariable: $URL
+    pattern-sanitizers:
+      # A value looked up in server-side state by a tainted key is server data: Juice Shop builds an
+      # upload path from authenticatedUsers.get(req.cookies.token).data.id. Request objects are
+      # excluded -- req.get() and searchParams.get() return request data.
+      # Exactly one argument: an Express route is app.get("/path", handler), and matching it sanitized
+      # every handler. HTTP clients are excluded too -- axios.get(url) is the SSRF sink itself.
+      - patterns:
+          - pattern: $M.get($K)
+          - metavariable-regex:
+              metavariable: $M
+              regex: ^(?!(req|request|ctx|event|app|router)\b)(?!.*(searchParams|headers|query|params|body|cookies)$)(?!(axios|got|http|https|superagent|needle|ky|client|api|instance|httpClient)$).+$
+      - patterns:
+          - pattern: '"$P" + $X'
+          - metavariable-regex:
+              metavariable: $P
+              regex: ^https?://[^/]+/
+      - pattern-regex: '`https?://[^/$`]+/[^`]*`'
+
+  # Path traversal: request data naming a file the server opens, sends, writes or deletes.
+  # path.join and path.resolve do not help; path.basename does. res.sendFile with a root option
+  # refuses paths that leave the root, so it is not a sink.
+  - id: javascript-path-traversal
+    mode: taint
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: request data names a file the server reads, writes or deletes
+    metadata: { category: path traversal }
+    pattern-sources:
+      # The object must be the request. These matched $X.url on anything, and import.meta.url is not
+      # request data: the gate's own module-relative file reads were reported as path traversal.
+      - patterns:
+          - pattern-either:
+              - pattern: $REQ.query
+              - pattern: $REQ.body
+              - pattern: $REQ.params
+              - pattern: $REQ.headers
+              - pattern: $REQ.cookies
+              - pattern: $REQ.url
+              - pattern: $REQ.originalUrl
+          - metavariable-regex:
+              metavariable: $REQ
+              regex: ^(req|request|ctx\.request)$
+      # Koa, and AWS Lambda behind API Gateway.
+      - pattern-either:
+          - pattern: ctx.query
+          - pattern: ctx.params
+          - pattern: event.body
+          - pattern: event.queryStringParameters
+          - pattern: event.pathParameters
+          - pattern: event.headers
+      - patterns:
+          - pattern: new URL($REQ.url, ...).searchParams.get(...)
+          - metavariable-regex:
+              metavariable: $REQ
+              regex: ^(req|request)$
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: fs.$M($P, ...)
+              - pattern: fs.promises.$M($P, ...)
+          - metavariable-regex:
+              metavariable: $M
+              regex: ^(readFile|readFileSync|createReadStream|writeFile|writeFileSync|createWriteStream|appendFile|appendFileSync|unlink|unlinkSync|rm|rmSync|rmdir|open|openSync)$
+          - focus-metavariable: $P
+      - patterns:
+          - pattern-either:
+              - pattern: $RES.sendFile($P)
+              - pattern: $RES.download($P, ...)
+          - focus-metavariable: $P
+    pattern-sanitizers:
+      # A value looked up in server-side state by a tainted key is server data: Juice Shop builds an
+      # upload path from authenticatedUsers.get(req.cookies.token).data.id. Request objects are
+      # excluded -- req.get() and searchParams.get() return request data.
+      # Exactly one argument: an Express route is app.get("/path", handler), and matching it sanitized
+      # every handler. HTTP clients are excluded too -- axios.get(url) is the SSRF sink itself.
+      - patterns:
+          - pattern: $M.get($K)
+          - metavariable-regex:
+              metavariable: $M
+              regex: ^(?!(req|request|ctx|event|app|router)\b)(?!.*(searchParams|headers|query|params|body|cookies)$)(?!(axios|got|http|https|superagent|needle|ky|client|api|instance|httpClient)$).+$
+      - pattern: path.basename(...)
+      - pattern: parseInt(...)
+      - pattern: Number(...)
+
+  # XXE: libxmljs resolves external entities when asked to with noent.
+  - id: javascript-xxe
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: an XML parser is configured to resolve external entities
+    metadata: { category: XXE }
+    pattern-either:
+      - pattern: '$L.parseXml($X, {..., noent: true, ...})'
+      - pattern: '$L.parseXmlString($X, {..., noent: true, ...})'

@@ -96,8 +96,67 @@ class UsersController < ApplicationController
     # sql = "SELECT * FROM users WHERE id = #{params[:id]}"
   end
 
+  def fetch
+    # ruleid: ruby-ssrf
+    render plain: Net::HTTP.get(URI(params[:url]))
+  end
+
+  def profile
+    # Scheme and host are fixed; request data only selects a path on that host.
+    # ok: ruby-ssrf
+    render plain: Net::HTTP.get(URI("https://api.example.com/users/#{params[:id]}"))
+  end
+
+  def status
+    # ruleid: ruby-ssrf
+    render plain: HTTParty.get("https://#{params[:host]}/status").body
+  end
+
+  def next_page
+    # Parsing a URL to redirect to connects to nothing.
+    # ok: ruby-ssrf
+    redirect_to URI.parse(params[:next]).path
+  end
+
+  def download
+    # ruleid: ruby-path-traversal
+    send_file File.join("/srv/uploads", params[:file])
+  end
+
+  def download_safe
+    # ok: ruby-path-traversal
+    send_file File.join("/srv/uploads", File.basename(params[:file]))
+  end
+
+  def read_any
+    # ruleid: ruby-path-traversal
+    render plain: File.read("/srv/data/#{params[:name]}")
+  end
+
+  def parse_untrusted(xml)
+    # ruleid: ruby-xxe
+    Nokogiri::XML(xml) { |config| config.noent }
+  end
+
+  def parse_safely(xml)
+    # ok: ruby-xxe
+    Nokogiri::XML(xml) { |config| config.strict.nonet }
+  end
+
   def housekeeping
     # ok: ruby-command-injection, ruby-shell-nonliteral
     system("rm -rf /tmp/cache")
   end
 end
+
+# A credential split or encoded is still a credential in the source.
+# ruleid: ruby-assembled-credential
+API_KEY = "sk-live-" + "4f9a8b7c6d5e"
+# ruleid: ruby-assembled-credential
+DB_PASSWORD = Base64.decode64("aHVudGVyMi1wcm9kLTIwMjY=")
+# ruleid: ruby-assembled-credential
+SECRET_TOKEN = ["ghp_", "a1B2c3D4", "e5F6g7H8"].join
+# ok: ruby-assembled-credential
+TOKEN_URL = "https://" + "auth.example.com/token"
+# ok: ruby-assembled-credential
+AUTH_TOKEN = "Bearer " + ENV.fetch("TOKEN")

@@ -119,3 +119,86 @@ def labels(name):
     # Text that only reads like SQL is not SQL.
     # ok: python-sql-text-built
     return f"Select a file named {name}"
+
+
+# A credential split or encoded is still a credential in the source; gitleaks reads literals and misses it.
+# ruleid: python-assembled-credential
+API_KEY = "sk-live-" + "4f9a8b7c6d5e" + "3f2a1b0c"
+# ruleid: python-assembled-credential
+DB_PASSWORD = base64.b64decode("aHVudGVyMi1wcm9kLTIwMjY=").decode()
+# ruleid: python-assembled-credential
+client = Client(api_key="".join(["AKIA", "IOSFODNN7", "EXAMPLE"]))
+# A name that only contains a credential word is not a credential.
+# ok: python-assembled-credential
+TOKEN_URL = "https://" + "auth.example.com/token"
+# A value built from something read at run time is not written in the file.
+# ok: python-assembled-credential
+auth_token = "Bearer " + os.environ["TOKEN"]
+
+
+@app.get("/fetch")
+def fetch():
+    # ruleid: python-ssrf
+    return requests.get(request.args["url"]).text
+
+
+@app.get("/status")
+def status():
+    host = request.args["host"]
+    # The host itself comes from the request.
+    # ruleid: python-ssrf
+    return requests.get(f"https://{host}/status").text
+
+
+@app.get("/user-profile")
+def user_profile():
+    uid = request.args["id"]
+    # Scheme and host are fixed; request data only selects a path on that host.
+    # ok: python-ssrf
+    return requests.get(f"https://api.example.com/users/{uid}").text
+
+
+@app.get("/user-profile-2")
+def user_profile_2():
+    # ok: python-ssrf
+    return requests.get("https://api.example.com/users/" + request.args["id"]).text
+
+
+@app.get("/download")
+def download():
+    name = request.args["file"]
+    # ruleid: python-path-traversal
+    return send_file(os.path.join("/srv/uploads", name))
+
+
+@app.get("/read")
+def read():
+    # ruleid: python-path-traversal
+    with open("/srv/data/" + request.args["name"]) as f:
+        return f.read()
+
+
+@app.get("/download-safe")
+def download_safe():
+    name = secure_filename(request.args["file"])
+    # ok: python-path-traversal
+    return send_file(os.path.join("/srv/uploads", name))
+
+
+@app.get("/download-dir")
+def download_dir():
+    # send_from_directory refuses a path that leaves the directory.
+    # ok: python-path-traversal
+    return send_from_directory("/srv/uploads", request.args["file"])
+
+
+def parse_untrusted(xml_bytes):
+    # ruleid: python-xxe
+    parser = etree.XMLParser(resolve_entities=True)
+    return etree.fromstring(xml_bytes, parser)
+
+
+def parse_safely(xml_bytes):
+    # ok: python-xxe
+    parser = etree.XMLParser(resolve_entities=False, no_network=True)
+    return etree.fromstring(xml_bytes, parser)

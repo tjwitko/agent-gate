@@ -232,3 +232,235 @@ rules:
           - metavariable-regex:
               metavariable: $SQL
               regex: (?is)^\s*(select\s.+\sfrom\b|insert\s+into\b|update\s+\S+\s+set\b|delete\s+from\b)
+
+  # A credential assembled from literals is still in the source, just not as one string, so
+  # gitleaks -- which reads literals -- does not see it. Matched by the shape of the assembly and the
+  # name it is assigned to; the name has to END like a credential, so TOKEN_URL and password_field
+  # are left alone. Blocks: every piece of the value is written in the file. Each assignment form is
+  # spelled out with each shape, because Semgrep would not match the shapes as sub-patterns of a
+  # bound value. The name pattern starts with `.*?` because metavariable-regex anchors at the START:
+  # without it only names beginning with a credential word matched, which looked like the shapes failing.
+  - id: java-assembled-credential
+    languages: [java]
+    severity: ERROR
+    message: a credential is assembled from literals in the source
+    metadata: { category: hardcoded credential }
+    # Only literals as written. With constant propagation a variable holding a test password, plus
+    # ' this makes the password wrong', counted as two literals: Juice Shop's 2FA test matched.
+    options:
+      constant_propagation: false
+    patterns:
+      - pattern-either:
+          - pattern: '$T $V = "$A" + "$B";'
+          - pattern: '$T $V = "$A" + "$B" + "$C";'
+          - pattern: '$T $V = "$A" + "$B" + "$C" + "$D";'
+          - pattern: '$T $V = String.join($SEP, "$A", ...);'
+          - pattern: '$T $V = <... Base64.getDecoder().decode("$A") ...>;'
+          - pattern: '$T $V = <... java.util.Base64.getDecoder().decode("$A") ...>;'
+          - pattern: '$T $V = new StringBuilder("$A").reverse().toString();'
+          - pattern: '$V = "$A" + "$B";'
+          - pattern: '$V = "$A" + "$B" + "$C";'
+          - pattern: '$V = "$A" + "$B" + "$C" + "$D";'
+          - pattern: '$V = String.join($SEP, "$A", ...);'
+          - pattern: '$V = <... Base64.getDecoder().decode("$A") ...>;'
+          - pattern: '$V = <... java.util.Base64.getDecoder().decode("$A") ...>;'
+          - pattern: '$V = new StringBuilder("$A").reverse().toString();'
+      - metavariable-regex:
+          metavariable: $V
+          regex: (?i)^.*?(api_?key|access_?key|secret(_?key)?|signing_?key|private_?key|token|passw(or)?d|pwd|passphrase|credentials?)$
+      # A credential has no whitespace; prose does. The remedy text for this very category -- a key named
+      # "hardcoded credential" holding two concatenated sentences -- matched until this was added.
+      - metavariable-regex:
+          metavariable: $V
+          regex: ^\S+$
+      - pattern-not-regex: (["'])[^"'\n]*\s[^"'\n]*\1\s*\+|\+\s*(["'])[^"'\n]*\s[^"'\n]*\2
+
+  # SSRF: request data choosing where the server connects. A fixed scheme and host with request data
+  # only after the first path slash cannot be redirected, so that construction is a sanitizer.
+  - id: java-ssrf
+    mode: taint
+    languages: [java]
+    severity: ERROR
+    message: request data chooses where the server sends a request
+    metadata: { category: SSRF }
+    pattern-sources:
+      # Servlet API.
+      - pattern-either:
+          - pattern: (HttpServletRequest $R).getParameter(...)
+          - pattern: (HttpServletRequest $R).getParameterValues(...)
+          - pattern: (HttpServletRequest $R).getParameterMap()
+          - pattern: (HttpServletRequest $R).getHeader(...)
+          - pattern: (HttpServletRequest $R).getQueryString()
+          - pattern: (HttpServletRequest $R).getInputStream()
+          - pattern: (HttpServletRequest $R).getReader()
+          - pattern: (HttpServletRequest $R).getCookies()
+      # Spring MVC: a handler's annotated parameters are request data.
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  $RET $M(..., @RequestParam $T $P, ...) { ... }
+              - pattern-inside: |
+                  $RET $M(..., @RequestParam(...) $T $P, ...) { ... }
+              - pattern-inside: |
+                  $RET $M(..., @PathVariable $T $P, ...) { ... }
+              - pattern-inside: |
+                  $RET $M(..., @PathVariable(...) $T $P, ...) { ... }
+              - pattern-inside: |
+                  $RET $M(..., @RequestBody $T $P, ...) { ... }
+              - pattern-inside: |
+                  $RET $M(..., @RequestHeader $T $P, ...) { ... }
+              - pattern-inside: |
+                  $RET $M(..., @RequestHeader(...) $T $P, ...) { ... }
+          - pattern: $P
+    pattern-sinks:
+      # The request, not the URL. Building a URI from request data is how a redirect is validated or
+      # issued -- WebGoat's open-redirect lessons do exactly that -- and connects to nothing. A URL
+      # object built from request data stays tainted, so the call that opens it is the sink.
+      - patterns:
+          - pattern-either:
+              - pattern: $U.openConnection(...)
+              - pattern: $U.openStream()
+          - focus-metavariable: $U
+      - patterns:
+          - pattern-either:
+              - pattern: WebClient.create($URL)
+              - pattern: (RestTemplate $R).$M($URL, ...)
+              - pattern: HttpRequest.newBuilder($URL)
+              - pattern: HttpRequest.newBuilder().uri($URL)
+              - pattern: Jsoup.connect($URL)
+          - focus-metavariable: $URL
+    pattern-sanitizers:
+      - patterns:
+          - pattern-either:
+              - pattern: '"$P" + $X'
+              - pattern: String.format("$P", ...)
+          - metavariable-regex:
+              metavariable: $P
+              regex: ^https?://[^/%]+/
+
+  # Path traversal: request data naming a file the server opens, writes or deletes. Paths.get(a, b)
+  # and new File(dir, name) do not stop "../"; taking only the file name does.
+  - id: java-path-traversal
+    mode: taint
+    languages: [java]
+    severity: ERROR
+    message: request data names a file the server reads, writes or deletes
+    metadata: { category: path traversal }
+    pattern-sources:
+      # Servlet API.
+      - pattern-either:
+          - pattern: (HttpServletRequest $R).getParameter(...)
+          - pattern: (HttpServletRequest $R).getParameterValues(...)
+          - pattern: (HttpServletRequest $R).getParameterMap()
+          - pattern: (HttpServletRequest $R).getHeader(...)
+          - pattern: (HttpServletRequest $R).getQueryString()
+          - pattern: (HttpServletRequest $R).getInputStream()
+          - pattern: (HttpServletRequest $R).getReader()
+          - pattern: (HttpServletRequest $R).getCookies()
+      # Spring MVC: a handler's annotated parameters are request data.
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  $RET $M(..., @RequestParam $T $P, ...) { ... }
+              - pattern-inside: |
+                  $RET $M(..., @RequestParam(...) $T $P, ...) { ... }
+              - pattern-inside: |
+                  $RET $M(..., @PathVariable $T $P, ...) { ... }
+              - pattern-inside: |
+                  $RET $M(..., @PathVariable(...) $T $P, ...) { ... }
+              - pattern-inside: |
+                  $RET $M(..., @RequestBody $T $P, ...) { ... }
+              - pattern-inside: |
+                  $RET $M(..., @RequestHeader $T $P, ...) { ... }
+              - pattern-inside: |
+                  $RET $M(..., @RequestHeader(...) $T $P, ...) { ... }
+          - pattern: $P
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: new File($P)
+              - pattern: new File($D, $P)
+              - pattern: new java.io.File($P)
+              - pattern: Paths.get($P, ...)
+              - pattern: Paths.get($D, $P, ...)
+              - pattern: Path.of($P, ...)
+              - pattern: Path.of($D, $P, ...)
+              - pattern: new FileInputStream($P)
+              - pattern: new FileOutputStream($P, ...)
+              - pattern: new FileReader($P, ...)
+              - pattern: new FileWriter($P, ...)
+          - focus-metavariable: $P
+    pattern-sanitizers:
+      - pattern: FilenameUtils.getName(...)
+      - pattern: $X.getFileName()
+      - pattern: Integer.parseInt(...)
+      - pattern: UUID.fromString(...)
+
+  # XXE: Java's XML factories resolve external entities unless told not to, so the advisory is a
+  # factory created without being hardened in the same method.
+  - id: java-xxe
+    languages: [java]
+    severity: WARNING
+    message: an XML parser factory is created without disabling external entities
+    metadata: { category: XXE }
+    pattern-either:
+      - patterns:
+          - pattern-either:
+              - pattern: $T $F = DocumentBuilderFactory.newInstance();
+              - pattern: $F = DocumentBuilderFactory.newInstance();
+          - pattern-not-inside: |
+              $T $F = DocumentBuilderFactory.newInstance();
+              ...
+              $F.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+          - pattern-not-inside: |
+              $T $F = DocumentBuilderFactory.newInstance();
+              ...
+              $F.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
+          - pattern-not-inside: |
+              $F = DocumentBuilderFactory.newInstance();
+              ...
+              $F.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+          - pattern-not-inside: |
+              $F = DocumentBuilderFactory.newInstance();
+              ...
+              $F.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
+      - patterns:
+          - pattern-either:
+              - pattern: $T $F = SAXParserFactory.newInstance();
+              - pattern: $F = SAXParserFactory.newInstance();
+          - pattern-not-inside: |
+              $T $F = SAXParserFactory.newInstance();
+              ...
+              $F.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+          - pattern-not-inside: |
+              $F = SAXParserFactory.newInstance();
+              ...
+              $F.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+      - patterns:
+          - pattern-either:
+              - pattern: $T $F = XMLInputFactory.newInstance();
+              - pattern: $F = XMLInputFactory.newInstance();
+          - pattern-not-inside: |
+              $T $F = XMLInputFactory.newInstance();
+              ...
+              $F.setProperty(XMLInputFactory.SUPPORT_DTD, false);
+          - pattern-not-inside: |
+              $T $F = XMLInputFactory.newInstance();
+              ...
+              $F.setProperty("javax.xml.stream.supportDTD", false);
+          - pattern-not-inside: |
+              $T $F = XMLInputFactory.newInstance();
+              ...
+              $F.setProperty(XMLInputFactory.IS_SUPPORTING_EXTERNAL_ENTITIES, false);
+          - pattern-not-inside: |
+              $F = XMLInputFactory.newInstance();
+              ...
+              $F.setProperty(XMLInputFactory.SUPPORT_DTD, false);
+          - pattern-not-inside: |
+              $F = XMLInputFactory.newInstance();
+              ...
+              $F.setProperty("javax.xml.stream.supportDTD", false);
+          - pattern-not-inside: |
+              $F = XMLInputFactory.newInstance();
+              ...
+              $F.setProperty(XMLInputFactory.IS_SUPPORTING_EXTERNAL_ENTITIES, false);

@@ -520,11 +520,11 @@ nothing it writes overwrites.
 
 | concern | blocks on | reports, without blocking | covers |
 |---|---|---|---|
-| secrets | credentials hardcoded in any file | — | every file |
+| secrets | credentials hardcoded in any file; a credential-named value assembled from literals (split, joined, base64- or hex-encoded) | — | every file; assembly in Python, JavaScript/TypeScript, Go, Java, Ruby |
 | dependencies | high or critical CVEs; a manifest that declares dependencies with no lockfile the scanner can read | CVEs in an unlocked `requirements.txt`, `go.mod` or `pom.xml` | npm, PyPI, Go, Maven, Cargo, RubyGems, Packagist and the rest of [OSV](https://osv.dev) |
-| injection | request data reaching a shell, a SQL statement or an evaluator | a query or command built from a value of unknown origin | Python, JavaScript/TypeScript, Go, Java, Ruby — Flask, Django, FastAPI, Express, `net/http`, gin, Spring, servlets, Rails, Sinatra |
+| injection | request data reaching a shell, a SQL statement, an evaluator, an outbound request's host (SSRF) or a file path (path traversal) | a query or command built from a value of unknown origin; an XML parser that resolves external entities (XXE) | Python, JavaScript/TypeScript, Go, Java, Ruby — Flask, Django, FastAPI, Express, `net/http`, gin, Spring, servlets, Rails, Sinatra |
 | authentication | routes anyone can call; a credential compared with `==` or accepted when unset | routes exempt by name, each listed | Python, JavaScript/TypeScript, Go, Java, Ruby |
-| infrastructure | Terraform plan and policy violations; IAM, IRSA and Kubernetes manifests that contradict the code; workloads authenticating with held credentials | checkov's Terraform findings | Terraform (AWS), Kubernetes YAML |
+| infrastructure | Terraform plan and policy violations; IAM, IRSA and Kubernetes manifests that contradict the code; workloads authenticating with held credentials | checkov's findings on Terraform for any cloud, CloudFormation, ARM and Bicep | blocking: Terraform (AWS), Kubernetes YAML; advisory: also CloudFormation, ARM, Bicep |
 | containers | a base image past end of life, in any build stage | checkov's Dockerfile rules — `USER`, `HEALTHCHECK` | official `node`, `python`, `golang`, `ruby`, `php`, `debian`, `ubuntu`, `alpine`, `eclipse-temurin` images |
 | build | syntax errors, undefined names, a Go build that fails | — | Python, JavaScript, Go |
 | task requirements | tests that fail or do not exist, a store that can be altered, a retention period not met, a secret that cannot rotate, client errors reported as 500s, a named artifact missing — **each only when the task or a [baseline](#requirements-the-codes-author-cannot-remove) states it** | — | tests run under `node --test`, jest, vitest, pytest and `go test`; error distinction in Python |
@@ -563,10 +563,15 @@ A few are worth calling out because they exist in response to measured failures:
   `golang`, `ruby`, `php`, `debian`, `ubuntu`, `alpine` and `eclipse-temurin` images, and the OS
   named in a language image's tag (`-buster`, `-alpine3.18`) is judged too. checkov's Dockerfile
   rules — no `USER`, no `HEALTHCHECK` — are reported as advisories.
-- **`sast` blocks on injection** — request data reaching a shell, a SQL statement or `eval`, in
-  Python, JavaScript/TypeScript, Go, Java and Ruby. It runs Semgrep with this project's own rules, and only the
-  ones that trace data from an HTTP request to the dangerous call block; they produced no findings
-  across 9,940 files of real code before they were allowed to. Code that builds a query or a shell
+- **`sast` blocks on injection** — request data reaching a shell, a SQL statement, `eval`, the host
+  of an outbound request (SSRF) or a file path (path traversal), in Python, JavaScript/TypeScript, Go,
+  Java and Ruby. A URL whose scheme and host are fixed in the code, with request data only in the
+  path, is not SSRF and is not reported. It runs Semgrep with this project's own rules, and only the
+  ones that trace data from an HTTP request to the dangerous call block. Before they were allowed to,
+  they produced no blocking findings across about 30,000 files of real code — seven open-source web
+  applications in five languages and the installed packages on the development machine — while
+  finding the documented vulnerabilities in OWASP's deliberately vulnerable WebGoat, RailsGoat,
+  Juice Shop and PyGoat. Code that builds a query or a shell
   command from a value of unknown origin is an advisory. Neither `.semgrepignore` nor an inline
   `# nosemgrep` hides code from it.
   In Python it also catches a broad `except Exception` that turns the handler's own 400 into a 500 —
@@ -585,17 +590,22 @@ Listed so that a clean verdict is read for what it is.
   open-source analysis does not cross calls. A helper that builds a query from its argument is reported
   as an advisory, not a finding: SQL text built from a value is reported where it is built, whichever
   function later runs it. A shell command built that way is reported only where it is run.
-- **Other classes of injection.** Shell, SQL and evaluators (`eval`, `exec`, `pickle.loads`,
-  `yaml.load`, `new Function`) are covered. Cross-site scripting, server-side request forgery, path
-  traversal and XML external entities are not.
+- **Other classes of injection.** Shell, SQL, evaluators, SSRF and path traversal are covered, and
+  an XML parser configured to resolve external entities is an advisory. Cross-site scripting is not:
+  templates escape by default, so what is worth checking is the escape hatches (`|safe`, `Markup()`,
+  `dangerouslySetInnerHTML`, `html_safe`), and that is not written yet. Neither is server-side
+  template injection, LDAP injection or open redirect.
 - **Authorisation.** `authentication` checks that a route requires a caller identity, not what that
   caller may then do.
 - **The built image.** A Dockerfile's base image is judged; the packages inside a built image are not
   scanned. That needs a build or a pull, so it is a job for a CI step with Trivy or Grype.
 - **Secrets assembled at run time.** gitleaks reads literals, including credentials that only look
-  random. A key split across concatenated strings, or decoded at startup, is not seen.
-- **Infrastructure beyond Terraform on AWS and Kubernetes.** CloudFormation, Pulumi, and Terraform
-  for other clouds are not judged by the policy rules.
+  random, and a credential-named value assembled from literals — split, joined, reversed, base64- or
+  hex-encoded — is caught too. A key built by a loop, fetched from somewhere unsafe, or held under a
+  name that does not say what it is, is not seen.
+- **Blocking infrastructure policy beyond Terraform on AWS and Kubernetes.** Terraform for Azure and
+  GCP, CloudFormation, ARM and Bicep get checkov's findings as advisories; none of them can block.
+  Pulumi programs are not read as infrastructure at all.
 - **Requirements nobody stated.** The task-gated checks run only when the task or a baseline states
   the requirement. Without either they report "not checked", which is accurate and much less useful.
 - **A commit made with `--no-verify`.** The hook is a convenience. CI with the gate as a required check

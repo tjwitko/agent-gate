@@ -98,11 +98,21 @@ function run(files) {
   return { doc };
 }
 
-const CATEGORY_ORDER = ["command injection", "SQL injection", "code injection", "error distinction", "error detail"];
+const CATEGORY_ORDER = ["hardcoded credential", "command injection", "SQL injection", "code injection", "SSRF", "path traversal", "XXE", "error distinction", "error detail"];
 const REMEDY = {
+  "hardcoded credential":
+    "Splitting or encoding a credential does not take it out of the source. Read it from the environment " +
+    "or a secret manager at run time, and rotate it: it is in the repository's history now.",
   "command injection": "Pass arguments as a list to a call that does not start a shell, and never build a command string from input.",
   "SQL injection": "Use a parameterised query: placeholders in the statement, values passed separately.",
   "code injection": "Parse the input as data — JSON, a number, an allow-list — rather than evaluating it.",
+  SSRF:
+    "Fix the scheme and host in the code and let request data choose only the path, or check the host " +
+    "against an allow-list before connecting -- otherwise the server can be pointed at internal services " +
+    "and cloud metadata endpoints.",
+  "path traversal":
+    "Take only the file name (basename) or look the file up by an ID; joining a request value onto a " +
+    "directory does not stop `../`.",
   "error distinction":
     "A malformed request comes back as 5xx instead of 4xx: the caller is told the service is broken when the " +
     "request was, and a webhook sender seeing 5xx retries a request that can never succeed. Add `except " +
@@ -114,6 +124,7 @@ const REMEDY = {
 // advisory. Error detail is always an advisory: exception text in a response is a disclosure, but a
 // small one, and not what the task is judged on.
 const ADVISORY_WHY = {
+  XXE: " — the parser configuration is the risk, whatever input it is given",
   "error distinction": " — the task does not ask for client errors to be kept distinct",
   "error detail": " — a disclosure rather than a defect, but the caller sees internal detail",
   "SQL injection": " — where the value comes from is not known here",

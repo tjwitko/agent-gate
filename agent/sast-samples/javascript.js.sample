@@ -105,3 +105,79 @@ async function byEvent(eventId, providerId) {
   }
   return pool.query(query, params);
 }
+
+// A credential split or encoded is still a credential in the source.
+// ruleid: javascript-assembled-credential
+const API_KEY = "sk-live-" + "4f9a8b7c6d5e" + "3f2a1b0c";
+// ruleid: javascript-assembled-credential
+const dbPassword = Buffer.from("aHVudGVyMi1wcm9kLTIwMjY=", "base64").toString();
+// ruleid: javascript-assembled-credential
+const sdk = new Client({ apiKey: ["AKIA", "IOSFODNN7", "EXAMPLE"].join("") });
+// ok: javascript-assembled-credential
+const TOKEN_URL = "https://" + "auth.example.com/token";
+// ok: javascript-assembled-credential
+const authToken = "Bearer " + process.env.TOKEN;
+
+app.get("/fetch", async (req, res) => {
+  // ruleid: javascript-ssrf
+  const r = await fetch(req.query.url);
+  res.send(await r.text());
+});
+
+app.get("/profile", async (req, res) => {
+  // Scheme and host are fixed; request data only selects a path on that host.
+  // ok: javascript-ssrf
+  const r = await fetch(`https://api.example.com/users/${req.query.id}`);
+  res.send(await r.text());
+});
+
+app.get("/status", async (req, res) => {
+  // ruleid: javascript-ssrf
+  const r = await axios.get(`https://${req.query.host}/status`);
+  res.send(r.data);
+});
+
+app.get("/download", (req, res) => {
+  // ruleid: javascript-path-traversal
+  res.sendFile(path.join("/srv/uploads", req.query.file));
+});
+
+app.get("/download-root", (req, res) => {
+  // With a root, Express refuses a path that leaves it.
+  // ok: javascript-path-traversal
+  res.sendFile(req.query.file, { root: "/srv/uploads" });
+});
+
+app.get("/read", (req, res) => {
+  // ruleid: javascript-path-traversal
+  res.send(fs.readFileSync("/srv/data/" + req.params.name, "utf8"));
+});
+
+app.get("/read-safe", (req, res) => {
+  // ok: javascript-path-traversal
+  res.send(fs.readFileSync(path.join("/srv/data", path.basename(req.params.name)), "utf8"));
+});
+
+function parseUntrusted(xml) {
+  // ruleid: javascript-xxe
+  return libxmljs.parseXml(xml, { noent: true });
+}
+
+function parseSafely(xml) {
+  // ok: javascript-xxe
+  return libxmljs.parseXml(xml, { noent: false });
+}
+
+app.post("/avatar", (req, res) => {
+  // The user is looked up server-side by the cookie; its id is server data (Juice Shop's shape).
+  const user = sessions.get(req.cookies.token);
+  // ok: javascript-path-traversal
+  fs.writeFileSync(`/srv/avatars/${user.id}.png`, req.body);
+  res.end();
+});
+
+function wrongPassword(password) {
+  // A variable plus a sentence is not a credential written in the source.
+  // ok: javascript-assembled-credential
+  return { password: password + " this makes the password wrong" };
+}

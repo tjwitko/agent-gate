@@ -123,3 +123,149 @@ rules:
           - metavariable-regex:
               metavariable: $SQL
               regex: (?is)^\s*(select\s.+\sfrom\b|insert\s+into\b|update\s+\S+\s+set\b|delete\s+from\b)
+
+  # A credential assembled from literals is still in the source, just not as one string, so
+  # gitleaks -- which reads literals -- does not see it. Matched by the shape of the assembly and the
+  # name it is assigned to; the name has to END like a credential, so TOKEN_URL and password_field
+  # are left alone. Blocks: every piece of the value is written in the file. Each assignment form is
+  # spelled out with each shape, because Semgrep would not match the shapes as sub-patterns of a
+  # bound value. The name pattern starts with `.*?` because metavariable-regex anchors at the START:
+  # without it only names beginning with a credential word matched, which looked like the shapes failing.
+  - id: go-assembled-credential
+    languages: [go]
+    severity: ERROR
+    message: a credential is assembled from literals in the source
+    metadata: { category: hardcoded credential }
+    # Only literals as written. With constant propagation a variable holding a test password, plus
+    # ' this makes the password wrong', counted as two literals: Juice Shop's 2FA test matched.
+    options:
+      constant_propagation: false
+    patterns:
+      - pattern-either:
+          - pattern: '$V := "$A" + "$B"'
+          - pattern: '$V := "$A" + "$B" + "$C"'
+          - pattern: '$V := "$A" + "$B" + "$C" + "$D"'
+          - pattern: '$V := strings.Join([]string{...}, $SEP)'
+          - pattern: '$V = "$A" + "$B"'
+          - pattern: '$V = "$A" + "$B" + "$C"'
+          - pattern: '$V = "$A" + "$B" + "$C" + "$D"'
+          - pattern: '$V = strings.Join([]string{...}, $SEP)'
+          - pattern: 'var $V = "$A" + "$B"'
+          - pattern: 'var $V = "$A" + "$B" + "$C"'
+          - pattern: 'var $V = "$A" + "$B" + "$C" + "$D"'
+          - pattern: 'var $V = strings.Join([]string{...}, $SEP)'
+          - pattern: 'const $V = "$A" + "$B"'
+          - pattern: 'const $V = "$A" + "$B" + "$C"'
+          - pattern: 'const $V = "$A" + "$B" + "$C" + "$D"'
+          - pattern: 'const $V = strings.Join([]string{...}, $SEP)'
+      - metavariable-regex:
+          metavariable: $V
+          regex: (?i)^.*?(api_?key|access_?key|secret(_?key)?|signing_?key|private_?key|token|passw(or)?d|pwd|passphrase|credentials?)$
+      # A credential has no whitespace; prose does. The remedy text for this very category -- a key named
+      # "hardcoded credential" holding two concatenated sentences -- matched until this was added.
+      - metavariable-regex:
+          metavariable: $V
+          regex: ^\S+$
+      - pattern-not-regex: (["'])[^"'\n]*\s[^"'\n]*\1\s*\+|\+\s*(["'])[^"'\n]*\s[^"'\n]*\2
+
+  # SSRF: request data choosing where the server connects. A fixed scheme and host with request data
+  # only after the first path slash cannot be redirected, so that construction is a sanitizer.
+  # encoding/xml does not resolve external entities, so Go has no XXE rule.
+  - id: go-ssrf
+    mode: taint
+    languages: [go]
+    severity: ERROR
+    message: request data chooses where the server sends a request
+    metadata: { category: SSRF }
+    pattern-sources:
+      - patterns:
+          - pattern-inside: |
+              func $F(..., $R *http.Request, ...) {
+                ...
+              }
+          - pattern-either:
+              - pattern: $R.URL.Query()
+              - pattern: $R.URL.Path
+              - pattern: $R.FormValue(...)
+              - pattern: $R.PostFormValue(...)
+              - pattern: $R.Header.Get(...)
+              - pattern: $R.Body
+              - pattern: $R.PathValue(...)
+      - patterns:
+          - pattern-inside: |
+              func $F(..., $C *gin.Context, ...) {
+                ...
+              }
+          - pattern-either:
+              - pattern: $C.Query(...)
+              - pattern: $C.Param(...)
+              - pattern: $C.PostForm(...)
+              - pattern: $C.GetHeader(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: http.Get($URL)
+              - pattern: http.Head($URL)
+              - pattern: http.Post($URL, ...)
+              - pattern: http.PostForm($URL, ...)
+              - pattern: http.NewRequest($M, $URL, ...)
+              - pattern: http.NewRequestWithContext($CTX, $M, $URL, ...)
+          - focus-metavariable: $URL
+    pattern-sanitizers:
+      - patterns:
+          - pattern-either:
+              - pattern: '"$P" + $X'
+              - pattern: fmt.Sprintf("$P", ...)
+          - metavariable-regex:
+              metavariable: $P
+              regex: ^https?://[^/%]+/
+
+  # Path traversal: request data naming a file the server opens, writes or deletes. filepath.Join and
+  # filepath.Clean do not stop "../"; filepath.Base does.
+  - id: go-path-traversal
+    mode: taint
+    languages: [go]
+    severity: ERROR
+    message: request data names a file the server reads, writes or deletes
+    metadata: { category: path traversal }
+    pattern-sources:
+      - patterns:
+          - pattern-inside: |
+              func $F(..., $R *http.Request, ...) {
+                ...
+              }
+          - pattern-either:
+              - pattern: $R.URL.Query()
+              - pattern: $R.URL.Path
+              - pattern: $R.FormValue(...)
+              - pattern: $R.PostFormValue(...)
+              - pattern: $R.Header.Get(...)
+              - pattern: $R.Body
+              - pattern: $R.PathValue(...)
+      - patterns:
+          - pattern-inside: |
+              func $F(..., $C *gin.Context, ...) {
+                ...
+              }
+          - pattern-either:
+              - pattern: $C.Query(...)
+              - pattern: $C.Param(...)
+              - pattern: $C.PostForm(...)
+              - pattern: $C.GetHeader(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: os.Open($P)
+              - pattern: os.OpenFile($P, ...)
+              - pattern: os.ReadFile($P)
+              - pattern: ioutil.ReadFile($P)
+              - pattern: os.Create($P)
+              - pattern: os.WriteFile($P, ...)
+              - pattern: os.Remove($P)
+              - pattern: os.RemoveAll($P)
+              - pattern: http.ServeFile($W, $R, $P)
+          - focus-metavariable: $P
+    pattern-sanitizers:
+      - pattern: filepath.Base(...)
+      - pattern: path.Base(...)
+      - pattern: strconv.Atoi(...)

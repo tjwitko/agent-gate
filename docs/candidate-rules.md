@@ -980,6 +980,83 @@ A consequence worth knowing: a requirement stated in the task or a baseline — 
 cannot be enforced on code no check reads. On a Rust project it reports "not executed" rather than
 blocking. The NOT READ line is what makes that visible.
 
+### Found by a second outside review (14–16)
+
+A second review of the README, after v1.1.14, listed seven gaps — every one of them already written in
+"What it does not check". Read back that way, a review measures the limits list rather than finding
+defects. Three were cheap enough to close; the rest are recorded under #13, #17 and #12.
+
+### 14. Credentials assembled from literals — fixed
+
+gitleaks reads literals, so a credential split across concatenated strings, joined from a list,
+reversed, or base64- or hex-decoded from a literal was invisible. A blocking rule in each of the five
+languages now catches a credential-named value assembled from literals only. Four things it took to
+get right, each found by its own probe before anything shipped: Semgrep would not match the assembly
+shapes as sub-patterns of a bound value, so every assignment form is spelled out with every shape;
+`metavariable-regex` anchors at the start, so names like `DB_PASSWORD` failed until the pattern began
+with `.*?`; constant propagation made a variable plus a sentence (Juice Shop's 2FA test) look like two
+literals; and the rule's own remedy text — a key named "hardcoded credential" holding two sentences —
+matched until whitespace in a piece excluded it. Zero hits on the local corpus; the samples stay
+invisible to gitleaks and push protection.
+
+### 15. CloudFormation, ARM and Bicep were read by nothing — fixed
+
+checkov was installed and run, but only in its Terraform mode, which already covers Azure and GCP
+providers. `agent/iac-templates.mjs` finds CloudFormation, ARM and Bicep templates by content and runs
+checkov's rules on them as advisories — the same tier as checkov on Terraform. The blocking policies
+remain terraform-guard's and remain AWS-only; Pulumi programs are still not read as infrastructure.
+
+### 16. SSRF, path traversal and XXE — fixed
+
+Blocking taint rules for SSRF and path traversal, and advisories for XXE, in all five languages (Go
+has no XXE rule: `encoding/xml` does not resolve external entities). A URL whose scheme and host are
+fixed literals, with request data only after the first path slash, is a sanitizer: it cannot be
+pointed anywhere else. `send_from_directory` and `res.sendFile(…, {root})` check the path and are not
+sinks; `basename`, `secure_filename` and their equivalents are sanitizers; joining onto a directory is
+not.
+
+Measured on eleven shallow-cloned applications, scanned and never run:
+
+| application | kind | files | blocking |
+| --- | --- | --- | --- |
+| Spring PetClinic, Spring RealWorld | real (Java) | 166 | 0 |
+| rubygems.org, Mastodon | real (Rails) | 5,741 | 0 |
+| NetBox | real (Django) | 1,343 | 0 |
+| Outline | real (Koa, TypeScript) | 2,616 | 0 |
+| Gitea | real (Go) | 3,400 | 0 |
+| OWASP WebGoat | vulnerable | 594 | 3, all real |
+| OWASP RailsGoat | vulnerable | 143 | 6, all real |
+| OWASP Juice Shop | vulnerable | 658 | 11: 8 real, 3 guarded by checks taint cannot see |
+| OWASP PyGoat | vulnerable | 85 | 8, all real |
+
+The first measurement found three classes of false positive, each fixed and kept as an `ok` sample:
+
+- **Building a URL is not requesting it.** Java's `new URI(…)` and Ruby's `URI.parse` were sinks, and
+  WebGoat's open-redirect lessons — which build a URI to validate or redirect to — produced ten
+  blocking SSRF findings. The sink is now the request: `openConnection`, `openStream`, the HTTP
+  clients, `Net::HTTP`, `URI.open`.
+- **JavaScript's request sources matched any object.** `$REQ.url` matched `import.meta.url`, so this
+  gate's own module-relative file reads were "path traversal" — 28 of them. Sources now require the
+  object to be the request (`req`, `request`, `ctx.request`), plus Koa's `ctx` and Lambda's `event`.
+  The injection rules had the same flaw and simply had not met it.
+- **A lookup by a tainted key returns server data.** Juice Shop builds an upload path from
+  `authenticatedUsers.get(req.cookies.token).data.id`. A one-argument `.get` on server state is now a
+  sanitizer for SSRF and path traversal. The first version matched `app.get("/path", handler)` and
+  sanitized every Express route, which the samples caught at once.
+
+Plus, after the fixes, the local corpus: 267 files of deliverables and repositories, 4,938 of
+installed Python, 5,325 of installed JavaScript and 6,633 of Ruby — no blocking findings anywhere
+real. About 30,000 files in all.
+
+Advisories are louder, as advisories should be: Gitea produced 100, all SQL built with `fmt.Sprintf`,
+almost all in its migrations and database helpers, where a table name is interpolated into DDL
+because SQL cannot take an identifier as a parameter. They describe the code accurately; they are
+why these stay advisories.
+
+The three Juice Shop findings that remain are code guarded by an allow-list the analysis cannot see —
+a ternary over permitted extensions, and a lookup that returns 404 for an unknown key before the file
+is read. Taint does not model checks; this is the documented cost of a rule that blocks.
+
 ### 13. Injection rules for C#, Rust and C/C++ — next
 
 Java and Ruby joined Python, JavaScript/TypeScript and Go in #9. The next set, in order: **C#**

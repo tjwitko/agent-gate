@@ -1,0 +1,126 @@
+package samples;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.Statement;
+import java.util.List;
+import javax.persistence.EntityManager;
+import javax.script.ScriptEngine;
+import javax.servlet.http.HttpServletRequest;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+public class Samples {
+    private JdbcTemplate jdbc;
+    private EntityManager em;
+    private Connection conn;
+    private ScriptEngine engine;
+
+    @GetMapping("/ping")
+    public String ping(@RequestParam String host) throws Exception {
+        // ruleid: java-command-injection, java-shell-nonliteral
+        Process p = Runtime.getRuntime().exec("ping -c1 " + host);
+        return "ok";
+    }
+
+    @GetMapping("/ping-shell")
+    public String pingShell(@RequestParam("host") String host) throws Exception {
+        // ruleid: java-command-injection, java-shell-nonliteral
+        new ProcessBuilder("sh", "-c", "ping -c1 " + host).start();
+        return "ok";
+    }
+
+    @GetMapping("/ping-args")
+    public String pingArgs(@RequestParam String host) throws Exception {
+        // An argument array starts no shell; the request value is one argument.
+        // ok: java-command-injection, java-shell-nonliteral
+        Runtime.getRuntime().exec(new String[]{"ping", "-c1", host});
+        return "ok";
+    }
+
+    @GetMapping("/user")
+    public List<?> user(@RequestParam String name) {
+        // ruleid: java-sql-injection, java-sql-string-built, java-sql-text-built
+        return jdbc.queryForList("SELECT * FROM users WHERE name = '" + name + "'");
+    }
+
+    @GetMapping("/user-safe")
+    public List<?> userSafe(@RequestParam String name) {
+        // ok: java-sql-injection, java-sql-string-built
+        return jdbc.queryForList("SELECT * FROM users WHERE name = ?", name);
+    }
+
+    @GetMapping("/item/{id}")
+    public Object item(@PathVariable String id) {
+        // ruleid: java-sql-injection, java-sql-text-built
+        return em.createNativeQuery(String.format("SELECT * FROM items WHERE id = '%s'", id)).getResultList();
+    }
+
+    @GetMapping("/page")
+    public List<?> page(@RequestParam String limit) {
+        int n = Integer.parseInt(limit);
+        // A sanitised value: the flow is not flagged; the construction still is.
+        // ok: java-sql-injection
+        // ruleid: java-sql-string-built, java-sql-text-built
+        return jdbc.queryForList("SELECT * FROM users LIMIT " + n);
+    }
+
+    public ResultSet servlet(HttpServletRequest request) throws Exception {
+        String name = request.getParameter("name");
+        Statement st = conn.createStatement();
+        // ruleid: java-sql-injection, java-sql-string-built, java-sql-text-built
+        return st.executeQuery("SELECT * FROM users WHERE name = '" + name + "'");
+    }
+
+    public ResultSet servletSafe(HttpServletRequest request) throws Exception {
+        PreparedStatement ps = conn.prepareStatement("SELECT * FROM users WHERE name = ?");
+        // ok: java-sql-injection
+        ps.setString(1, request.getParameter("name"));
+        return ps.executeQuery();
+    }
+
+    @PostMapping("/calc")
+    public Object calc(@RequestBody String expr) throws Exception {
+        // ruleid: java-code-injection
+        return engine.eval(expr);
+    }
+
+    public ResultSet report(String table) throws Exception {
+        Statement st = conn.createStatement();
+        // No request data: the construction is flagged, the flow is not.
+        // ok: java-sql-injection
+        // ruleid: java-sql-string-built, java-sql-text-built
+        return st.executeQuery("SELECT count(*) FROM " + table);
+    }
+
+    // WebGoat's shape: the request value crosses two calls before it is executed, which the taint rule
+    // cannot follow. The text is reported where it is built.
+    @PostMapping("/lookup")
+    public ResultSet lookup(@RequestParam String name) throws Exception {
+        return runQuery(buildQuery(name));
+    }
+
+    private String buildQuery(String name) {
+        // ruleid: java-sql-text-built
+        return "SELECT * FROM users WHERE last_name = '" + name + "'";
+    }
+
+    private ResultSet runQuery(String query) throws Exception {
+        // ok: java-sql-injection, java-sql-string-built
+        return conn.createStatement().executeQuery(query);
+    }
+
+    public void fixedShell() throws Exception {
+        // A shell, but its command is fixed: an array variable of literals builds nothing.
+        String[] args = new String[] { "/bin/sh", "-c", "echo $PPID" };
+        // ok: java-command-injection, java-shell-nonliteral
+        Runtime.getRuntime().exec(args);
+    }
+
+    public void housekeeping() throws Exception {
+        // ok: java-command-injection, java-shell-nonliteral
+        Runtime.getRuntime().exec("rm -rf /tmp/cache");
+    }
+}

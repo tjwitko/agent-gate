@@ -7,7 +7,7 @@ export async function remove(req: Request, res: Response) {
   const name: string = req.params.name as string;
   // ruleid: javascript-command-injection, javascript-shell-nonliteral
   exec(`echo ${name}`);
-  // ruleid: javascript-sql-injection, javascript-sql-string-built
+  // ruleid: javascript-sql-injection, javascript-sql-string-built, javascript-sql-text-built
   await pool.query(`DELETE FROM t WHERE name = '${name}'`);
   // ok: javascript-sql-injection, javascript-sql-string-built
   await pool.query("DELETE FROM t WHERE name = $1", [name]);

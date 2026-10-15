@@ -1,0 +1,155 @@
+# Injection rules for Ruby (Rails, Sinatra), written for agent-gate. See python.yaml for the split
+# between blocking taint rules (ERROR) and advisory pattern rules (WARNING).
+#
+# Measured against Semgrep's Ruby matching before being written: `system($X)` matches the
+# single-string form only, so `system("ping", host)` -- no shell -- is never a sink; and
+# `$M.where($Q, ...)` does not match the keyword form `where(name: params[:n])`, which Rails
+# parameterises.
+rules:
+  - id: ruby-command-injection
+    mode: taint
+    languages: [ruby]
+    severity: ERROR
+    message: request data reaches a shell command
+    metadata: { category: command injection }
+    pattern-sources:
+      - pattern-either:
+          - pattern: params
+          - pattern: request.params
+          - pattern: request.query_parameters
+          - pattern: request.request_parameters
+          - pattern: request.headers
+          - pattern: request.body
+          - pattern: request.raw_post
+          - pattern: cookies
+    pattern-sinks:
+      - pattern-either:
+          # Backticks and %x() run their string through a shell; the expression is the sink.
+          - pattern: "`...`"
+          - patterns:
+              - pattern-either:
+                  - pattern: system($CMD)
+                  - pattern: Kernel.system($CMD)
+                  - pattern: exec($CMD)
+                  - pattern: spawn($CMD)
+                  - pattern: IO.popen($CMD, ...)
+                  - pattern: Open3.capture2($CMD, ...)
+                  - pattern: Open3.capture2e($CMD, ...)
+                  - pattern: Open3.capture3($CMD, ...)
+                  - pattern: Open3.popen3($CMD, ...)
+              - focus-metavariable: $CMD
+
+  - id: ruby-sql-injection
+    mode: taint
+    languages: [ruby]
+    severity: ERROR
+    message: request data is built into a SQL statement
+    metadata: { category: SQL injection }
+    pattern-sources:
+      - pattern-either:
+          - pattern: params
+          - pattern: request.params
+          - pattern: request.query_parameters
+          - pattern: request.request_parameters
+          - pattern: request.headers
+          - pattern: request.body
+          - pattern: request.raw_post
+          - pattern: cookies
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $M.find_by_sql($Q, ...)
+              - pattern: $M.where($Q, ...)
+              - pattern: $M.order($Q, ...)
+              - pattern: $M.reorder($Q, ...)
+              - pattern: $M.group($Q, ...)
+              - pattern: $M.having($Q, ...)
+              - pattern: $M.joins($Q, ...)
+              - pattern: $M.select($Q, ...)
+              - pattern: $M.pluck($Q, ...)
+              - pattern: $M.count_by_sql($Q, ...)
+              - pattern: $C.execute($Q, ...)
+              - pattern: $C.exec_query($Q, ...)
+              - pattern: $C.select_all($Q, ...)
+              - pattern: $C.select_one($Q, ...)
+              - pattern: $C.select_value($Q, ...)
+              - pattern: $C.select_rows($Q, ...)
+          - focus-metavariable: $Q
+          # A hash or array argument is bound by Rails, not concatenated.
+          - pattern-not: "{...}"
+          - pattern-not: "[...]"
+    pattern-sanitizers:
+      - pattern: $X.to_i
+      - pattern: Integer(...)
+      - pattern: $C.quote(...)
+      - pattern: ActiveRecord::Base.sanitize_sql(...)
+      - pattern: $M.sanitize_sql_array(...)
+
+  - id: ruby-code-injection
+    mode: taint
+    languages: [ruby]
+    severity: ERROR
+    message: request data is evaluated as code
+    metadata: { category: code injection }
+    pattern-sources:
+      - pattern-either:
+          - pattern: params
+          - pattern: request.params
+          - pattern: request.body
+          - pattern: request.raw_post
+          - pattern: cookies
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: eval($X, ...)
+              - pattern: $O.instance_eval($X, ...)
+              - pattern: $O.class_eval($X, ...)
+              - pattern: $O.module_eval($X, ...)
+              - pattern: Marshal.load($X, ...)
+              - pattern: YAML.load($X, ...)
+              - pattern: Object.const_get($X, ...)
+              - pattern: $O.send($X, ...)
+              - pattern: $O.public_send($X, ...)
+          - focus-metavariable: $X
+      - pattern: $X.constantize
+
+  - id: ruby-sql-string-built
+    languages: [ruby]
+    severity: WARNING
+    message: a SQL statement is built by string interpolation or concatenation rather than passed parameters
+    metadata: { category: SQL injection }
+    patterns:
+      - pattern-either:
+          - pattern: $M.$METHOD("...#{$X}...", ...)
+          - pattern: $M.$METHOD("..." + $X, ...)
+          - pattern: $M.$METHOD($X + "...", ...)
+      - metavariable-regex:
+          metavariable: $METHOD
+          regex: ^(find_by_sql|where|order|reorder|group|having|joins|count_by_sql|execute|exec_query|select_all|select_one|select_value|select_rows)$
+
+  - id: ruby-shell-nonliteral
+    languages: [ruby]
+    severity: WARNING
+    message: a shell command is built from a value that is not a literal
+    metadata: { category: command injection }
+    pattern-either:
+      - pattern: "`...#{$X}...`"
+      - pattern: system("...#{$X}...")
+      - pattern: system("..." + $X)
+      - pattern: system($X + "...")
+      - pattern: exec("...#{$X}...")
+      - pattern: IO.popen("...#{$X}...", ...)
+      - pattern: Open3.capture2("...#{$X}...", ...)
+      - pattern: Open3.capture3("...#{$X}...", ...)
+
+  # See java.yaml's java-sql-text-built: a query built into a variable in one method and executed in
+  # another is not followed by taint, so SQL text with an interpolation is reported where it is built.
+  - id: ruby-sql-text-built
+    languages: [ruby]
+    severity: WARNING
+    message: SQL text is built by interpolation, wherever it is later executed
+    metadata: { category: SQL injection }
+    patterns:
+      - pattern-regex: (?is)"\s*(select\s[^"]*\sfrom|insert\s+into|update\s+\S+\s+set|delete\s+from)\b[^"]*#\{
+      # A regex reads raw text, so a commented-out query would match; one did, in rubygems.org.
+      - pattern-not-regex: (?m)^[ \t]*#.*$

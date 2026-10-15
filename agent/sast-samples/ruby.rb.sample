@@ -1,0 +1,103 @@
+require "open3"
+
+class UsersController < ApplicationController
+  def ping
+    host = params[:host]
+    # ruleid: ruby-command-injection, ruby-shell-nonliteral
+    out = `ping -c1 #{host}`
+    render plain: out
+  end
+
+  def ping_system
+    # ruleid: ruby-command-injection, ruby-shell-nonliteral
+    system("ping -c1 #{params[:host]}")
+  end
+
+  def ping_args
+    # Separate arguments start no shell.
+    # ok: ruby-command-injection, ruby-shell-nonliteral
+    system("ping", "-c1", params[:host])
+  end
+
+  def ping_open3
+    # ruleid: ruby-command-injection, ruby-shell-nonliteral
+    out, _ = Open3.capture2("ping -c1 #{params[:host]}")
+    render plain: out
+  end
+
+  def search
+    # ruleid: ruby-sql-injection, ruby-sql-string-built
+    @users = User.where("name = '#{params[:name]}'")
+  end
+
+  def search_keyword
+    # ok: ruby-sql-injection, ruby-sql-string-built
+    @users = User.where(name: params[:name])
+  end
+
+  def search_bound
+    # ok: ruby-sql-injection, ruby-sql-string-built
+    @users = User.where("name = ?", params[:name])
+  end
+
+  def sorted
+    # ruleid: ruby-sql-injection
+    @users = User.order(params[:sort])
+  end
+
+  def paged
+    limit = params[:limit].to_i
+    # A sanitised value: the flow is not flagged; the construction still is.
+    # ok: ruby-sql-injection
+    # ruleid: ruby-sql-string-built, ruby-sql-text-built
+    @users = User.find_by_sql("SELECT * FROM users LIMIT #{limit}")
+  end
+
+  def raw
+    # ruleid: ruby-sql-injection, ruby-sql-string-built
+    ActiveRecord::Base.connection.execute("DELETE FROM sessions WHERE token = '" + params[:token] + "'")
+  end
+
+  def calc
+    # ruleid: ruby-code-injection
+    render plain: eval(params[:expr]).to_s
+  end
+
+  def model
+    # ruleid: ruby-code-injection
+    klass = params[:type].constantize
+    render json: klass.all
+  end
+
+  def report(table)
+    # No request data: the construction is flagged, the flow is not.
+    # ok: ruby-sql-injection
+    # ruleid: ruby-sql-string-built, ruby-sql-text-built
+    User.find_by_sql("SELECT count(*) FROM #{table}")
+  end
+
+  def lookup
+    run_query(build_query(params[:name]))
+  end
+
+  def build_query(name)
+    # ruleid: ruby-sql-text-built
+    "SELECT * FROM users WHERE last_name = '#{name}'"
+  end
+
+  def run_query(query)
+    # ok: ruby-sql-injection
+    ActiveRecord::Base.connection.execute(query)
+  end
+
+  def commented_out
+    # A query in a comment is not code.
+    # ok: ruby-sql-text-built
+    # sql = "SELECT * FROM users WHERE id = #{params[:id]}"
+  end
+
+  def housekeeping
+    # ok: ruby-command-injection, ruby-shell-nonliteral
+    system("rm -rf /tmp/cache")
+  end
+end

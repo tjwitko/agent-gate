@@ -32,8 +32,8 @@ import { isDeclaredFixture } from "./fixture-markers.mjs";
 import { taskWantsErrorDistinction } from "./code-quality.mjs";
 
 const RULES = fileURLToPath(new URL("./sast-rules/", import.meta.url));
-export const SAST_EXT = new Set([".py", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".go"]);
-const LANGUAGE = { ".py": "Python", ".go": "Go" };
+export const SAST_EXT = new Set([".py", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".go", ".java", ".rb"]);
+const LANGUAGE = { ".py": "Python", ".go": "Go", ".java": "Java", ".rb": "Ruby" };
 const MAX_FILE_BYTES = 1024 * 1024;
 const CHUNK = 400;
 const TIMEOUT_MS = 300_000;

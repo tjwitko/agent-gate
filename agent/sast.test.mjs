@@ -57,7 +57,7 @@ def user():
 scanner("every rule matches its annotated samples, and nothing else", () => {
   const tmp = mkdtempSync(path.join(tmpdir(), "sast-samples-"));
   try {
-    for (const [rules, sample] of [["python.yaml", "python.py"], ["python-errors.yaml", "python-errors.py"], ["javascript.yaml", "javascript.js"], ["javascript.yaml", "javascript.ts"], ["go.yaml", "go.go"]]) {
+    for (const [rules, sample] of [["python.yaml", "python.py"], ["python-errors.yaml", "python-errors.py"], ["javascript.yaml", "javascript.js"], ["javascript.yaml", "javascript.ts"], ["go.yaml", "go.go"], ["java.yaml", "java.java"], ["ruby.yaml", "ruby.rb"]]) {
       const target = path.join(tmp, sample);
       writeFileSync(target, readFileSync(path.join(HERE, "sast-samples", `${sample}.sample`)));
       const r = spawnSync(
@@ -157,7 +157,7 @@ test("installed dependencies and declared fixtures are not scanned", () => {
   );
 });
 
-test("a project with no Python, JavaScript, TypeScript or Go reports nothing", () => {
+test("a project with no Python, JavaScript, TypeScript, Go, Java or Ruby reports nothing", () => {
   assert.deepEqual(within({ "main.rs": "fn main() {}\n" }, sastFailures), { failures: [], advisories: [] });
 });
 

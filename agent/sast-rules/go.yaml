@@ -98,3 +98,28 @@ rules:
       - metavariable-regex:
           metavariable: $M
           regex: ^(Query|QueryRow|Exec|QueryContext|QueryRowContext|ExecContext)$
+
+  # See python.yaml's python-sql-text-built: SQL text built from a value is reported where it is built.
+  - id: go-sql-text-built
+    languages: [go]
+    severity: WARNING
+    message: SQL text is built from a value, wherever it is later executed
+    metadata: { category: SQL injection }
+    pattern-either:
+      - patterns:
+          - pattern: '"$SQL" + $X'
+          - metavariable-regex:
+              metavariable: $SQL
+              regex: (?is)^\s*(select\s.+\sfrom\b|insert\s+into\b|update\s+\S+\s+set\b|delete\s+from\b)
+          # Appending a literal -- a placeholder clause like ' AND provider_id = $2' -- builds nothing
+          # from a value. webhook-haiku's parameterised query matched until this was added.
+          - metavariable-pattern:
+              metavariable: $X
+              patterns:
+                - pattern: $Y
+                - pattern-not: '"..."'
+      - patterns:
+          - pattern: fmt.Sprintf("$SQL", ...)
+          - metavariable-regex:
+              metavariable: $SQL
+              regex: (?is)^\s*(select\s.+\sfrom\b|insert\s+into\b|update\s+\S+\s+set\b|delete\s+from\b)

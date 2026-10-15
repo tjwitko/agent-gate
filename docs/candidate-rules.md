@@ -874,6 +874,45 @@ left whole-tree on purpose: osv-scanner reads fixtures too, and exempting a fixt
 could only loosen the check. The samples became `.sample` files regardless; vulnerable code stored as
 source is source to every tool that reads it.
 
+**Java and Ruby were added on 2026-10-14**, for Spring and servlets, and Rails and Sinatra. Local code
+had no web applications in either language, so six open-source repositories were shallow-cloned and
+scanned — never built or run — with the user's agreement:
+
+| repository | role | files | blocking |
+| --- | --- | --- | --- |
+| spring-petclinic | real Spring app | 50 | 0 |
+| spring-boot-realworld-example-app | real Spring app | 116 | 0 |
+| rubygems.org | production Rails app | 1,412 | 0 |
+| mastodon | large Rails app | 3,316 | 0 |
+| OWASP RailsGoat | deliberately vulnerable | 114 | 5, all real |
+| OWASP WebGoat | deliberately vulnerable | 498 | 1 |
+
+Plus 2,142 files of local Ruby (the standard library, gems, Homebrew), which shells out constantly:
+no blocking findings. RailsGoat's five were its documented vulnerabilities — unsafe reflection via
+`constantize` three times, `Marshal.load` of a parameter, and an interpolated `where` — and the
+advisory caught its command injection, which crosses from controller to model.
+
+WebGoat's one was the measurement's real lesson. Its SQL lessons pass the parameter through two
+helper methods before executing it, which intraprocedural taint cannot follow, and the advisory missed
+it too because it only looked inside the execute call. So **SQL text built by concatenation is now an
+advisory where it is built**, recognised by its shape (`SELECT … FROM`, `INSERT INTO`, `UPDATE … SET`,
+`DELETE FROM`): WebGoat went from 1 to 15, covering eleven SQL-injection lesson sites, while the real
+applications produced four, each SQL genuinely built from a value. A commented-out query in
+rubygems.org matched the Ruby rule's raw-text regex and is now excluded. The same advisory was then written
+for Python (concatenation, `%`, `.format`, and f-strings matched as text, including triple-quoted),
+JavaScript (concatenation, and template literals as text, excluding tagged `sql\`…\`` templates,
+which are parameterised) and Go (concatenation, `fmt.Sprintf`). Measured on the same 9,902 files as the
+injection rules, its first version found one hit: webhook-haiku's `query += ' AND provider_id = $2'`,
+a parameterised query extended with another placeholder — literal appended to literal, which
+Semgrep's constant propagation presents as SQL built by concatenation. Every text-built rule now
+requires the appended operand to be something other than a literal, and the shape is an `ok` case
+in the samples. After that: no findings across all 9,902 files.
+
+Rule-writing found three of its own mistakes on the annotated samples first: an argument array
+(`exec(new String[]{"ping", host})`, no shell) read as a shell command, an exclusion Semgrep would not
+apply inside `metavariable-pattern`, and a fixed `/bin/sh -c` array held in a variable flagged as
+built from input — the last found in gettext's examples under Homebrew.
+
 **A missing semgrep is could-not-run, exit 3,** for a project with code in a language the rules cover —
 the same rule as a missing ruff for Python. control-tooling installs it (1.180.0, pinned). It adds about
 six seconds to a run, most of it Semgrep's start-up.
@@ -940,6 +979,21 @@ Two instances of one shape: the gate decided not to look, and said so nowhere a 
 A consequence worth knowing: a requirement stated in the task or a baseline — "include unit tests" —
 cannot be enforced on code no check reads. On a Rust project it reports "not executed" rather than
 blocking. The NOT READ line is what makes that visible.
+
+### 13. Injection rules for C#, Rust and C/C++ — next
+
+Java and Ruby joined Python, JavaScript/TypeScript and Go in #9. The next set, in order: **C#**
+(ASP.NET Core: `[FromQuery]`/`[FromBody]` parameters, `Request.Query`; sinks `Process.Start` with a
+shell, `SqlCommand`/`ExecuteSqlRaw`/`FromSqlRaw`, Razor `Html.Raw`), **Rust** (axum and actix
+extractors; `Command::new("sh").arg("-c")`, `sqlx::query` with `format!`), and **C/C++** (`system`,
+`popen`, `exec*` with a built string; `sprintf` into a query) — for C and C++ there is often no HTTP
+framework to name a source, so the shell and query constructions will carry more of the weight than
+taint. PHP, Kotlin and Swift follow.
+
+Each needs what Java and Ruby needed: sources per framework, annotated samples with `ruleid`/`ok`
+lines, a false-positive measurement on real applications in that language — cloned, with agreement,
+because this machine has none — and a deliberately vulnerable application for true positives where one
+exists. Until then the NOT READ line names these languages above the verdict.
 
 ### 12. Considered and deferred
 

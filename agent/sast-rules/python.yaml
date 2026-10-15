@@ -187,3 +187,38 @@ rules:
           - pattern: os.system($CMD)
       - pattern-not: subprocess.$FN("...", ..., shell=True, ...)
       - pattern-not: os.system("...")
+
+  # Request data that crosses a call is not followed by the taint rules, and a query is often built
+  # into a variable in one function and executed in another (WebGoat's SQL lessons do exactly this).
+  # So SQL text built from a value is reported where it is built, recognised by its shape rather than
+  # by the call that runs it. See java.yaml's java-sql-text-built.
+  - id: python-sql-text-built
+    languages: [python]
+    severity: WARNING
+    message: SQL text is built from a value, wherever it is later executed
+    metadata: { category: SQL injection }
+    pattern-either:
+      - patterns:
+          - pattern: '"$SQL" + $X'
+          - metavariable-regex:
+              metavariable: $SQL
+              regex: (?is)^\s*(select\s.+\sfrom\b|insert\s+into\b|update\s+\S+\s+set\b|delete\s+from\b)
+          # Appending a literal -- a placeholder clause like ' AND provider_id = $2' -- builds nothing
+          # from a value. webhook-haiku's parameterised query matched until this was added.
+          - metavariable-pattern:
+              metavariable: $X
+              patterns:
+                - pattern: $Y
+                - pattern-not: '"..."'
+      - patterns:
+          - pattern-either:
+              - pattern: '"$SQL" % $X'
+              - pattern: '"$SQL".format(...)'
+          - metavariable-regex:
+              metavariable: $SQL
+              regex: (?is)^\s*(select\s.+\sfrom\b|insert\s+into\b|update\s+\S+\s+set\b|delete\s+from\b)
+      # f-strings do not bind their text to a metavariable, so they are matched as text. The quote is
+      # captured so a single quote inside a double-quoted f-string, as in `= '{name}'`, does not end it.
+      - patterns:
+          - pattern-regex: (?is)\b[rR]?[fF][rR]?("""|'''|"|')\s*(?:select\s(?:(?!\1).)*?\sfrom\b|insert\s+into\b|update\s+\S+\s+set\b|delete\s+from\b)(?:(?!\1).)*?\{
+          - pattern-not-regex: (?m)^[ \t]*#.*$

@@ -28,7 +28,7 @@ def ping_safe():
 @app.get("/user")
 def user():
     name = request.args.get("n")
-    # ruleid: python-sql-injection, python-sql-string-built
+    # ruleid: python-sql-injection, python-sql-string-built, python-sql-text-built
     return str(db.execute(f"SELECT * FROM users WHERE name = '{name}'").fetchall())
 
 
@@ -44,7 +44,7 @@ def count():
     limit = int(request.args["limit"])
     # A sanitised value: the flow is not flagged; the construction still is.
     # ok: python-sql-injection
-    # ruleid: python-sql-string-built
+    # ruleid: python-sql-string-built, python-sql-text-built
     return str(db.execute("SELECT * FROM users LIMIT %d" % limit).fetchall())
 
 
@@ -56,7 +56,7 @@ def calc():
 
 @api.get("/items")
 async def items(q: str):
-    # ruleid: python-sql-injection, python-sql-string-built
+    # ruleid: python-sql-injection, python-sql-string-built, python-sql-text-built
     return db.execute(text(f"SELECT * FROM items WHERE name = '{q}'"))
 
 
@@ -69,7 +69,7 @@ def run(cmd: str):
 def report(table):
     # No request data anywhere: the construction is flagged, the flow is not.
     # ok: python-sql-injection
-    # ruleid: python-sql-string-built
+    # ruleid: python-sql-string-built, python-sql-text-built
     return db.execute(f"SELECT count(*) FROM {table}")
 
 
@@ -89,10 +89,33 @@ def lookup(name):
     # Request data that arrives through a call is not followed -- open-source Semgrep's taint analysis
     # stays inside one function -- so only the construction is reported here.
     # ok: python-sql-injection
-    # ruleid: python-sql-string-built
+    # ruleid: python-sql-string-built, python-sql-text-built
     return db.execute("SELECT * FROM u WHERE n='" + name + "'")
 
 
 @api.post("/lookup")
 def lookup_route(payload: dict):
     return lookup(payload["name"])
+
+
+# A query built in one function and executed in another: taint does not cross the call, so the text is
+# reported where it is built.
+def build_query(name):
+    # ruleid: python-sql-text-built
+    return f"SELECT * FROM users WHERE last_name = '{name}'"
+
+
+def run_query(query):
+    # ok: python-sql-injection, python-sql-string-built, python-sql-text-built
+    return db.execute(query)
+
+
+@app.get("/lookup")
+def lookup():
+    return run_query(build_query(request.args["name"]))
+
+
+def labels(name):
+    # Text that only reads like SQL is not SQL.
+    # ok: python-sql-text-built
+    return f"Select a file named {name}"

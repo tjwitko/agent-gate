@@ -27,7 +27,7 @@ func pingSafe(w http.ResponseWriter, r *http.Request) {
 
 func user(w http.ResponseWriter, r *http.Request) {
 	name := r.FormValue("n")
-	// ruleid: go-sql-injection, go-sql-string-built
+	// ruleid: go-sql-injection, go-sql-string-built, go-sql-text-built
 	rows, _ := db.Query(fmt.Sprintf("SELECT * FROM users WHERE name = '%s'", name))
 	defer rows.Close()
 }
@@ -43,7 +43,7 @@ func page(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	// A sanitised value: the flow is not flagged; the construction still is.
 	// ok: go-sql-injection
-	// ruleid: go-sql-string-built
+	// ruleid: go-sql-string-built, go-sql-text-built
 	rows, _ := db.Query(fmt.Sprintf("SELECT * FROM users LIMIT %d", limit))
 	defer rows.Close()
 }
@@ -51,4 +51,23 @@ func page(w http.ResponseWriter, r *http.Request) {
 func logIt(r *http.Request) {
 	// ok: go-sql-string-built
 	log.Println(fmt.Sprintf("request from %s", r.RemoteAddr))
+}
+
+// A query built in one function and executed in another: the text is reported where it is built.
+func buildQuery(name string) string {
+	// ruleid: go-sql-text-built
+	return "SELECT * FROM users WHERE last_name = '" + name + "'"
+}
+
+func lookup(w http.ResponseWriter, r *http.Request) {
+	// Taint does follow a call's return value: request data goes in, the query comes out.
+	// ok: go-sql-string-built, go-sql-text-built
+	// ruleid: go-sql-injection
+	rows, _ := db.Query(buildQuery(r.URL.Query().Get("name")))
+	defer rows.Close()
+}
+
+func message(name string) string {
+	// ok: go-sql-text-built
+	return fmt.Sprintf("selected %s from the list", name)
 }

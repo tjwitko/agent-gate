@@ -16,7 +16,7 @@ app.get("/ping-safe", (req, res) => {
 });
 
 app.get("/user", async (req, res) => {
-  // ruleid: javascript-sql-injection, javascript-sql-string-built
+  // ruleid: javascript-sql-injection, javascript-sql-string-built, javascript-sql-text-built
   const r = await pool.query(`SELECT * FROM users WHERE name = '${req.query.n}'`);
   res.json(r.rows);
 });
@@ -31,7 +31,7 @@ app.get("/page", async (req, res) => {
   const limit = parseInt(req.query.limit, 10);
   // A sanitised value: the flow is not flagged; the construction still is.
   // ok: javascript-sql-injection
-  // ruleid: javascript-sql-string-built
+  // ruleid: javascript-sql-string-built, javascript-sql-text-built
   const r = await pool.query(`SELECT * FROM users LIMIT ${limit}`);
   res.json(r.rows);
 });
@@ -49,7 +49,7 @@ app.get("/match", (req, res) => {
 
 function report(table) {
   // ok: javascript-sql-injection
-  // ruleid: javascript-sql-string-built
+  // ruleid: javascript-sql-string-built, javascript-sql-text-built
   return pool.query(`SELECT count(*) FROM ${table}`);
 }
 
@@ -73,4 +73,35 @@ function ping(host) {
 function housekeeping() {
   // ok: javascript-command-injection, javascript-shell-nonliteral
   exec("rm -rf /tmp/cache");
+}
+
+// A query built in one function and executed in another: the text is reported where it is built.
+function buildQuery(name) {
+  // ruleid: javascript-sql-text-built
+  return `SELECT * FROM users WHERE last_name = '${name}'`;
+}
+
+app.get("/lookup", async (req, res) => {
+  // Taint does follow a call's return value: request data goes in, the query comes out.
+  // ok: javascript-sql-string-built, javascript-sql-text-built
+  // ruleid: javascript-sql-injection
+  res.json((await pool.query(buildQuery(req.query.name))).rows);
+});
+
+async function tagged(name) {
+  // A tagged template is parameterised by its tag.
+  // ok: javascript-sql-text-built
+  return db.query(sql`SELECT * FROM users WHERE last_name = ${name}`);
+}
+
+async function byEvent(eventId, providerId) {
+  // A parameterised query extended with another placeholder clause builds nothing from a value.
+  let query = "SELECT * FROM webhooks WHERE event_id = $1";
+  const params = [eventId];
+  if (providerId) {
+    // ok: javascript-sql-text-built, javascript-sql-string-built
+    query += " AND provider_id = $2";
+    params.push(providerId);
+  }
+  return pool.query(query, params);
 }

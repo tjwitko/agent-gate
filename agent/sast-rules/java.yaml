@@ -1,0 +1,234 @@
+# Injection rules for Java, written for agent-gate. See python.yaml for the split between blocking
+# taint rules (ERROR) and advisory pattern rules (WARNING).
+rules:
+  - id: java-command-injection
+    mode: taint
+    languages: [java]
+    severity: ERROR
+    message: request data reaches a shell command
+    metadata: { category: command injection }
+    pattern-sources:
+      # Servlet API.
+      - pattern-either:
+          - pattern: (HttpServletRequest $R).getParameter(...)
+          - pattern: (HttpServletRequest $R).getParameterValues(...)
+          - pattern: (HttpServletRequest $R).getParameterMap()
+          - pattern: (HttpServletRequest $R).getHeader(...)
+          - pattern: (HttpServletRequest $R).getQueryString()
+          - pattern: (HttpServletRequest $R).getInputStream()
+          - pattern: (HttpServletRequest $R).getReader()
+          - pattern: (HttpServletRequest $R).getCookies()
+      # Spring MVC: a handler's annotated parameters are request data.
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  $RET $M(..., @RequestParam $T $P, ...) { ... }
+              - pattern-inside: |
+                  $RET $M(..., @RequestParam(...) $T $P, ...) { ... }
+              - pattern-inside: |
+                  $RET $M(..., @PathVariable $T $P, ...) { ... }
+              - pattern-inside: |
+                  $RET $M(..., @PathVariable(...) $T $P, ...) { ... }
+              - pattern-inside: |
+                  $RET $M(..., @RequestBody $T $P, ...) { ... }
+              - pattern-inside: |
+                  $RET $M(..., @RequestHeader $T $P, ...) { ... }
+              - pattern-inside: |
+                  $RET $M(..., @RequestHeader(...) $T $P, ...) { ... }
+          - pattern: $P
+    pattern-sinks:
+      # exec(String) splits the string itself, so whatever builds it chooses the program and its
+      # arguments. exec(String[]) of fixed words with request data as one element starts no shell
+      # and is not this.
+      - patterns:
+          - pattern-either:
+              - pattern: Runtime.getRuntime().exec($CMD, ...)
+              - pattern: (Runtime $RT).exec($CMD, ...)
+          - pattern-not: Runtime.getRuntime().exec(new $T[]{...}, ...)
+          - pattern-not: (Runtime $RT).exec(new $T[]{...}, ...)
+          - pattern-not: Runtime.getRuntime().exec((String[] $A), ...)
+          - pattern-not: (Runtime $RT).exec((String[] $A), ...)
+          - focus-metavariable: $CMD
+      # An explicit shell, by array or by ProcessBuilder.
+      - patterns:
+          - pattern-either:
+              - pattern: Runtime.getRuntime().exec(new String[]{$SH, $FLAG, $CMD, ...}, ...)
+              - pattern: (Runtime $RT).exec(new String[]{$SH, $FLAG, $CMD, ...}, ...)
+              - pattern: new ProcessBuilder($SH, $FLAG, $CMD, ...)
+          - metavariable-regex:
+              metavariable: $SH
+              regex: ^"(sh|bash|/bin/sh|/bin/bash|cmd|cmd\.exe)"$
+          - metavariable-regex:
+              metavariable: $FLAG
+              regex: ^"(-c|/c)"$
+          - focus-metavariable: $CMD
+
+  - id: java-sql-injection
+    mode: taint
+    languages: [java]
+    severity: ERROR
+    message: request data is built into a SQL statement
+    metadata: { category: SQL injection }
+    pattern-sources:
+      - pattern-either:
+          - pattern: (HttpServletRequest $R).getParameter(...)
+          - pattern: (HttpServletRequest $R).getParameterValues(...)
+          - pattern: (HttpServletRequest $R).getParameterMap()
+          - pattern: (HttpServletRequest $R).getHeader(...)
+          - pattern: (HttpServletRequest $R).getQueryString()
+          - pattern: (HttpServletRequest $R).getInputStream()
+          - pattern: (HttpServletRequest $R).getReader()
+          - pattern: (HttpServletRequest $R).getCookies()
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  $RET $M(..., @RequestParam $T $P, ...) { ... }
+              - pattern-inside: |
+                  $RET $M(..., @RequestParam(...) $T $P, ...) { ... }
+              - pattern-inside: |
+                  $RET $M(..., @PathVariable $T $P, ...) { ... }
+              - pattern-inside: |
+                  $RET $M(..., @PathVariable(...) $T $P, ...) { ... }
+              - pattern-inside: |
+                  $RET $M(..., @RequestBody $T $P, ...) { ... }
+              - pattern-inside: |
+                  $RET $M(..., @RequestHeader $T $P, ...) { ... }
+              - pattern-inside: |
+                  $RET $M(..., @RequestHeader(...) $T $P, ...) { ... }
+          - pattern: $P
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: (java.sql.Statement $S).executeQuery($Q)
+              - pattern: (java.sql.Statement $S).executeUpdate($Q, ...)
+              - pattern: (java.sql.Statement $S).execute($Q, ...)
+              - pattern: (java.sql.Statement $S).addBatch($Q)
+              - pattern: (java.sql.Connection $C).prepareStatement($Q, ...)
+              - pattern: (java.sql.Connection $C).prepareCall($Q, ...)
+              - pattern: (JdbcTemplate $J).$METHOD($Q, ...)
+              - pattern: (NamedParameterJdbcTemplate $J).$METHOD($Q, ...)
+              - pattern: (EntityManager $E).createQuery($Q, ...)
+              - pattern: (EntityManager $E).createNativeQuery($Q, ...)
+          - focus-metavariable: $Q
+    pattern-sanitizers:
+      - pattern: Integer.parseInt(...)
+      - pattern: Long.parseLong(...)
+      - pattern: UUID.fromString(...)
+
+  - id: java-code-injection
+    mode: taint
+    languages: [java]
+    severity: ERROR
+    message: request data is evaluated as code
+    metadata: { category: code injection }
+    pattern-sources:
+      - pattern-either:
+          - pattern: (HttpServletRequest $R).getParameter(...)
+          - pattern: (HttpServletRequest $R).getHeader(...)
+          - pattern: (HttpServletRequest $R).getQueryString()
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  $RET $M(..., @RequestParam $T $P, ...) { ... }
+              - pattern-inside: |
+                  $RET $M(..., @RequestParam(...) $T $P, ...) { ... }
+              - pattern-inside: |
+                  $RET $M(..., @PathVariable $T $P, ...) { ... }
+              - pattern-inside: |
+                  $RET $M(..., @RequestBody $T $P, ...) { ... }
+          - pattern: $P
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: (javax.script.ScriptEngine $E).eval($X, ...)
+              - pattern: (ScriptEngine $E).eval($X, ...)
+              - pattern: (ExpressionParser $P).parseExpression($X, ...)
+              - pattern: (SpelExpressionParser $P).parseExpression($X, ...)
+          - focus-metavariable: $X
+
+  - id: java-sql-string-built
+    languages: [java]
+    severity: WARNING
+    message: a SQL statement is built by string concatenation rather than passed parameters
+    metadata: { category: SQL injection }
+    patterns:
+      - pattern-either:
+          - pattern: (java.sql.Statement $S).$M("..." + $X, ...)
+          - pattern: (java.sql.Statement $S).$M($X + "...", ...)
+          - pattern: (java.sql.Statement $S).$M(String.format(...), ...)
+          - pattern: (java.sql.Connection $C).$M("..." + $X, ...)
+          - pattern: (java.sql.Connection $C).$M($X + "...", ...)
+          - pattern: (JdbcTemplate $J).$M("..." + $X, ...)
+          - pattern: (JdbcTemplate $J).$M($X + "...", ...)
+          - pattern: (JdbcTemplate $J).$M(String.format(...), ...)
+          - pattern: (EntityManager $E).$M("..." + $X, ...)
+          - pattern: (EntityManager $E).$M($X + "...", ...)
+      - metavariable-regex:
+          metavariable: $M
+          regex: ^(executeQuery|executeUpdate|execute|addBatch|prepareStatement|prepareCall|query|queryForObject|queryForList|queryForMap|update|batchUpdate|createQuery|createNativeQuery)$
+
+  - id: java-shell-nonliteral
+    languages: [java]
+    severity: WARNING
+    message: a shell command is built from a value that is not a literal
+    metadata: { category: command injection }
+    patterns:
+      - pattern-either:
+          - patterns:
+              - pattern-either:
+                  - pattern: Runtime.getRuntime().exec($CMD, ...)
+                  - pattern: (Runtime $RT).exec($CMD, ...)
+              - pattern-not: Runtime.getRuntime().exec(new $T[]{...}, ...)
+              - pattern-not: (Runtime $RT).exec(new $T[]{...}, ...)
+              - pattern-not: Runtime.getRuntime().exec((String[] $A), ...)
+              - pattern-not: (Runtime $RT).exec((String[] $A), ...)
+              - metavariable-pattern:
+                  metavariable: $CMD
+                  patterns:
+                    - pattern: $X
+                    - pattern-not: '"..."'
+          - patterns:
+              - pattern-either:
+                  - pattern: Runtime.getRuntime().exec(new String[]{$SH, $FLAG, $CMD, ...}, ...)
+                  - pattern: (Runtime $RT).exec(new String[]{$SH, $FLAG, $CMD, ...}, ...)
+                  - pattern: new ProcessBuilder($SH, $FLAG, $CMD, ...)
+              - metavariable-regex:
+                  metavariable: $SH
+                  regex: ^"(sh|bash|/bin/sh|/bin/bash|cmd|cmd\.exe)"$
+              - metavariable-regex:
+                  metavariable: $FLAG
+                  regex: ^"(-c|/c)"$
+              - metavariable-pattern:
+                  metavariable: $CMD
+                  patterns:
+                    - pattern: $X
+                    - pattern-not: '"..."'
+      - focus-metavariable: $CMD
+
+  # Request data that crosses a call is not followed by the taint rules, and a query is often built
+  # into a variable in one method and executed in another -- WebGoat's lessons pass a parameter
+  # through two helpers this way. So SQL text built by concatenation is reported where it is built,
+  # recognised by its shape rather than by the call that runs it.
+  - id: java-sql-text-built
+    languages: [java]
+    severity: WARNING
+    message: SQL text is built by concatenation, wherever it is later executed
+    metadata: { category: SQL injection }
+    pattern-either:
+      - patterns:
+          - pattern: '"$SQL" + $X'
+          - metavariable-regex:
+              metavariable: $SQL
+              regex: (?is)^\s*(select\s.+\sfrom\b|insert\s+into\b|update\s+\S+\s+set\b|delete\s+from\b)
+          # Appending a literal -- a placeholder clause like ' AND provider_id = $2' -- builds nothing
+          # from a value. webhook-haiku's parameterised query matched until this was added.
+          - metavariable-pattern:
+              metavariable: $X
+              patterns:
+                - pattern: $Y
+                - pattern-not: '"..."'
+      - patterns:
+          - pattern: String.format("$SQL", ...)
+          - metavariable-regex:
+              metavariable: $SQL
+              regex: (?is)^\s*(select\s.+\sfrom\b|insert\s+into\b|update\s+\S+\s+set\b|delete\s+from\b)

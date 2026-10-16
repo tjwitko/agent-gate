@@ -42,6 +42,46 @@ const AUDIT_NAME = /(audit|auditd|log_?entr|logs?|event_?log|trail)/i;
 // -- "its contents must stay exactly as received", "Nothing in the running system should be able to
 // change or remove a record" -- without the word appearing once, so the gate would have quietly
 // downgraded itself to advisory on the task it most needed to hold.
+// A prohibition on changing something is an immutability requirement only when the something is a
+// record. The catch-all this replaces had no subject: any "must not ... change" counted, so "The schema
+// must not be changed without a migration" and "The config must not be modified by hand" required
+// records to be unchangeable -- blocking a duration library with no store at all, and, through a
+// baseline, every project in an organisation. It also missed what does mean immutability, because
+// it knew "must not" and not "must never", and read no prohibition whose subject is "nobody".
+//
+// So the record is required in the same clause, in either of the two places English puts it:
+//
+//   subject   "Audit log entries must never be modified"   "Records, once written, cannot change"
+//   object    "No one may delete an audit entry"           "Nothing ... should change or remove a record"
+//
+// [^.;\n], not [^.], for every span. A semicolon and a newline end a thought as surely as a full
+// stop: "Users cannot register themselves; an admin adds them and can later remove an account" was
+// once read as a requirement that records be immutable, and the consequence is blocking -- a project
+// with no identifiable append-only store fails outright. Between the verb and its object a comma or a
+// preposition also ends the span, so "must not be modified by the log rotation job" is about who
+// modifies, not what. A record noun used as a modifier -- a log level, a message format, an event
+// handler -- is not the record.
+const PROHIBITION =
+  "cannot|can'?t|can not|must not|mustn'?t|may not|should not|shouldn'?t|shall not|never|nothing|nobody|no[- ]one|" +
+  "no (?:users?|admin\\w*|process\\w*|service|component|system|caller|client)s?";
+const CHANGE = "(?:chang|modif|alter|delet|remov|overwrit|edit|updat|eras|rewrit|tamper)\\w*";
+const RECORD =
+  "(?:records?|entr(?:y|ies)|events?|logs?|audits?|histor(?:y|ies)|ledgers?|archives?|messages?|receipts?|" +
+  "callbacks?|transactions?|journals?|trails?|" +
+  // "a replayed delivery cannot overwrite what is already stored": the record, without its noun.
+  "(?:what|anything|whatever) (?:is|was|has been|have been) (?:already )?(?:stored|recorded|written|received|saved|persisted))" +
+  "(?!\\s+(?:levels?|formats?|schemas?|settings?|config\\w*|handlers?|types?|names?|ids?|queues?|brokers?|bus|loop|listeners?))";
+const NOT_A_PREPOSITION = "(?:(?!\\b(?:by|with|without|in|on|to|from|for|via|through|during|after|before|unless|except|when)\\b)[^.;,\\n])";
+const PROHIBITED_CHANGE_TO_RECORD = new RegExp(
+  // subject: the record, an optional parenthetical ", once written,", auxiliaries ("must never"),
+  // then the prohibition and the verb. Nothing else between: "The audit job must not modify user data"
+  // is about a job.
+  `\\b${RECORD}\\b(?:\\s*,[^,.;\\n]{0,40},)?\\s+(?:(?:must|may|should|shall|can|could|will|would|is|are|be)\\s+){0,2}(?:${PROHIBITION})\\b[^.;\\n]{0,40}?\\b${CHANGE}` +
+  // object: the prohibition, the verb, then the record it acts on
+  `|\\b(?:${PROHIBITION})\\b[^.;\\n]{0,60}?\\b${CHANGE}${NOT_A_PREPOSITION}{0,40}?\\b${RECORD}\\b`,
+  "i"
+);
+
 const IMMUTABILITY_PHRASES = [
   /\bimmutab/i,
   /\bunalterable\b/i,
@@ -50,15 +90,7 @@ const IMMUTABILITY_PHRASES = [
   /\bWORM\b/,
   /\btamper[- ]?(proof|evident|resistant)\b/i,
   /stay\s+(exactly\s+)?as\s+received/i,
-  // [^.;\n], not [^.]. A semicolon and a newline end a thought as surely as a full stop, and this
-  // span ran straight through both: "Users cannot register themselves; an admin adds them and can
-  // later remove an account" was read as a requirement that records be immutable. The consequence
-  // is blocking -- once the gate believes immutability was required, a project with no identifiable
-  // append-only store fails outright -- so an ordinary sentence could stop correct work.
-  //
-  // secret-rotation and the shared task-phrases matcher already spell it this way, each after the
-  // same bug was found there. This is the oldest of the requirement-readers and the last to get it.
-  /\b(cannot|must not|may not|should not|nothing)\b[^.;\n]{0,60}\b(chang|modif|alter|delet|remov|overwrit|edit)/i,
+  PROHIBITED_CHANGE_TO_RECORD,
 ];
 
 export function taskRequiresImmutability(taskText = "") {

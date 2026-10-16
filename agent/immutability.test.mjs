@@ -498,6 +498,16 @@ const REQUIRES = [
   "The audit log is immutable.",
   "Records are append-only.",
   "Write-once storage for the receipts.",
+  // Missed by the catch-all before it required a record: it knew "must not" and not "must never",
+  // and read no prohibition whose subject is "nobody" or "no one".
+  "Audit log entries must never be modified.",
+  "Records must never be changed once written.",
+  "Audit entries must never be deleted.",
+  "Nobody, including administrators, may edit or delete an audit entry.",
+  "No one may delete an audit entry.",
+  "Audit entries, once written, must not be changed.",
+  // The record without its noun, from a corpus deliverable's README.
+  "A retried or replayed delivery cannot overwrite what is already stored.",
 ];
 for (const task of REQUIRES) {
   test(`an immutability requirement is recognised: ${task.slice(0, 44)}`, () => {
@@ -513,6 +523,23 @@ const DOES_NOT_REQUIRE = [
   "The service must not restart during a deploy; rolling updates change one pod at a time.",
   "A request may not exceed 1MB; larger payloads are truncated before we modify the record store.",
   "The queue must not back up\nworkers delete messages after processing.",
+  // A prohibition on changing something that is not a record. Each of these switched the check on,
+  // and the first made a duration library with no data store exit 1, its finding saying the task
+  // required records to be unchangeable once written. Through a baseline, one such line blocks
+  // every project.
+  "The schema must not be changed without a migration.",
+  "The config must not be modified by hand.",
+  "The config must never be modified by hand.",
+  "The public API must not change.",
+  "Existing routes must not be removed.",
+  "Users must never be locked out.",
+  // A record noun nearby is not enough: it has to be what the prohibition protects.
+  "The audit job must not modify user data.",
+  "Nobody may change the log level.",
+  "The config must not be modified by the log rotation job.",
+  "Event handlers must not modify the request.",
+  // Matched only because SQL's DO NOTHING read as a prohibition.
+  "Database uses `ON CONFLICT (event_id) DO NOTHING` to prevent overwrites.",
 ];
 for (const task of DOES_NOT_REQUIRE) {
   test(`no immutability requirement is invented from: ${task.slice(0, 44)}`, () => {

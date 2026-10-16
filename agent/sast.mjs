@@ -144,16 +144,26 @@ function blocks(category, taskText) {
   return true;
 }
 
-export function sastFailures(projectDir, { taskText = "" } = {}) {
+/**
+ * Run the rules and classify each result as the gate does: blocking or advisory, with an advisory at
+ * a line that already blocks for the same category dropped. sastFailures turns this into messages;
+ * the calibration corpus (calibration/run.mjs) counts it per rule, so both see one classification.
+ *
+ * @returns {{ files: number, version: string|null, couldNotRun?: string[],
+ *             findings: { rule: string, category: string, blocking: boolean, at: string }[], unparsed: string[] }}
+ */
+export function sastScan(projectDir, { taskText = "" } = {}) {
   const files = sastTargets(projectDir);
-  if (files.length === 0) return { failures: [], advisories: [] };
+  if (files.length === 0) return { files: 0, version: null, findings: [], unparsed: [] };
 
   const version = semgrepAvailable();
   if (!version) {
     const langs = [...new Set(files.map((f) => LANGUAGE[path.extname(f)] || "JavaScript/TypeScript"))].join(", ");
     return {
-      failures: [],
-      advisories: [],
+      files: files.length,
+      version: null,
+      findings: [],
+      unparsed: [],
       couldNotRun: [
         `semgrep is not installed, so ${files.length} ${langs} file(s) were not checked for injection. ` +
           `Install it — \`brew install semgrep\` or \`pipx install semgrep\` — and re-run.`,
@@ -165,14 +175,12 @@ export function sastFailures(projectDir, { taskText = "" } = {}) {
   const unparsed = new Set();
   for (let i = 0; i < files.length; i += CHUNK) {
     const r = run(files.slice(i, i + CHUNK));
-    if (r.error) return { failures: [], advisories: [], couldNotRun: [`${r.error}; nothing was checked for injection.`] };
+    if (r.error) return { files: files.length, version, findings: [], unparsed: [], couldNotRun: [`${r.error}; nothing was checked for injection.`] };
     results.push(...(r.doc.results || []));
     for (const e of r.doc.errors || []) if (e.path) unparsed.add(path.relative(projectDir, e.path));
   }
 
   const at = (x) => `${path.relative(projectDir, x.path)}:${x.start.line}`;
-  const blocking = new Map();
-  const advisory = new Map();
   // An advisory at a line that already blocks for the same category says nothing the finding does not.
   // Pattern rules (WARNING) see a construction; for injection only the taint rules (ERROR) block.
   const isBlocking = (x) => {
@@ -181,12 +189,31 @@ export function sastFailures(projectDir, { taskText = "" } = {}) {
     return x.extra?.severity === "ERROR";
   };
   const blocked = new Set(results.filter(isBlocking).map((x) => `${x.extra?.metadata?.category}@${at(x)}`));
+  const findings = [];
   for (const x of results) {
-    if (!isBlocking(x) && blocked.has(`${x.extra?.metadata?.category}@${at(x)}`)) continue;
-    const category = x.extra?.metadata?.category || "injection";
-    const target = isBlocking(x) ? blocking : advisory;
-    if (!target.has(category)) target.set(category, { message: x.extra?.message, at: [] });
-    target.get(category).at.push(at(x));
+    const blocking = isBlocking(x);
+    if (!blocking && blocked.has(`${x.extra?.metadata?.category}@${at(x)}`)) continue;
+    findings.push({
+      rule: String(x.check_id).split(".").pop(),
+      category: x.extra?.metadata?.category || "injection",
+      blocking,
+      message: x.extra?.message,
+      at: at(x),
+    });
+  }
+  return { files: files.length, version, findings, unparsed: [...unparsed] };
+}
+
+export function sastFailures(projectDir, { taskText = "" } = {}) {
+  const scan = sastScan(projectDir, { taskText });
+  if (scan.couldNotRun) return { failures: [], advisories: [], couldNotRun: scan.couldNotRun };
+
+  const blocking = new Map();
+  const advisory = new Map();
+  for (const f of scan.findings) {
+    const target = f.blocking ? blocking : advisory;
+    if (!target.has(f.category)) target.set(f.category, { message: f.message, at: [] });
+    target.get(f.category).at.push(f.at);
   }
   const order = (m) => [...m].sort(([a], [b]) => CATEGORY_ORDER.indexOf(a) - CATEGORY_ORDER.indexOf(b));
   const list = (a) => [...new Set(a)].slice(0, 10).join(", ") + (new Set(a).size > 10 ? `, +${new Set(a).size - 10} more` : "");
@@ -199,9 +226,10 @@ export function sastFailures(projectDir, { taskText = "" } = {}) {
     ([category, { message, at }]) =>
       `sast: ${message} (${category}, not blocking${ADVISORY_WHY[category] || ""}): ${list(at)}.`
   );
-  if (unparsed.size) {
+  const unparsed = scan.unparsed;
+  if (unparsed.length) {
     advisories.push(
-      `sast: ${unparsed.size} file(s) could not be fully parsed, so parts of them were not checked — ${[...unparsed].slice(0, 5).join(", ")}${unparsed.size > 5 ? ", …" : ""}.`
+      `sast: ${unparsed.length} file(s) could not be fully parsed, so parts of them were not checked — ${unparsed.slice(0, 5).join(", ")}${unparsed.length > 5 ? ", …" : ""}.`
     );
   }
   return { failures, advisories };

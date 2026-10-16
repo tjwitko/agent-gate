@@ -611,11 +611,12 @@ A few are worth calling out because they exist in response to measured failures:
   of an outbound request (SSRF) or a file path (path traversal), in Python, JavaScript/TypeScript, Go,
   Java, Ruby, C#, Rust, C and C++. A URL whose scheme and host are fixed in the code, with request data only in the
   path, is not SSRF and is not reported. It runs Semgrep with this project's own rules, and only the
-  ones that trace data from an HTTP request to the dangerous call block. Before they were allowed to,
-  they produced no blocking findings across about 30,000 files of real code — seven open-source web
-  applications in five languages and the installed packages on the development machine — while
-  finding the documented vulnerabilities in OWASP's deliberately vulnerable WebGoat, RailsGoat,
-  Juice Shop and PyGoat. Code that builds a query or a shell
+  ones that trace data from an HTTP request to the dangerous call block. The [calibration
+  corpus](#development) holds them to two answers at pinned commits. Across sixteen real
+  applications, about 26,700 files in every language the rules cover except C++, they block twice:
+  Jellyfin's admin endpoint that writes a file where the request says, which is what the rule
+  describes. And they find the documented vulnerabilities in the deliberately vulnerable WebGoat (3),
+  RailsGoat (6), Juice Shop (11), PyGoat (8) and dvcsharp-api (2). Code that builds a query or a shell
   command from a value of unknown origin is an advisory. Neither `.semgrepignore` nor an inline
   `# nosemgrep` hides code from it.
   In Python it also catches a broad `except Exception` that turns the handler's own 400 into a 500 —
@@ -642,6 +643,10 @@ Listed so that a clean verdict is read for what it is.
 - **Memory safety in C and C++.** Beyond `gets()`, buffer overflows, use-after-free and integer
   overflow are not checked: the patterns that find them flag most C code, and a check that blocks most
   projects gets switched off. A sanitiser build (`-fsanitize=address`) and a fuzzer find them better.
+- **Proof that the Go, Rust, C and C++ rules find injection in real code.** They are tested on
+  annotated samples and on real projects with none, which shows they do not over-fire; no
+  deliberately vulnerable application in those languages is in the calibration corpus, so nothing
+  shows they catch a real one. C++ has no real application in it at all.
 - **Request data in a C buffer, used in another function.** Free Semgrep does not follow taint into a
   buffer, so a write into one is reported only when the same function passes it to the dangerous call.
 - **Rocket, Warp and other Rust frameworks**, and ASP.NET WebForms. Their request types are not yet
@@ -745,6 +750,7 @@ cd agent-gate
 npm install
 npm test          # unit tests
 npm run corpus    # regression corpus — thirteen frozen projects
+npm run calibration   # the sast rules on 22 real apps, cloned at pinned commits — about 75 minutes
 node scripts/refresh-eol-data.mjs   # end-of-life dates for the dockerfile check, before a release
 ```
 
@@ -761,6 +767,27 @@ live false positive in a blocking validator the same afternoon.
 
 It also records the toolchain that measured it and reports any difference, since a finding count
 compared against a different scanner version looks exactly like a control that changed behaviour.
+
+**The calibration corpus** does the same for the `sast` rules on other people's code. Its manifest,
+[`calibration/manifest.json`](calibration/manifest.json), names 22 applications by repository and
+full commit SHA, with the count each rule gave each one, blocking and advisory, measured with the
+pinned semgrep. `npm run calibration` clones each at that commit, runs the `sast` validator on it —
+only that: nothing is built, installed or run — compares, and deletes the clone. A rule that stops
+finding WebGoat's SQL injection has broken; one that starts blocking Bitwarden is a false positive on
+code people ship. No application's code is copied into this repository. It runs in its own workflow
+when the rules or the validator change, and on demand; it is not a required check.
+
+| language | known findings | known clean |
+| --- | --- | --- |
+| Java | WebGoat | Spring PetClinic, Spring RealWorld |
+| Ruby | RailsGoat | rubygems.org, Mastodon |
+| JavaScript/TypeScript | Juice Shop | Outline |
+| Python | PyGoat | NetBox |
+| C# | dvcsharp-api, Jellyfin | eShop, Bitwarden server |
+| Go | **none** | Gitea |
+| Rust | **none** | Lemmy, Meilisearch |
+| C | **none** — Damn Vulnerable C Program's bugs are memory safety, and it correctly scores 0 | curl, git, Redis, nginx |
+| C++ | **none** | **none** |
 
 ---
 

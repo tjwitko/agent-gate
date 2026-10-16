@@ -1,0 +1,53 @@
+# The calibration corpus: the sast rules against real applications whose answers are known.
+#
+# Separate from gate.yml on purpose. It clones about twenty applications from their own repositories,
+# so it depends on hosts this project does not control, and it only has something to say when the
+# rules or the validator that runs them change. It is therefore not a required check and has no
+# schedule: a rule change runs it, and so does the button. What it checks and why is in
+# calibration/run.mjs.
+name: calibration
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "agent/sast-rules/**"
+      - "agent/sast.mjs"
+      - "calibration/**"
+      - ".github/workflows/calibration.yml"
+  pull_request:
+    paths:
+      - "agent/sast-rules/**"
+      - "agent/sast.mjs"
+      - "calibration/**"
+      - ".github/workflows/calibration.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  calibration:
+    name: calibration — real apps with known sast answers (part ${{ matrix.part }} of 5)
+    runs-on: ubuntu-latest
+    # Five parts in parallel, because one job does not fit: measured on the development machine the
+    # whole set took 76 minutes, Bitwarden alone 19 and Mastodon 12. The runner deals apps out by file
+    # count, so the parts stay within a few hundred files of each other (about 5,600 each).
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1, 2, 3, 4, 5]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # The version the counts were measured with, read from the manifest so there is one pin. The
+      # runner refuses to compare against any other: a different engine moves counts for reasons that
+      # are not a rule change.
+      - name: semgrep
+        run: pipx install "semgrep==$(node -p 'require("./calibration/manifest.json").semgrep')"
+      # Only node built-ins and this repository's own modules are imported; nothing to install.
+      - name: clone each app at its pinned commit, scan it, delete it
+        run: node calibration/run.mjs --shard=${{ matrix.part }}/5

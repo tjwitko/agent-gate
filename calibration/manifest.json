@@ -1,0 +1,522 @@
+{
+  "about": "Real applications with known sast answers, cloned at these commits and scanned only. See calibration/run.mjs.",
+  "semgrep": "1.180.0",
+  "measured": "2026-10-16",
+  "toolchain": {
+    "node": "26.5.1",
+    "go": "1.27.1",
+    "terraform": "1.15.8",
+    "gitleaks": "8.30.1",
+    "osv-scanner": "2.4.0",
+    "checkov": "3.3.10",
+    "python3": "3.14.8",
+    "ruff": "0.16.2",
+    "semgrep": "1.180.0",
+    "pytest": "9.1.1",
+    "docker": "29.6.2"
+  },
+  "noPositiveControl": {
+    "Go": "no deliberately vulnerable Go app is in the set, so nothing shows the Go rules still find injection in real code; gitea shows they do not over-fire",
+    "Rust": "no deliberately vulnerable Rust app is in the set; lemmy and meilisearch show only that the Rust rules do not over-fire",
+    "C": "dvcp's vulnerabilities are memory safety, which no rule claims, so nothing shows the C rules find injection in real code; curl, git, redis and nginx show only that they do not over-fire",
+    "C++": "no C++ app at all: neither a positive nor a clean control. The C/C++ rules are exercised on C++ only by agent/sast-samples/c.cpp.sample"
+  },
+  "apps": [
+    {
+      "name": "webgoat",
+      "repo": "https://github.com/WebGoat/WebGoat",
+      "commit": "e7b131360d74336c0c94ab5c8a21259503f59be8",
+      "language": "Java",
+      "role": "findings",
+      "note": "OWASP's deliberately vulnerable Java app",
+      "expected": {
+        "files": 594,
+        "blocking": 3,
+        "advisory": 15,
+        "byRule": {
+          "java-path-traversal": {
+            "blocking": 2,
+            "advisory": 0
+          },
+          "java-shell-nonliteral": {
+            "blocking": 0,
+            "advisory": 1
+          },
+          "java-sql-injection": {
+            "blocking": 1,
+            "advisory": 0
+          },
+          "java-sql-string-built": {
+            "blocking": 0,
+            "advisory": 2
+          },
+          "java-sql-text-built": {
+            "blocking": 0,
+            "advisory": 11
+          },
+          "java-xxe": {
+            "blocking": 0,
+            "advisory": 1
+          }
+        }
+      }
+    },
+    {
+      "name": "railsgoat",
+      "repo": "https://github.com/OWASP/railsgoat",
+      "commit": "f5951f13089d85c979de09e7da3c8c0fb982f94a",
+      "language": "Ruby",
+      "role": "findings",
+      "note": "OWASP's deliberately vulnerable Rails app",
+      "expected": {
+        "files": 143,
+        "blocking": 6,
+        "advisory": 1,
+        "byRule": {
+          "ruby-code-injection": {
+            "blocking": 4,
+            "advisory": 0
+          },
+          "ruby-path-traversal": {
+            "blocking": 1,
+            "advisory": 0
+          },
+          "ruby-shell-nonliteral": {
+            "blocking": 0,
+            "advisory": 1
+          },
+          "ruby-sql-injection": {
+            "blocking": 1,
+            "advisory": 0
+          }
+        }
+      }
+    },
+    {
+      "name": "juice-shop",
+      "repo": "https://github.com/juice-shop/juice-shop",
+      "commit": "399fba76194305a312693eee44f4df64bdf0c3ce",
+      "language": "JavaScript/TypeScript",
+      "role": "findings",
+      "note": "OWASP's deliberately vulnerable Node app",
+      "expected": {
+        "files": 658,
+        "blocking": 11,
+        "advisory": 0,
+        "byRule": {
+          "javascript-code-injection": {
+            "blocking": 1,
+            "advisory": 0
+          },
+          "javascript-path-traversal": {
+            "blocking": 3,
+            "advisory": 0
+          },
+          "javascript-sql-injection": {
+            "blocking": 6,
+            "advisory": 0
+          },
+          "javascript-ssrf": {
+            "blocking": 1,
+            "advisory": 0
+          }
+        }
+      }
+    },
+    {
+      "name": "pygoat",
+      "repo": "https://github.com/adeyosemanputra/pygoat",
+      "commit": "19d17cc8874861142b330636d068bbde54e86b85",
+      "language": "Python",
+      "role": "findings",
+      "note": "a deliberately vulnerable Django app",
+      "expected": {
+        "files": 85,
+        "blocking": 8,
+        "advisory": 5,
+        "byRule": {
+          "python-code-injection": {
+            "blocking": 3,
+            "advisory": 0
+          },
+          "python-command-injection": {
+            "blocking": 1,
+            "advisory": 0
+          },
+          "python-path-traversal": {
+            "blocking": 1,
+            "advisory": 0
+          },
+          "python-shell-nonliteral": {
+            "blocking": 0,
+            "advisory": 2
+          },
+          "python-sql-injection": {
+            "blocking": 2,
+            "advisory": 0
+          },
+          "python-sql-text-built": {
+            "blocking": 0,
+            "advisory": 2
+          },
+          "python-ssrf": {
+            "blocking": 1,
+            "advisory": 0
+          },
+          "python-xxe": {
+            "blocking": 0,
+            "advisory": 1
+          }
+        }
+      }
+    },
+    {
+      "name": "dvcsharp-api",
+      "repo": "https://github.com/appsecco/dvcsharp-api",
+      "commit": "76c1de3c9d8d9c2e8ec0b50abe3b198a4330d7fc",
+      "language": "C#",
+      "role": "findings",
+      "note": "a deliberately vulnerable ASP.NET Core API: its SSRF and its SQL injection",
+      "expected": {
+        "files": 24,
+        "blocking": 2,
+        "advisory": 1,
+        "byRule": {
+          "csharp-sql-injection": {
+            "blocking": 1,
+            "advisory": 0
+          },
+          "csharp-sql-text-built": {
+            "blocking": 0,
+            "advisory": 1
+          },
+          "csharp-ssrf": {
+            "blocking": 1,
+            "advisory": 0
+          }
+        }
+      }
+    },
+    {
+      "name": "jellyfin",
+      "repo": "https://github.com/jellyfin/jellyfin",
+      "commit": "aec42b345e1a7da25ee5492183f12209338df688",
+      "language": "C#",
+      "role": "findings",
+      "note": "real code; two correct path-traversal findings on an admin endpoint that writes where the request says",
+      "expected": {
+        "files": 2251,
+        "blocking": 2,
+        "advisory": 2,
+        "byRule": {
+          "csharp-path-traversal": {
+            "blocking": 2,
+            "advisory": 0
+          },
+          "csharp-sql-text-built": {
+            "blocking": 0,
+            "advisory": 2
+          }
+        }
+      }
+    },
+    {
+      "name": "dvcp",
+      "repo": "https://github.com/hardik05/Damn_Vulnerable_C_Program",
+      "commit": "8dcbd202887f587783952a320a2301de701be529",
+      "language": "C/C++",
+      "role": "clean",
+      "note": "deliberately vulnerable, but in memory safety, which no rule claims: 0 injection findings is the correct answer",
+      "expected": {
+        "files": 22,
+        "blocking": 0,
+        "advisory": 0,
+        "byRule": {}
+      }
+    },
+    {
+      "name": "spring-petclinic",
+      "repo": "https://github.com/spring-projects/spring-petclinic",
+      "commit": "500158f732419217507c7656904b8e6aa1bcc0d6",
+      "language": "Java",
+      "role": "clean",
+      "expected": {
+        "files": 50,
+        "blocking": 0,
+        "advisory": 0,
+        "byRule": {}
+      }
+    },
+    {
+      "name": "spring-realworld",
+      "repo": "https://github.com/gothinkster/spring-boot-realworld-example-app",
+      "commit": "ee17e31aafe733d98c4853c8b9a74d7f2f6c924a",
+      "language": "Java",
+      "role": "clean",
+      "expected": {
+        "files": 116,
+        "blocking": 0,
+        "advisory": 0,
+        "byRule": {}
+      }
+    },
+    {
+      "name": "rubygems.org",
+      "repo": "https://github.com/rubygems/rubygems.org",
+      "commit": "a271c27838245afe51ddc37f5b65df0f0b73c4ee",
+      "language": "Ruby",
+      "role": "clean",
+      "expected": {
+        "files": 1454,
+        "blocking": 0,
+        "advisory": 5,
+        "byRule": {
+          "ruby-sql-string-built": {
+            "blocking": 0,
+            "advisory": 2
+          },
+          "ruby-sql-text-built": {
+            "blocking": 0,
+            "advisory": 3
+          }
+        }
+      }
+    },
+    {
+      "name": "mastodon",
+      "repo": "https://github.com/mastodon/mastodon",
+      "commit": "7f90e0fd72457065096d13cdcbfd0713c88de933",
+      "language": "Ruby",
+      "role": "clean",
+      "expected": {
+        "files": 4289,
+        "blocking": 0,
+        "advisory": 10,
+        "byRule": {
+          "javascript-sql-string-built": {
+            "blocking": 0,
+            "advisory": 1
+          },
+          "javascript-sql-text-built": {
+            "blocking": 0,
+            "advisory": 1
+          },
+          "ruby-sql-string-built": {
+            "blocking": 0,
+            "advisory": 5
+          },
+          "ruby-sql-text-built": {
+            "blocking": 0,
+            "advisory": 3
+          }
+        }
+      }
+    },
+    {
+      "name": "netbox",
+      "repo": "https://github.com/netbox-community/netbox",
+      "commit": "1d270e574686d9275b552225f7d09740594ac9fc",
+      "language": "Python",
+      "role": "clean",
+      "expected": {
+        "files": 1343,
+        "blocking": 0,
+        "advisory": 32,
+        "byRule": {
+          "python-sql-string-built": {
+            "blocking": 0,
+            "advisory": 21
+          },
+          "python-sql-text-built": {
+            "blocking": 0,
+            "advisory": 11
+          }
+        }
+      }
+    },
+    {
+      "name": "outline",
+      "repo": "https://github.com/outline/outline",
+      "commit": "f6f7804f07283af2ca3d55fff7920a60faf05dbd",
+      "language": "JavaScript/TypeScript",
+      "role": "clean",
+      "expected": {
+        "files": 2615,
+        "blocking": 0,
+        "advisory": 21,
+        "byRule": {
+          "javascript-shell-nonliteral": {
+            "blocking": 0,
+            "advisory": 6
+          },
+          "javascript-sql-string-built": {
+            "blocking": 0,
+            "advisory": 7
+          },
+          "javascript-sql-text-built": {
+            "blocking": 0,
+            "advisory": 8
+          }
+        }
+      }
+    },
+    {
+      "name": "gitea",
+      "repo": "https://github.com/go-gitea/gitea",
+      "commit": "6b252ca3a9ac5bc7cde049550e6b22e595c98c3b",
+      "language": "Go",
+      "role": "clean",
+      "expected": {
+        "files": 3400,
+        "blocking": 0,
+        "advisory": 100,
+        "byRule": {
+          "go-sql-string-built": {
+            "blocking": 0,
+            "advisory": 71
+          },
+          "go-sql-text-built": {
+            "blocking": 0,
+            "advisory": 29
+          }
+        }
+      }
+    },
+    {
+      "name": "eshop",
+      "repo": "https://github.com/dotnet/eShop",
+      "commit": "913acea66708a59595351174cee9b29f37179d29",
+      "language": "C#",
+      "role": "clean",
+      "expected": {
+        "files": 567,
+        "blocking": 0,
+        "advisory": 0,
+        "byRule": {}
+      }
+    },
+    {
+      "name": "bitwarden",
+      "repo": "https://github.com/bitwarden/server",
+      "commit": "0d707bf6842c05e523bc5d802e6d46a8dd62fedc",
+      "language": "C#",
+      "role": "clean",
+      "expected": {
+        "files": 5860,
+        "blocking": 0,
+        "advisory": 5,
+        "byRule": {
+          "csharp-sql-string-built": {
+            "blocking": 0,
+            "advisory": 2
+          },
+          "csharp-sql-text-built": {
+            "blocking": 0,
+            "advisory": 3
+          }
+        }
+      }
+    },
+    {
+      "name": "lemmy",
+      "repo": "https://github.com/LemmyNet/lemmy",
+      "commit": "fc640cf86a130bc897d83dbd06d84c3c7d9b16e3",
+      "language": "Rust",
+      "role": "clean",
+      "expected": {
+        "files": 540,
+        "blocking": 0,
+        "advisory": 8,
+        "byRule": {
+          "rust-sql-text-built": {
+            "blocking": 0,
+            "advisory": 8
+          }
+        }
+      }
+    },
+    {
+      "name": "meilisearch",
+      "repo": "https://github.com/meilisearch/meilisearch",
+      "commit": "541dd6e94c5d6101684610b1af1b50c5aa4e2915",
+      "language": "Rust",
+      "role": "clean",
+      "expected": {
+        "files": 721,
+        "blocking": 0,
+        "advisory": 0,
+        "byRule": {}
+      }
+    },
+    {
+      "name": "curl",
+      "repo": "https://github.com/curl/curl",
+      "commit": "287df0b324268261654657549b77ee6f0dfee177",
+      "language": "C/C++",
+      "role": "clean",
+      "expected": {
+        "files": 1121,
+        "blocking": 0,
+        "advisory": 0,
+        "byRule": {}
+      }
+    },
+    {
+      "name": "git",
+      "repo": "https://github.com/git/git",
+      "commit": "c51408889c3b372814bc20b9431c3b74d0d268eb",
+      "language": "C/C++",
+      "role": "clean",
+      "expected": {
+        "files": 1007,
+        "blocking": 0,
+        "advisory": 4,
+        "byRule": {
+          "c-format-nonliteral": {
+            "blocking": 0,
+            "advisory": 2
+          },
+          "python-shell-nonliteral": {
+            "blocking": 0,
+            "advisory": 2
+          }
+        }
+      }
+    },
+    {
+      "name": "redis",
+      "repo": "https://github.com/redis/redis",
+      "commit": "e0bb9316848db7950c2b18cdc59c2058f62b8a3d",
+      "language": "C/C++",
+      "role": "clean",
+      "expected": {
+        "files": 916,
+        "blocking": 0,
+        "advisory": 4,
+        "byRule": {
+          "c-shell-nonliteral": {
+            "blocking": 0,
+            "advisory": 1
+          },
+          "ruby-shell-nonliteral": {
+            "blocking": 0,
+            "advisory": 3
+          }
+        }
+      }
+    },
+    {
+      "name": "nginx",
+      "repo": "https://github.com/nginx/nginx",
+      "commit": "1725db9059e8d4057ce8d5090673d16e20713b45",
+      "language": "C/C++",
+      "role": "clean",
+      "expected": {
+        "files": 411,
+        "blocking": 0,
+        "advisory": 0,
+        "byRule": {}
+      }
+    }
+  ]
+}

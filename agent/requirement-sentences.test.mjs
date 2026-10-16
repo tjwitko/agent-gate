@@ -267,8 +267,17 @@ test("a baseline made only of covered sentences changes no verdict and no exit c
     assert.equal(withBaseline.code, without.code);
     const verdict = (d) => JSON.stringify([d.exitCode, d.blocking, d.findings, d.advisories, d.validatorsRun]);
     assert.equal(verdict(withBaseline.doc), verdict(without.doc));
-    assert.deepEqual(withBaseline.doc.requirementsRead.baseline.unread, []);
-    assert.deepEqual(withBaseline.doc.requirementsRead.baseline.covered.map((c) => c.coveredBy), ["sast", "scan_path", "authentication"]);
+    // Each sentence is covered by its check where that check ran, and says it did not run where it
+    // did not -- CI's unit job has no gitleaks, so scan_path is absent there. Never anything else.
+    const ran = (check) => withBaseline.doc.validatorsRun.includes(check) && !withBaseline.doc.couldNotRun.some((c) => c.startsWith(`${check}:`));
+    const { covered, unread } = withBaseline.doc.requirementsRead.baseline;
+    const expected = { 1: "sast", 2: "scan_path", 3: "authentication" };
+    assert.equal(covered.length + unread.length, 3);
+    for (const c of covered) assert.ok(ran(c.coveredBy) && expected[c.line] === c.coveredBy, JSON.stringify(c));
+    for (const u of unread) assert.equal(u.notCoveredBecause, `${expected[u.line]} did not run here`, JSON.stringify(u));
+    for (const [line, check] of Object.entries(expected)) {
+      assert.equal(covered.some((c) => c.line === Number(line)), ran(check), `line ${line}: ${check} ran=${ran(check)}`);
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

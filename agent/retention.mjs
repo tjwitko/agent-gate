@@ -21,6 +21,7 @@
 import path from "path";
 
 import { walk, uncommented } from "./source-files.mjs";
+import { splitSentences } from "./task-phrases.mjs";
 import { hclResources, hclBlocks, hclAttr, hclNumber, hclBool, hclVariableDefaults } from "./hcl-blocks.mjs";
 
 const UNIT_DAYS = { day: 1, week: 7, month: 30, year: 365 };
@@ -136,13 +137,17 @@ const RETENTION_PHRASES = [
  * retain anything is not defective for not retaining it.
  */
 export function taskRetentionRequirement(taskText = "") {
-  for (const re of RETENTION_PHRASES) {
-    const m = re.exec(taskText);
-    if (!m) continue;
-    const raw = m[1].toLowerCase();
-    const count = WORD_NUMBERS[raw] ?? Number(raw);
-    const days = toDays(count, m[2]);
-    if (days > 0) return { days, phrase: m[0].trim() };
+  // The first sentence that states a period, read one sentence at a time like every other
+  // requirement-reader (task-phrases.mjs): a wrapped "retained for / seven years" was not read.
+  for (const { text } of splitSentences(taskText)) {
+    for (const re of RETENTION_PHRASES) {
+      const m = re.exec(text);
+      if (!m) continue;
+      const raw = m[1].toLowerCase();
+      const count = WORD_NUMBERS[raw] ?? Number(raw);
+      const days = toDays(count, m[2]);
+      if (days > 0) return { days, phrase: m[0].trim() };
+    }
   }
   return null;
 }

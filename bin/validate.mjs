@@ -19,6 +19,7 @@ import { readFileSync, realpathSync, existsSync, statSync } from "fs";
 import { fileURLToPath } from "url";
 import { loadRequirements, checkBaselineInput } from "../lib/requirements.mjs";
 import { sourceCoverage, coverageLine } from "../agent/coverage.mjs";
+import { splitSentences, unjudgedSentences } from "../agent/requirement-sentences.mjs";
 
 import { validateProject, localTools, McpClient } from "../lib/gate-core.mjs";
 import { resolveControls, readConfig, CONFIG_FILE } from "../lib/resolve-controls.mjs";
@@ -67,6 +68,17 @@ export function failClosed(err, { json, wroteResult }) {
 }
 
 let wroteResult = false;
+
+/**
+ * How many sentences of a requirement text a check read, and the ones none did. Null when there is
+ * no text. Headings are not counted: they are labels, not requirements.
+ */
+export function requirementsRead(text) {
+  if (!text || !text.trim()) return null;
+  const sentences = splitSentences(text).filter((s) => !s.heading).length;
+  const unread = unjudgedSentences(text);
+  return { sentences, read: sentences - unread.length, unread };
+}
 
 export async function runGate(projectDirArg, taskFile, { env = process.env, preCommit = false, baselineFile = null } = {}) {
   const projectDir = path.resolve(projectDirArg);
@@ -155,6 +167,9 @@ export async function runGate(projectDirArg, taskFile, { env = process.env, preC
     // does to keep a frozen verdict from ageing. Recorded so a pinned run does not pass for a live one.
     judgedAsOf: env.AGENT_GATE_TODAY || null,
     toolchain: await tools,
+    // Which sentences of the requirements switched no check on. A gated-off check says only "not
+    // checked", so a requirement nothing recognised was otherwise visible nowhere.
+    requirementsRead: { task: requirementsRead(requirements.taskText), baseline: requirementsRead(requirements.baselineText) },
     coverage: sourceCoverage(projectDir),
     configError,
     controls,
@@ -176,6 +191,13 @@ function human(result) {
   out.push(`project        : ${result.projectDir}`);
   out.push(`task text      : ${result.taskFile || (result.baseline ? "NONE — the baseline only" : "NONE — checks gated on the task will report as not checked")}`);
   if (result.baseline) out.push(`baseline       : ${result.baseline}`);
+  const taskRead = result.requirementsRead?.task;
+  if (taskRead) {
+    out.push(
+      `task sentences : ${taskRead.sentences}, ${taskRead.read} read by a check, ${taskRead.unread.length} by none` +
+        `${taskRead.unread.length ? " (--json lists them)" : ""}`
+    );
+  }
   for (const c of result.controls) {
     const v = c.entry ? (c.version ? `v${c.version}` : "v?").padEnd(8) : "";
     out.push(`control        : ${c.name.padEnd(16)} ${v}${c.entry ? c.source : `NOT RESOLVED — ${c.error}`}`);
@@ -195,6 +217,16 @@ function human(result) {
     for (const s of result.silent) out.push(`   - ${s.name} connected, but ${s.provides.join(", ")} was never called`);
     out.push("   A server that starts and is never asked anything reports nothing, which is");
     out.push("   indistinguishable from a server that found nothing.");
+    out.push("");
+  }
+  // A baseline is requirements set from outside the project, by someone who meant every sentence. A
+  // sentence of it that no check reads is one the project is not being held to, and the person who
+  // wrote it is not the one reading the task file -- so each is printed, above the verdict.
+  const baselineUnread = result.requirementsRead?.baseline?.unread || [];
+  if (baselineUnread.length) {
+    out.push(`!! ${baselineUnread.length} BASELINE SENTENCE(S) NO CHECK READ — the project is not held to these:`);
+    for (const s of baselineUnread) out.push(`   - line ${s.line}: ${s.text}`);
+    out.push("   Checks that run on every project still ran. None of them was switched on by these.");
     out.push("");
   }
   // Above the verdict for the same reason as the lines before it: a Rust project exited 0, and the
@@ -233,6 +265,8 @@ function machine(result) {
       baseline: result.baseline,
       scannedAt: result.scannedAt,
       judgedAsOf: result.judgedAsOf,
+      // Per requirement text: sentences, how many a check read, and the ones none did.
+      requirementsRead: result.requirementsRead,
       notRead: result.coverage.unread,
       coverage: coverageLine(result.coverage),
       exitCode: result.exitCode,

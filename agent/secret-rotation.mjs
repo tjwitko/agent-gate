@@ -19,6 +19,7 @@ import { readdirSync, readFileSync, statSync } from "fs";
 import path from "path";
 import { SKIP_DIRS } from "./skip-dirs.mjs";
 import { isDeclaredFixture } from "./fixture-markers.mjs";
+import { inAnySentence } from "./task-phrases.mjs";
 
 const MAX_FILE_BYTES = 512 * 1024;
 const CODE_EXT = [".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".go", ".rb", ".java"];
@@ -82,12 +83,14 @@ const NEW_SECRET = new RegExp(`\\bnew\\s+(?:\\w+\\s+){0,2}${SECRET_NOUN}\\b`, "i
  * engineer weekly" out.
  */
 export function taskRequiresRotation(taskText = "") {
-  if (!SECRET_WORD.test(taskText)) return false;
-  return (
-    ROTATION_PHRASES.some((re) => re.test(taskText)) ||
-    ROTATION_NEAR_SECRET.test(taskText) ||
-    CADENCE_NEAR_SECRET.test(taskText) ||
-    NEW_SECRET.test(taskText)
+  // Within one sentence: the secret and its rotation in the same one. Across the whole text, "We
+  // rotate the on-call engineer weekly. Store the API key in Secrets Manager." read as rotation.
+  return inAnySentence(taskText, (s) =>
+    SECRET_WORD.test(s) &&
+    (ROTATION_PHRASES.some((re) => re.test(s)) ||
+      ROTATION_NEAR_SECRET.test(s) ||
+      CADENCE_NEAR_SECRET.test(s) ||
+      NEW_SECRET.test(s))
   );
 }
 

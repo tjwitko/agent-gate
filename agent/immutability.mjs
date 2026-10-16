@@ -28,6 +28,7 @@
 import path from "path";
 
 import { READ_EXT, walk, uncommented, firstMatch } from "./source-files.mjs";
+import { inAnySentence } from "./task-phrases.mjs";
 
 // The store is in scope only if it names itself after an audit trail. Deliberately narrow: firing
 // on every table would make this noise, and noise is how a blocking check gets switched off.
@@ -61,7 +62,7 @@ const IMMUTABILITY_PHRASES = [
 ];
 
 export function taskRequiresImmutability(taskText = "") {
-  return IMMUTABILITY_PHRASES.some((re) => re.test(taskText));
+  return inAnySentence(taskText, (s) => IMMUTABILITY_PHRASES.some((re) => re.test(s)));
 }
 
 // Evidence that DynamoDB is actually reached, in any of the SDKs a deliverable has used here.

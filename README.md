@@ -143,6 +143,18 @@ seven-day retention requirement, and the span a phrase may cross now stops at a 
 longer does. That is the direction of the whole design — a check that stays quiet costs you a
 finding, and a check that fires on a requirement nobody stated costs you working code.
 
+**The gate says which sentences it read.** Every run counts the task's sentences and how many
+switched a check on — `task sentences : 18, 9 read by a check, 9 by none` for the webhook task — and
+`--json` lists the unread ones with their line numbers, under `requirementsRead`. Most are
+requirements no check could hold code to ("accept HTTP callbacks at a public endpoint"); one you
+expected a check to read is a phrasing to fix.
+
+**Put each requirement in one sentence.** The checks read a sentence at a time, so "The signing
+secret is kept in Secrets Manager. It must be rotated every 90 days." does not switch rotation on:
+"it" is in a different sentence from the secret. "The signing secret must be rotated every 90
+days." does. A line indented under a list item continues that item, so hard-wrapping is safe; any
+other line break ends a thought.
+
 If a check reports "not checked" and you expected it to run, the task text is where to look. The
 four control repositories each keep one of these at `.github/gate-task.txt` if you want a smaller
 worked example: they state tests and error distinction, and deliberately state nothing about
@@ -162,7 +174,9 @@ the sentence and commit. Two things stop that from being quiet:
 - **A baseline**, for requirements no project gets to opt out of: `--baseline=<file>` on the command
   line, or the Action's `baseline` input. Its sentences are added to the task text, so they switch on
   the same checks. It only does its job if it lives somewhere the code's author cannot edit — a
-  baseline inside the project is reported as such.
+  baseline inside the project is reported as such. A baseline sentence that no check reads is printed
+  with `!!` above the verdict, in the CLI and the Action's log alike: it is a requirement the project
+  is not being held to, and whoever wrote the baseline is not the person reading the task file.
 
 ### What you get
 

@@ -123,6 +123,11 @@ const OPT_OUT = {
 };
 const optedOut = (r, taskText) => OPT_OUT_ALL.test(taskText) || Boolean(OPT_OUT[r.id]?.test(taskText));
 
+/** Which artifacts the task can name, and how each is recognised -- for the per-sentence report. */
+export function artifactRequirements() {
+  return ARTIFACT_REQUIREMENTS.map(({ id, taskPhrase }) => ({ id, taskPhrase }));
+}
+
 export function checkArtifactPresence(projectDir, taskText = "") {
   const files = walkAll(projectDir);
   if (files.length === 0) return { ran: false, unknown: "no files in the project", empty: [], missing: [] };

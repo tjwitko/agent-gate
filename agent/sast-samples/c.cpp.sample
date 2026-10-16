@@ -1,0 +1,22 @@
+#include <cstdlib>
+#include <fstream>
+#include <string>
+#include "httplib.h"
+
+void routes(httplib::Server &svr) {
+  svr.Get("/ping", [](const httplib::Request &req, httplib::Response &res) {
+    std::string host = req.get_param_value("host");
+    std::string cmd = "ping -c1 " + host;
+    // ruleid: c-command-injection, c-shell-nonliteral
+    std::system(cmd.c_str());
+  });
+  svr.Get("/report", [](const httplib::Request &req, httplib::Response &res) {
+    std::string table = req.get_param_value("t");
+    // ruleid: c-sql-text-built
+    std::string sql = "SELECT count(*) FROM " + table;
+  });
+  svr.Get("/safe", [](const httplib::Request &req, httplib::Response &res) {
+    // ok: c-command-injection, c-shell-nonliteral
+    std::system("uptime");
+  });
+}

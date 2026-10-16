@@ -16,33 +16,27 @@ import path from "path";
 import { SKIP_DIRS } from "./skip-dirs.mjs";
 import { isDeclaredFixture } from "./fixture-markers.mjs";
 import { READ_EXT } from "./source-files.mjs";
+import { SAST_EXT } from "./sast.mjs";
 
 export const UNREAD_LANGUAGES = {
-  ".rs": "Rust",
   ".php": "PHP",
-  ".cs": "C#",
   ".kt": "Kotlin",
   ".swift": "Swift",
-  ".c": "C",
-  ".h": "C",
-  ".cpp": "C++",
-  ".cc": "C++",
-  ".cxx": "C++",
-  ".hpp": "C++",
   ".scala": "Scala",
   ".ex": "Elixir",
   ".exs": "Elixir",
   ".dart": "Dart",
   ".lua": "Lua",
   ".pl": "Perl",
-  ".jsx": "JSX",
   ".vue": "Vue",
   ".svelte": "Svelte",
 };
 
 // The code languages among the extensions the checks do read; configuration and SQL are read too,
 // but are not what "most of the source" means.
-const READ_CODE = [".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".go", ".rb", ".java"].filter((e) => READ_EXT.has(e));
+// Every extension a language-aware check reads. Taken from sast's list rather than kept here: this file
+// once called .jsx unread while sast was reading it, which is the drift a second list invites.
+const READ_CODE = [...new Set([...READ_EXT, ...SAST_EXT])].filter((e) => ![".sql", ".tf", ".tfvars", ".yaml", ".yml"].includes(e));
 
 /**
  * @returns {{ unread: { language: string, files: number }[], unreadFiles: number, readFiles: number, mostlyUnread: boolean }}

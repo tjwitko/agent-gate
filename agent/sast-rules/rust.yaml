@@ -1,0 +1,302 @@
+# Injection and credential rules for Rust (axum, actix-web), written for agent-gate. See python.yaml for
+# the split between blocking taint rules (ERROR) and advisory pattern rules (WARNING). No XXE rule: the
+# common Rust XML crates do not resolve external entities. No evaluator either.
+rules:
+  - id: rust-command-injection
+    mode: taint
+    languages: [rust]
+    severity: ERROR
+    message: request data reaches a shell command
+    metadata: { category: command injection }
+    pattern-sources:
+      # axum: extractor parameters, usually destructured -- Query(params): Query<...>.
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  async fn $F(..., $EXT($P): $TY<$T>, ...) -> $R { ... }
+              - pattern-inside: |
+                  async fn $F(..., $EXT($P): $TY<$T>, ...) { ... }
+          - metavariable-regex:
+              metavariable: $EXT
+              regex: ^(Query|Path|Json|Form)$
+          - pattern: $P
+      # actix-web: web::Query<T> and friends, used undestructured.
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  async fn $F(..., $P: web::$TY<$T>, ...) -> $R { ... }
+              - pattern-inside: |
+                  async fn $F(..., $P: web::$TY<$T>, ...) { ... }
+          - metavariable-regex:
+              metavariable: $TY
+              regex: ^(Query|Path|Json|Form)$
+          - pattern: $P
+      # actix's HttpRequest. Rust patterns take no type annotation, so the receiver's name stands in.
+      - patterns:
+          - pattern-either:
+              - pattern: $REQ.query_string()
+              - pattern: $REQ.match_info()
+          - metavariable-regex:
+              metavariable: $REQ
+              regex: ^(req|request|http_req)$
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: Command::new($SH).arg("-c").arg($X)
+              - pattern: Command::new($SH).arg("/c").arg($X)
+              - pattern: Command::new($SH).args(["-c", $X])
+              - pattern: Command::new($SH).args(&["-c", $X])
+              - pattern: std::process::Command::new($SH).arg("-c").arg($X)
+          - metavariable-regex:
+              metavariable: $SH
+              regex: ^"(sh|bash|/bin/sh|/bin/bash|cmd|cmd\.exe|powershell|pwsh)"$
+          - focus-metavariable: $X
+      # The program itself chosen by the request.
+      - patterns:
+          - pattern-either:
+              - pattern: Command::new($X)
+              - pattern: std::process::Command::new($X)
+          - focus-metavariable: $X
+
+  - id: rust-sql-injection
+    mode: taint
+    languages: [rust]
+    severity: ERROR
+    message: request data is built into a SQL statement
+    metadata: { category: SQL injection }
+    pattern-sources:
+      # axum: extractor parameters, usually destructured -- Query(params): Query<...>.
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  async fn $F(..., $EXT($P): $TY<$T>, ...) -> $R { ... }
+              - pattern-inside: |
+                  async fn $F(..., $EXT($P): $TY<$T>, ...) { ... }
+          - metavariable-regex:
+              metavariable: $EXT
+              regex: ^(Query|Path|Json|Form)$
+          - pattern: $P
+      # actix-web: web::Query<T> and friends, used undestructured.
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  async fn $F(..., $P: web::$TY<$T>, ...) -> $R { ... }
+              - pattern-inside: |
+                  async fn $F(..., $P: web::$TY<$T>, ...) { ... }
+          - metavariable-regex:
+              metavariable: $TY
+              regex: ^(Query|Path|Json|Form)$
+          - pattern: $P
+      # actix's HttpRequest. Rust patterns take no type annotation, so the receiver's name stands in.
+      - patterns:
+          - pattern-either:
+              - pattern: $REQ.query_string()
+              - pattern: $REQ.match_info()
+          - metavariable-regex:
+              metavariable: $REQ
+              regex: ^(req|request|http_req)$
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: sqlx::query($Q)
+              - pattern: sqlx::query_as($Q)
+              - pattern: sqlx::query_scalar($Q)
+              - pattern: sqlx::query_as::<$D, $T>($Q)
+              - pattern: diesel::sql_query($Q)
+              - pattern: sql_query($Q)
+              - pattern: $C.execute($Q, $P)
+              - pattern: $C.query($Q, $P)
+              - pattern: $C.prepare($Q)
+              - pattern: $C.batch_execute($Q)
+          - focus-metavariable: $Q
+    pattern-sanitizers:
+      - pattern: $X.parse::<$T>()
+
+  # SSRF: a fixed scheme and host, with request data only after the first path slash, is a sanitizer.
+  - id: rust-ssrf
+    mode: taint
+    languages: [rust]
+    severity: ERROR
+    message: request data chooses where the server sends a request
+    metadata: { category: SSRF }
+    pattern-sources:
+      # axum: extractor parameters, usually destructured -- Query(params): Query<...>.
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  async fn $F(..., $EXT($P): $TY<$T>, ...) -> $R { ... }
+              - pattern-inside: |
+                  async fn $F(..., $EXT($P): $TY<$T>, ...) { ... }
+          - metavariable-regex:
+              metavariable: $EXT
+              regex: ^(Query|Path|Json|Form)$
+          - pattern: $P
+      # actix-web: web::Query<T> and friends, used undestructured.
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  async fn $F(..., $P: web::$TY<$T>, ...) -> $R { ... }
+              - pattern-inside: |
+                  async fn $F(..., $P: web::$TY<$T>, ...) { ... }
+          - metavariable-regex:
+              metavariable: $TY
+              regex: ^(Query|Path|Json|Form)$
+          - pattern: $P
+      # actix's HttpRequest. Rust patterns take no type annotation, so the receiver's name stands in.
+      - patterns:
+          - pattern-either:
+              - pattern: $REQ.query_string()
+              - pattern: $REQ.match_info()
+          - metavariable-regex:
+              metavariable: $REQ
+              regex: ^(req|request|http_req)$
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: reqwest::get($URL)
+              - pattern: reqwest::blocking::get($URL)
+              - pattern: ureq::get($URL)
+              - pattern: $C.request($METHOD, $URL)
+              - pattern: $C.$M($URL).send()
+          - focus-metavariable: $URL
+    pattern-sanitizers:
+      - patterns:
+          - pattern: format!("$P", ...)
+          - metavariable-regex:
+              metavariable: $P
+              regex: ^https?://[^/{}]+/
+
+  # Path traversal: Path::join and PathBuf::push do not stop "../" (and an absolute argument replaces
+  # the base); taking the file name does.
+  - id: rust-path-traversal
+    mode: taint
+    languages: [rust]
+    severity: ERROR
+    message: request data names a file the server reads, writes or deletes
+    metadata: { category: path traversal }
+    pattern-sources:
+      # axum: extractor parameters, usually destructured -- Query(params): Query<...>.
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  async fn $F(..., $EXT($P): $TY<$T>, ...) -> $R { ... }
+              - pattern-inside: |
+                  async fn $F(..., $EXT($P): $TY<$T>, ...) { ... }
+          - metavariable-regex:
+              metavariable: $EXT
+              regex: ^(Query|Path|Json|Form)$
+          - pattern: $P
+      # actix-web: web::Query<T> and friends, used undestructured.
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  async fn $F(..., $P: web::$TY<$T>, ...) -> $R { ... }
+              - pattern-inside: |
+                  async fn $F(..., $P: web::$TY<$T>, ...) { ... }
+          - metavariable-regex:
+              metavariable: $TY
+              regex: ^(Query|Path|Json|Form)$
+          - pattern: $P
+      # actix's HttpRequest. Rust patterns take no type annotation, so the receiver's name stands in.
+      - patterns:
+          - pattern-either:
+              - pattern: $REQ.query_string()
+              - pattern: $REQ.match_info()
+          - metavariable-regex:
+              metavariable: $REQ
+              regex: ^(req|request|http_req)$
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: std::fs::$M($P, ...)
+              - pattern: fs::$M($P, ...)
+              - pattern: tokio::fs::$M($P, ...)
+          - metavariable-regex:
+              metavariable: $M
+              regex: ^(read|read_to_string|write|remove_file|remove_dir|remove_dir_all|copy|rename|create_dir_all)$
+          - focus-metavariable: $P
+      - patterns:
+          - pattern-either:
+              - pattern: File::open($P)
+              - pattern: File::create($P)
+              - pattern: std::fs::File::open($P)
+              - pattern: tokio::fs::File::open($P)
+          - focus-metavariable: $P
+    pattern-sanitizers:
+      - pattern: $X.file_name()
+      - pattern: $X.parse::<$T>()
+
+  - id: rust-shell-nonliteral
+    languages: [rust]
+    severity: WARNING
+    message: a shell command is built from a value that is not a literal
+    metadata: { category: command injection }
+    patterns:
+      - pattern-either:
+          - pattern: Command::new($SH).arg("-c").arg($X)
+          - pattern: Command::new($SH).args(["-c", $X])
+          - pattern: Command::new($SH).args(&["-c", $X])
+      - metavariable-regex:
+          metavariable: $SH
+          regex: ^"(sh|bash|/bin/sh|/bin/bash|cmd|cmd\.exe|powershell|pwsh)"$
+      - metavariable-pattern:
+          metavariable: $X
+          patterns:
+            - pattern: $Y
+            - pattern-not: '"..."'
+      - focus-metavariable: $X
+
+  # SQL text built from a value is reported where it is built, whichever function later runs it.
+  # sqlx::query! and query_as! are checked at compile time and take parameters, so they never match.
+  - id: rust-sql-text-built
+    languages: [rust]
+    severity: WARNING
+    message: SQL text is built from a value, wherever it is later executed
+    metadata: { category: SQL injection }
+    patterns:
+      - pattern: format!("$SQL", $X, ...)
+      - metavariable-regex:
+          metavariable: $SQL
+          regex: (?is)^\s*(select\s.+\sfrom\b|insert\s+into\b|update\s+\S+\s+set\b|delete\s+from\b)
+
+  # A credential assembled from literals is still in the source; see python.yaml. concat! joins at
+  # compile time, so it never appears as one literal in the source either.
+  - id: rust-assembled-credential
+    languages: [rust]
+    severity: ERROR
+    message: a credential is assembled from literals in the source
+    metadata: { category: hardcoded credential }
+    options:
+      constant_propagation: false
+    patterns:
+      - pattern-either:
+          - pattern: 'let $V = concat!("$A", "$B", ...);'
+          - pattern: 'let $V = ["$A", "$B", ...].concat();'
+          - pattern: 'let $V = ["$A", "$B", ...].join($S);'
+          - pattern: 'let $V = String::from("$A") + "$B";'
+          - pattern: 'let $V = <... base64::decode("$A") ...>;'
+          - pattern: 'let $V = <... $ENGINE.decode("$A") ...>;'
+          - pattern: 'let $V: String = concat!("$A", "$B", ...);'
+          - pattern: 'let $V: String = ["$A", "$B", ...].concat();'
+          - pattern: 'let $V: String = ["$A", "$B", ...].join($S);'
+          - pattern: 'let $V: String = String::from("$A") + "$B";'
+          - pattern: 'let $V: String = <... base64::decode("$A") ...>;'
+          - pattern: 'let $V: String = <... $ENGINE.decode("$A") ...>;'
+          - pattern: 'const $V: &str = concat!("$A", "$B", ...);'
+          - pattern: 'const $V: &str = ["$A", "$B", ...].concat();'
+          - pattern: 'const $V: &str = ["$A", "$B", ...].join($S);'
+          - pattern: 'const $V: &str = String::from("$A") + "$B";'
+          - pattern: 'const $V: &str = <... base64::decode("$A") ...>;'
+          - pattern: 'const $V: &str = <... $ENGINE.decode("$A") ...>;'
+          - pattern: 'static $V: &str = concat!("$A", "$B", ...);'
+          - pattern: 'static $V: &str = ["$A", "$B", ...].concat();'
+          - pattern: 'static $V: &str = ["$A", "$B", ...].join($S);'
+          - pattern: 'static $V: &str = String::from("$A") + "$B";'
+          - pattern: 'static $V: &str = <... base64::decode("$A") ...>;'
+          - pattern: 'static $V: &str = <... $ENGINE.decode("$A") ...>;'
+      - metavariable-regex:
+          metavariable: $V
+          regex: (?i)^.*?(api_?key|access_?key|secret(_?key)?|signing_?key|private_?key|token|passw(or)?d|pwd|passphrase|credentials?)$
+      - metavariable-regex:
+          metavariable: $V
+          regex: ^\S+$

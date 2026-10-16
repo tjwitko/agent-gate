@@ -1,0 +1,699 @@
+# Injection rules for C and C++, written for agent-gate. See python.yaml for the split between blocking
+# taint rules (ERROR) and advisory pattern rules (WARNING).
+#
+# C has no common HTTP framework, so request data is named where it enters: the CGI environment,
+# bytes received from a socket, and the request objects of cpp-httplib, Crow and Drogon. And C moves
+# data through buffers -- snprintf(cmd, ..., host); system(cmd); -- which free Semgrep's taint does not
+# follow (its propagators are a paid feature, and were silently ignored when tried). So each sink also
+# has a form that reports the write into a buffer that the same function later passes to the sink.
+rules:
+  - id: c-command-injection
+    mode: taint
+    languages: [c, cpp]
+    severity: ERROR
+    message: request data reaches a shell command
+    metadata: { category: command injection }
+    pattern-sources:
+      # CGI: the request arrives in the environment.
+      - patterns:
+          - pattern: getenv($NAME)
+          - metavariable-regex:
+              metavariable: $NAME
+              regex: ^"(QUERY_STRING|REQUEST_URI|PATH_INFO|PATH_TRANSLATED|HTTP_\w+|CONTENT_\w+|REMOTE_USER|SCRIPT_NAME)"$
+      # Bytes read from a socket.
+      - by-side-effect: true
+        patterns:
+          - pattern-either:
+              - pattern: recv($S, $BUF, ...)
+              - pattern: recvfrom($S, $BUF, ...)
+          - focus-metavariable: $BUF
+      # cpp-httplib, Crow and Drogon request objects.
+      - patterns:
+          - pattern-either:
+              - pattern: $REQ.get_param_value(...)
+              - pattern: $REQ.get_header_value(...)
+              - pattern: $REQ.body
+              - pattern: $REQ.url_params.get(...)
+              - pattern: $REQ->getParameter(...)
+              - pattern: $REQ->getBody()
+              - pattern: $REQ->getHeader(...)
+          - metavariable-regex:
+              metavariable: $REQ
+              regex: ^(req|request)$
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: system($X)
+              - pattern: std::system($X)
+              - pattern: popen($X, ...)
+          - focus-metavariable: $X
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  snprintf($BUF, ...);
+                  ...
+                  system($BUF);
+              - pattern-inside: |
+                  snprintf($BUF, ...);
+                  ...
+                  std::system($BUF);
+              - pattern-inside: |
+                  snprintf($BUF, ...);
+                  ...
+                  popen($BUF, ...);
+              - pattern-inside: |
+                  sprintf($BUF, ...);
+                  ...
+                  system($BUF);
+              - pattern-inside: |
+                  sprintf($BUF, ...);
+                  ...
+                  std::system($BUF);
+              - pattern-inside: |
+                  sprintf($BUF, ...);
+                  ...
+                  popen($BUF, ...);
+              - pattern-inside: |
+                  strcpy($BUF, ...);
+                  ...
+                  system($BUF);
+              - pattern-inside: |
+                  strcpy($BUF, ...);
+                  ...
+                  std::system($BUF);
+              - pattern-inside: |
+                  strcpy($BUF, ...);
+                  ...
+                  popen($BUF, ...);
+              - pattern-inside: |
+                  strcat($BUF, ...);
+                  ...
+                  system($BUF);
+              - pattern-inside: |
+                  strcat($BUF, ...);
+                  ...
+                  std::system($BUF);
+              - pattern-inside: |
+                  strcat($BUF, ...);
+                  ...
+                  popen($BUF, ...);
+              - pattern-inside: |
+                  strncpy($BUF, ...);
+                  ...
+                  system($BUF);
+              - pattern-inside: |
+                  strncpy($BUF, ...);
+                  ...
+                  std::system($BUF);
+              - pattern-inside: |
+                  strncpy($BUF, ...);
+                  ...
+                  popen($BUF, ...);
+              - pattern-inside: |
+                  strncat($BUF, ...);
+                  ...
+                  system($BUF);
+              - pattern-inside: |
+                  strncat($BUF, ...);
+                  ...
+                  std::system($BUF);
+              - pattern-inside: |
+                  strncat($BUF, ...);
+                  ...
+                  popen($BUF, ...);
+          - pattern-either:
+              - pattern: snprintf($BUF, $N, $F, ..., $X, ...)
+              - pattern: sprintf($BUF, $F, ..., $X, ...)
+              - pattern: strcpy($BUF, $X)
+              - pattern: strcat($BUF, $X)
+              - pattern: strncpy($BUF, $X, $N)
+              - pattern: strncat($BUF, $X, $N)
+          - focus-metavariable: $X
+
+  - id: c-sql-injection
+    mode: taint
+    languages: [c, cpp]
+    severity: ERROR
+    message: request data is built into a SQL statement
+    metadata: { category: SQL injection }
+    pattern-sources:
+      # CGI: the request arrives in the environment.
+      - patterns:
+          - pattern: getenv($NAME)
+          - metavariable-regex:
+              metavariable: $NAME
+              regex: ^"(QUERY_STRING|REQUEST_URI|PATH_INFO|PATH_TRANSLATED|HTTP_\w+|CONTENT_\w+|REMOTE_USER|SCRIPT_NAME)"$
+      # Bytes read from a socket.
+      - by-side-effect: true
+        patterns:
+          - pattern-either:
+              - pattern: recv($S, $BUF, ...)
+              - pattern: recvfrom($S, $BUF, ...)
+          - focus-metavariable: $BUF
+      # cpp-httplib, Crow and Drogon request objects.
+      - patterns:
+          - pattern-either:
+              - pattern: $REQ.get_param_value(...)
+              - pattern: $REQ.get_header_value(...)
+              - pattern: $REQ.body
+              - pattern: $REQ.url_params.get(...)
+              - pattern: $REQ->getParameter(...)
+              - pattern: $REQ->getBody()
+              - pattern: $REQ->getHeader(...)
+          - metavariable-regex:
+              metavariable: $REQ
+              regex: ^(req|request)$
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: sqlite3_exec($DB, $X, ...)
+              - pattern: sqlite3_prepare_v2($DB, $X, ...)
+              - pattern: sqlite3_prepare($DB, $X, ...)
+              - pattern: mysql_query($C, $X)
+              - pattern: mysql_real_query($C, $X, ...)
+              - pattern: PQexec($C, $X)
+              - pattern: PQsendQuery($C, $X)
+          - focus-metavariable: $X
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  snprintf($BUF, ...);
+                  ...
+                  sqlite3_exec($DB, $BUF, ...);
+              - pattern-inside: |
+                  snprintf($BUF, ...);
+                  ...
+                  sqlite3_prepare_v2($DB, $BUF, ...);
+              - pattern-inside: |
+                  snprintf($BUF, ...);
+                  ...
+                  sqlite3_prepare($DB, $BUF, ...);
+              - pattern-inside: |
+                  snprintf($BUF, ...);
+                  ...
+                  mysql_query($C, $BUF);
+              - pattern-inside: |
+                  snprintf($BUF, ...);
+                  ...
+                  mysql_real_query($C, $BUF, ...);
+              - pattern-inside: |
+                  snprintf($BUF, ...);
+                  ...
+                  PQexec($C, $BUF);
+              - pattern-inside: |
+                  snprintf($BUF, ...);
+                  ...
+                  PQsendQuery($C, $BUF);
+              - pattern-inside: |
+                  sprintf($BUF, ...);
+                  ...
+                  sqlite3_exec($DB, $BUF, ...);
+              - pattern-inside: |
+                  sprintf($BUF, ...);
+                  ...
+                  sqlite3_prepare_v2($DB, $BUF, ...);
+              - pattern-inside: |
+                  sprintf($BUF, ...);
+                  ...
+                  sqlite3_prepare($DB, $BUF, ...);
+              - pattern-inside: |
+                  sprintf($BUF, ...);
+                  ...
+                  mysql_query($C, $BUF);
+              - pattern-inside: |
+                  sprintf($BUF, ...);
+                  ...
+                  mysql_real_query($C, $BUF, ...);
+              - pattern-inside: |
+                  sprintf($BUF, ...);
+                  ...
+                  PQexec($C, $BUF);
+              - pattern-inside: |
+                  sprintf($BUF, ...);
+                  ...
+                  PQsendQuery($C, $BUF);
+              - pattern-inside: |
+                  strcpy($BUF, ...);
+                  ...
+                  sqlite3_exec($DB, $BUF, ...);
+              - pattern-inside: |
+                  strcpy($BUF, ...);
+                  ...
+                  sqlite3_prepare_v2($DB, $BUF, ...);
+              - pattern-inside: |
+                  strcpy($BUF, ...);
+                  ...
+                  sqlite3_prepare($DB, $BUF, ...);
+              - pattern-inside: |
+                  strcpy($BUF, ...);
+                  ...
+                  mysql_query($C, $BUF);
+              - pattern-inside: |
+                  strcpy($BUF, ...);
+                  ...
+                  mysql_real_query($C, $BUF, ...);
+              - pattern-inside: |
+                  strcpy($BUF, ...);
+                  ...
+                  PQexec($C, $BUF);
+              - pattern-inside: |
+                  strcpy($BUF, ...);
+                  ...
+                  PQsendQuery($C, $BUF);
+              - pattern-inside: |
+                  strcat($BUF, ...);
+                  ...
+                  sqlite3_exec($DB, $BUF, ...);
+              - pattern-inside: |
+                  strcat($BUF, ...);
+                  ...
+                  sqlite3_prepare_v2($DB, $BUF, ...);
+              - pattern-inside: |
+                  strcat($BUF, ...);
+                  ...
+                  sqlite3_prepare($DB, $BUF, ...);
+              - pattern-inside: |
+                  strcat($BUF, ...);
+                  ...
+                  mysql_query($C, $BUF);
+              - pattern-inside: |
+                  strcat($BUF, ...);
+                  ...
+                  mysql_real_query($C, $BUF, ...);
+              - pattern-inside: |
+                  strcat($BUF, ...);
+                  ...
+                  PQexec($C, $BUF);
+              - pattern-inside: |
+                  strcat($BUF, ...);
+                  ...
+                  PQsendQuery($C, $BUF);
+              - pattern-inside: |
+                  strncpy($BUF, ...);
+                  ...
+                  sqlite3_exec($DB, $BUF, ...);
+              - pattern-inside: |
+                  strncpy($BUF, ...);
+                  ...
+                  sqlite3_prepare_v2($DB, $BUF, ...);
+              - pattern-inside: |
+                  strncpy($BUF, ...);
+                  ...
+                  sqlite3_prepare($DB, $BUF, ...);
+              - pattern-inside: |
+                  strncpy($BUF, ...);
+                  ...
+                  mysql_query($C, $BUF);
+              - pattern-inside: |
+                  strncpy($BUF, ...);
+                  ...
+                  mysql_real_query($C, $BUF, ...);
+              - pattern-inside: |
+                  strncpy($BUF, ...);
+                  ...
+                  PQexec($C, $BUF);
+              - pattern-inside: |
+                  strncpy($BUF, ...);
+                  ...
+                  PQsendQuery($C, $BUF);
+              - pattern-inside: |
+                  strncat($BUF, ...);
+                  ...
+                  sqlite3_exec($DB, $BUF, ...);
+              - pattern-inside: |
+                  strncat($BUF, ...);
+                  ...
+                  sqlite3_prepare_v2($DB, $BUF, ...);
+              - pattern-inside: |
+                  strncat($BUF, ...);
+                  ...
+                  sqlite3_prepare($DB, $BUF, ...);
+              - pattern-inside: |
+                  strncat($BUF, ...);
+                  ...
+                  mysql_query($C, $BUF);
+              - pattern-inside: |
+                  strncat($BUF, ...);
+                  ...
+                  mysql_real_query($C, $BUF, ...);
+              - pattern-inside: |
+                  strncat($BUF, ...);
+                  ...
+                  PQexec($C, $BUF);
+              - pattern-inside: |
+                  strncat($BUF, ...);
+                  ...
+                  PQsendQuery($C, $BUF);
+          - pattern-either:
+              - pattern: snprintf($BUF, $N, $F, ..., $X, ...)
+              - pattern: sprintf($BUF, $F, ..., $X, ...)
+              - pattern: strcpy($BUF, $X)
+              - pattern: strcat($BUF, $X)
+              - pattern: strncpy($BUF, $X, $N)
+              - pattern: strncat($BUF, $X, $N)
+          - focus-metavariable: $X
+
+  - id: c-path-traversal
+    mode: taint
+    languages: [c, cpp]
+    severity: ERROR
+    message: request data names a file the program opens or deletes
+    metadata: { category: path traversal }
+    pattern-sources:
+      # CGI: the request arrives in the environment.
+      - patterns:
+          - pattern: getenv($NAME)
+          - metavariable-regex:
+              metavariable: $NAME
+              regex: ^"(QUERY_STRING|REQUEST_URI|PATH_INFO|PATH_TRANSLATED|HTTP_\w+|CONTENT_\w+|REMOTE_USER|SCRIPT_NAME)"$
+      # Bytes read from a socket.
+      - by-side-effect: true
+        patterns:
+          - pattern-either:
+              - pattern: recv($S, $BUF, ...)
+              - pattern: recvfrom($S, $BUF, ...)
+          - focus-metavariable: $BUF
+      # cpp-httplib, Crow and Drogon request objects.
+      - patterns:
+          - pattern-either:
+              - pattern: $REQ.get_param_value(...)
+              - pattern: $REQ.get_header_value(...)
+              - pattern: $REQ.body
+              - pattern: $REQ.url_params.get(...)
+              - pattern: $REQ->getParameter(...)
+              - pattern: $REQ->getBody()
+              - pattern: $REQ->getHeader(...)
+          - metavariable-regex:
+              metavariable: $REQ
+              regex: ^(req|request)$
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: fopen($X, ...)
+              - pattern: open($X, ...)
+              - pattern: remove($X)
+              - pattern: unlink($X)
+          - focus-metavariable: $X
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  snprintf($BUF, ...);
+                  ...
+                  fopen($BUF, ...);
+              - pattern-inside: |
+                  snprintf($BUF, ...);
+                  ...
+                  open($BUF, ...);
+              - pattern-inside: |
+                  snprintf($BUF, ...);
+                  ...
+                  remove($BUF);
+              - pattern-inside: |
+                  snprintf($BUF, ...);
+                  ...
+                  unlink($BUF);
+              - pattern-inside: |
+                  sprintf($BUF, ...);
+                  ...
+                  fopen($BUF, ...);
+              - pattern-inside: |
+                  sprintf($BUF, ...);
+                  ...
+                  open($BUF, ...);
+              - pattern-inside: |
+                  sprintf($BUF, ...);
+                  ...
+                  remove($BUF);
+              - pattern-inside: |
+                  sprintf($BUF, ...);
+                  ...
+                  unlink($BUF);
+              - pattern-inside: |
+                  strcpy($BUF, ...);
+                  ...
+                  fopen($BUF, ...);
+              - pattern-inside: |
+                  strcpy($BUF, ...);
+                  ...
+                  open($BUF, ...);
+              - pattern-inside: |
+                  strcpy($BUF, ...);
+                  ...
+                  remove($BUF);
+              - pattern-inside: |
+                  strcpy($BUF, ...);
+                  ...
+                  unlink($BUF);
+              - pattern-inside: |
+                  strcat($BUF, ...);
+                  ...
+                  fopen($BUF, ...);
+              - pattern-inside: |
+                  strcat($BUF, ...);
+                  ...
+                  open($BUF, ...);
+              - pattern-inside: |
+                  strcat($BUF, ...);
+                  ...
+                  remove($BUF);
+              - pattern-inside: |
+                  strcat($BUF, ...);
+                  ...
+                  unlink($BUF);
+              - pattern-inside: |
+                  strncpy($BUF, ...);
+                  ...
+                  fopen($BUF, ...);
+              - pattern-inside: |
+                  strncpy($BUF, ...);
+                  ...
+                  open($BUF, ...);
+              - pattern-inside: |
+                  strncpy($BUF, ...);
+                  ...
+                  remove($BUF);
+              - pattern-inside: |
+                  strncpy($BUF, ...);
+                  ...
+                  unlink($BUF);
+              - pattern-inside: |
+                  strncat($BUF, ...);
+                  ...
+                  fopen($BUF, ...);
+              - pattern-inside: |
+                  strncat($BUF, ...);
+                  ...
+                  open($BUF, ...);
+              - pattern-inside: |
+                  strncat($BUF, ...);
+                  ...
+                  remove($BUF);
+              - pattern-inside: |
+                  strncat($BUF, ...);
+                  ...
+                  unlink($BUF);
+          - pattern-either:
+              - pattern: snprintf($BUF, $N, $F, ..., $X, ...)
+              - pattern: sprintf($BUF, $F, ..., $X, ...)
+              - pattern: strcpy($BUF, $X)
+              - pattern: strcat($BUF, $X)
+              - pattern: strncpy($BUF, $X, $N)
+              - pattern: strncat($BUF, $X, $N)
+          - focus-metavariable: $X
+
+  - id: c-format-string
+    mode: taint
+    languages: [c, cpp]
+    severity: ERROR
+    message: request data is used as a printf format string
+    metadata: { category: format string }
+    pattern-sources:
+      # CGI: the request arrives in the environment.
+      - patterns:
+          - pattern: getenv($NAME)
+          - metavariable-regex:
+              metavariable: $NAME
+              regex: ^"(QUERY_STRING|REQUEST_URI|PATH_INFO|PATH_TRANSLATED|HTTP_\w+|CONTENT_\w+|REMOTE_USER|SCRIPT_NAME)"$
+      # Bytes read from a socket.
+      - by-side-effect: true
+        patterns:
+          - pattern-either:
+              - pattern: recv($S, $BUF, ...)
+              - pattern: recvfrom($S, $BUF, ...)
+          - focus-metavariable: $BUF
+      # cpp-httplib, Crow and Drogon request objects.
+      - patterns:
+          - pattern-either:
+              - pattern: $REQ.get_param_value(...)
+              - pattern: $REQ.get_header_value(...)
+              - pattern: $REQ.body
+              - pattern: $REQ.url_params.get(...)
+              - pattern: $REQ->getParameter(...)
+              - pattern: $REQ->getBody()
+              - pattern: $REQ->getHeader(...)
+          - metavariable-regex:
+              metavariable: $REQ
+              regex: ^(req|request)$
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: printf($X, ...)
+              - pattern: fprintf($STREAM, $X, ...)
+              - pattern: syslog($PRI, $X, ...)
+          - focus-metavariable: $X
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  snprintf($BUF, ...);
+                  ...
+                  printf($BUF, ...);
+              - pattern-inside: |
+                  snprintf($BUF, ...);
+                  ...
+                  fprintf($STREAM, $BUF, ...);
+              - pattern-inside: |
+                  snprintf($BUF, ...);
+                  ...
+                  syslog($PRI, $BUF, ...);
+              - pattern-inside: |
+                  sprintf($BUF, ...);
+                  ...
+                  printf($BUF, ...);
+              - pattern-inside: |
+                  sprintf($BUF, ...);
+                  ...
+                  fprintf($STREAM, $BUF, ...);
+              - pattern-inside: |
+                  sprintf($BUF, ...);
+                  ...
+                  syslog($PRI, $BUF, ...);
+              - pattern-inside: |
+                  strcpy($BUF, ...);
+                  ...
+                  printf($BUF, ...);
+              - pattern-inside: |
+                  strcpy($BUF, ...);
+                  ...
+                  fprintf($STREAM, $BUF, ...);
+              - pattern-inside: |
+                  strcpy($BUF, ...);
+                  ...
+                  syslog($PRI, $BUF, ...);
+              - pattern-inside: |
+                  strcat($BUF, ...);
+                  ...
+                  printf($BUF, ...);
+              - pattern-inside: |
+                  strcat($BUF, ...);
+                  ...
+                  fprintf($STREAM, $BUF, ...);
+              - pattern-inside: |
+                  strcat($BUF, ...);
+                  ...
+                  syslog($PRI, $BUF, ...);
+              - pattern-inside: |
+                  strncpy($BUF, ...);
+                  ...
+                  printf($BUF, ...);
+              - pattern-inside: |
+                  strncpy($BUF, ...);
+                  ...
+                  fprintf($STREAM, $BUF, ...);
+              - pattern-inside: |
+                  strncpy($BUF, ...);
+                  ...
+                  syslog($PRI, $BUF, ...);
+              - pattern-inside: |
+                  strncat($BUF, ...);
+                  ...
+                  printf($BUF, ...);
+              - pattern-inside: |
+                  strncat($BUF, ...);
+                  ...
+                  fprintf($STREAM, $BUF, ...);
+              - pattern-inside: |
+                  strncat($BUF, ...);
+                  ...
+                  syslog($PRI, $BUF, ...);
+          - pattern-either:
+              - pattern: snprintf($BUF, $N, $F, ..., $X, ...)
+              - pattern: sprintf($BUF, $F, ..., $X, ...)
+              - pattern: strcpy($BUF, $X)
+              - pattern: strcat($BUF, $X)
+              - pattern: strncpy($BUF, $X, $N)
+              - pattern: strncat($BUF, $X, $N)
+          - focus-metavariable: $X
+
+  # gets() cannot be used safely: it writes past the buffer whenever the input is longer. Removed
+  # from C11; any use is a defect.
+  - id: c-gets
+    languages: [c, cpp]
+    severity: ERROR
+    message: gets() writes past the end of its buffer whenever the input is longer than it
+    metadata: { category: buffer overflow }
+    pattern: gets(...)
+
+  - id: c-shell-nonliteral
+    languages: [c, cpp]
+    severity: WARNING
+    message: a shell command is built from a value that is not a literal
+    metadata: { category: command injection }
+    patterns:
+      - pattern-either:
+          - pattern: system($X)
+          - pattern: std::system($X)
+          - pattern: popen($X, ...)
+      - metavariable-pattern:
+          metavariable: $X
+          patterns:
+            - pattern: $Y
+            - pattern-not: '"..."'
+      - focus-metavariable: $X
+
+  # A format string that is not a literal, with nothing else to format: the classic CWE-134 shape.
+  # Wrappers that forward a format and its arguments (vprintf and friends) are not this.
+  - id: c-format-nonliteral
+    languages: [c, cpp]
+    severity: WARNING
+    message: a printf-family format string is not a literal
+    metadata: { category: format string }
+    patterns:
+      - pattern-either:
+          - pattern: printf($X)
+          - pattern: fprintf($STREAM, $X)
+          - pattern: syslog($PRI, $X)
+          - pattern: sprintf($BUF, $X)
+          - pattern: snprintf($BUF, $N, $X)
+      # Judged on the argument's text: metavariable-pattern did not apply these exclusions. Not a
+      # literal; not a macro constant (Redis's LOG_COLOR_BOLD); not a translated literal -- git wraps
+      # nearly every message in _() and 85 of its 86 advisories were that; and not a choice between
+      # two literals (Redis's cond ? "true" : "false").
+      - metavariable-regex:
+          metavariable: $X
+          regex: (?s)^(?!")(?![A-Z][A-Z0-9_]*$)(?!(_|N_|Q_|gettext|ngettext|dgettext|dcgettext)\s*\()(?!.*\?\s*"[^"]*"\s*:\s*"[^"]*"\s*$).+
+      - focus-metavariable: $X
+
+  # SQL text built from a value is reported where it is built, whichever function later runs it.
+  - id: c-sql-text-built
+    languages: [c, cpp]
+    severity: WARNING
+    message: SQL text is built from a value, wherever it is later executed
+    metadata: { category: SQL injection }
+    pattern-either:
+      - patterns:
+          - pattern-either:
+              - pattern: sprintf($BUF, "$SQL", $X, ...)
+              - pattern: snprintf($BUF, $N, "$SQL", $X, ...)
+          - metavariable-regex:
+              metavariable: $SQL
+              regex: (?is)^\s*(select\s.+\sfrom\b|insert\s+into\b|update\s+\S+\s+set\b|delete\s+from\b)
+      - patterns:
+          - pattern: '"$SQL" + $X'
+          - metavariable-regex:
+              metavariable: $SQL
+              regex: (?is)^\s*(select\s.+\sfrom\b|insert\s+into\b|update\s+\S+\s+set\b|delete\s+from\b)
+          - metavariable-pattern:
+              metavariable: $X
+              patterns:
+                - pattern: $Y
+                - pattern-not: '"..."'

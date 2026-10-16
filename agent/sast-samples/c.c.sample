@@ -1,0 +1,94 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sqlite3.h>
+#include <sys/socket.h>
+#include <syslog.h>
+
+void cgi_ping(void) {
+  const char *qs = getenv("QUERY_STRING");
+  char cmd[256];
+  // ruleid: c-command-injection
+  snprintf(cmd, sizeof cmd, "ping -c1 %s", qs);
+  // ruleid: c-shell-nonliteral
+  system(cmd);
+}
+
+void cgi_ping_direct(void) {
+  // ruleid: c-command-injection, c-shell-nonliteral
+  system(getenv("QUERY_STRING"));
+}
+
+void cgi_lookup(sqlite3 *db) {
+  const char *name = getenv("QUERY_STRING");
+  char sql[512];
+  // ruleid: c-sql-injection, c-sql-text-built
+  snprintf(sql, sizeof sql, "SELECT * FROM users WHERE name = '%s'", name);
+  sqlite3_exec(db, sql, NULL, NULL, NULL);
+}
+
+void cgi_lookup_safe(sqlite3 *db) {
+  const char *name = getenv("QUERY_STRING");
+  sqlite3_stmt *st;
+  // ok: c-sql-injection
+  sqlite3_prepare_v2(db, "SELECT * FROM users WHERE name = ?", -1, &st, NULL);
+  sqlite3_bind_text(st, 1, name, -1, SQLITE_TRANSIENT);
+}
+
+void cgi_file(void) {
+  const char *path = getenv("PATH_INFO");
+  char full[512];
+  strcpy(full, "/srv/files/");
+  // ruleid: c-path-traversal
+  strcat(full, path);
+  FILE *f = fopen(full, "r");
+}
+
+void serve(int s) {
+  char buf[512];
+  recv(s, buf, sizeof buf, 0);
+  // ruleid: c-format-string, c-format-nonliteral
+  printf(buf);
+}
+
+void serve_safe(int s) {
+  char buf[512];
+  recv(s, buf, sizeof buf, 0);
+  // ok: c-format-string, c-format-nonliteral
+  printf("%s", buf);
+}
+
+void log_it(const char *msg) {
+  // A non-literal format with nothing else to format.
+  // ruleid: c-format-nonliteral
+  syslog(LOG_INFO, msg);
+}
+
+void say_bye(void) {
+  // A translated literal is the project's own text.
+  // ok: c-format-nonliteral
+  printf(_("Bye.\n"));
+}
+
+void colours(int ok) {
+  // A macro for a string constant, and a choice between two literals.
+  // ok: c-format-nonliteral
+  printf(LOG_COLOR_BOLD);
+  // ok: c-format-nonliteral
+  printf(ok ? "true" : "false");
+}
+
+void housekeeping(void) {
+  const char *home = getenv("HOME");
+  // ok: c-command-injection, c-shell-nonliteral
+  system("rm -rf /tmp/cache");
+  // HOME is not request data.
+  // ok: c-path-traversal
+  FILE *f = fopen(home, "r");
+}
+
+void read_line(void) {
+  char line[64];
+  // ruleid: c-gets
+  gets(line);
+}

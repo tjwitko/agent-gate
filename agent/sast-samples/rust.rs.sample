@@ -1,0 +1,74 @@
+use std::collections::HashMap;
+use std::process::Command;
+
+async fn ping(Query(params): Query<HashMap<String, String>>) -> String {
+    let host = params.get("host").unwrap();
+    // ruleid: rust-command-injection, rust-shell-nonliteral
+    let out = Command::new("sh").arg("-c").arg(format!("ping -c1 {}", host)).output().unwrap();
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+async fn ping_args(Query(params): Query<HashMap<String, String>>) -> String {
+    let host = params.get("host").unwrap();
+    // No shell: the request value is one argument to ping.
+    // ok: rust-command-injection, rust-shell-nonliteral
+    let out = Command::new("ping").arg("-c1").arg(host).output().unwrap();
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+async fn user(Path(name): Path<String>, State(pool): State<PgPool>) -> String {
+    // ruleid: rust-sql-injection, rust-sql-text-built
+    let rows = sqlx::query(&format!("SELECT * FROM users WHERE name = '{}'", name)).fetch_all(&pool).await;
+    String::new()
+}
+
+async fn user_safe(Path(name): Path<String>, State(pool): State<PgPool>) -> String {
+    // ok: rust-sql-injection, rust-sql-text-built
+    let rows = sqlx::query("SELECT * FROM users WHERE name = $1").bind(name).fetch_all(&pool).await;
+    String::new()
+}
+
+async fn fetch(Query(params): Query<HashMap<String, String>>) -> String {
+    let url = params.get("url").unwrap();
+    // ruleid: rust-ssrf
+    reqwest::get(url).await.unwrap().text().await.unwrap()
+}
+
+async fn profile(Path(id): Path<String>) -> String {
+    // Scheme and host are fixed; request data only selects a path on that host.
+    // ok: rust-ssrf
+    reqwest::get(format!("https://api.example.com/users/{}", id)).await.unwrap().text().await.unwrap()
+}
+
+async fn download(q: web::Query<FileParams>) -> String {
+    // ruleid: rust-path-traversal
+    std::fs::read_to_string(format!("/srv/uploads/{}", q.file)).unwrap()
+}
+
+async fn download_safe(q: web::Query<FileParams>) -> String {
+    let name = std::path::Path::new(&q.file).file_name().unwrap().to_owned();
+    // ok: rust-path-traversal
+    std::fs::read_to_string(std::path::Path::new("/srv/uploads").join(name)).unwrap()
+}
+
+fn report(table: &str) -> String {
+    // No request data: the construction is flagged, the flow is not.
+    // ok: rust-sql-injection
+    // ruleid: rust-sql-text-built
+    format!("SELECT count(*) FROM {}", table)
+}
+
+fn housekeeping() {
+    // ok: rust-command-injection, rust-shell-nonliteral
+    Command::new("sh").arg("-c").arg("rm -rf /tmp/cache").status().unwrap();
+}
+
+fn credentials() {
+    // A credential split at compile time is still a credential in the source.
+    // ruleid: rust-assembled-credential
+    let api_key = concat!("sk-live-", "4f9a8b7c6d5e", "3f2a1b0c");
+    // ruleid: rust-assembled-credential
+    let secret_token = ["ghp_", "a1B2c3D4", "e5F6g7H8"].concat();
+    // ok: rust-assembled-credential
+    let token_url = concat!("https://", "auth.example.com/token");
+}

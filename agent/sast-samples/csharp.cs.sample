@@ -1,0 +1,203 @@
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.Net.Http;
+using System.Xml;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.Data.SqlClient;
+using Microsoft.EntityFrameworkCore;
+
+public class SamplesController : Controller
+{
+    private readonly SqlConnection conn;
+    private readonly AppDb db;
+    private readonly HttpClient http;
+
+    [HttpGet("/ping")]
+    public IActionResult Ping([FromQuery] string host)
+    {
+        // ruleid: csharp-command-injection, csharp-shell-nonliteral
+        Process.Start("sh", "-c 'ping -c1 " + host + "'");
+        return Ok();
+    }
+
+    [HttpGet("/ping-args")]
+    public IActionResult PingArgs([FromQuery] string host)
+    {
+        // No shell: the request value is an argument to ping.
+        // ok: csharp-command-injection, csharp-shell-nonliteral
+        Process.Start("ping", host);
+        return Ok();
+    }
+
+    [HttpGet("/user")]
+    public IActionResult User([FromQuery] string name)
+    {
+        // ruleid: csharp-sql-injection, csharp-sql-string-built, csharp-sql-text-built
+        var cmd = new SqlCommand("SELECT * FROM users WHERE name = '" + name + "'", conn);
+        return Ok(cmd.ExecuteScalar());
+    }
+
+    [HttpGet("/user-safe")]
+    public IActionResult UserSafe([FromQuery] string name)
+    {
+        // ok: csharp-sql-injection, csharp-sql-string-built
+        var cmd = new SqlCommand("SELECT * FROM users WHERE name = @name", conn);
+        cmd.Parameters.AddWithValue("@name", name);
+        return Ok(cmd.ExecuteScalar());
+    }
+
+    [HttpGet("/orders")]
+    public IActionResult Orders([FromQuery] string status)
+    {
+        // ruleid: csharp-sql-injection, csharp-sql-text-built
+        return Ok(db.Orders.FromSqlRaw("SELECT * FROM orders WHERE status = '" + status + "'").ToList());
+    }
+
+    [HttpGet("/orders-safe")]
+    public IActionResult OrdersSafe([FromQuery] string status)
+    {
+        // FromSqlInterpolated turns the interpolation into parameters.
+        // ok: csharp-sql-injection, csharp-sql-text-built
+        return Ok(db.Orders.FromSqlInterpolated($"SELECT * FROM orders WHERE status = {status}").ToList());
+    }
+
+    [HttpGet("/search")]
+    public IActionResult Search(string keyword)
+    {
+        // dvcsharp-api's shape: the SQL is interpolated into a string variable, then run.
+        // ruleid: csharp-sql-text-built
+        var query = $"SELECT * FROM products WHERE name LIKE '%{keyword}%'";
+        // ruleid: csharp-sql-injection
+        return Ok(db.Products.FromSql(query).ToList());
+    }
+
+    [HttpGet("/search-safe")]
+    public IActionResult SearchSafe(string keyword)
+    {
+        // Written inline, the interpolation becomes a parameter.
+        // ok: csharp-sql-injection, csharp-sql-text-built
+        return Ok(db.Products.FromSql($"SELECT * FROM products WHERE name = {keyword}").ToList());
+    }
+
+    [HttpGet("/fetch")]
+    public async System.Threading.Tasks.Task<IActionResult> Fetch([FromQuery] string url)
+    {
+        // ruleid: csharp-ssrf
+        return Ok(await http.GetStringAsync(url));
+    }
+
+    [HttpGet("/profile")]
+    public async System.Threading.Tasks.Task<IActionResult> Profile([FromQuery] string id)
+    {
+        // Scheme and host are fixed; request data only selects a path on that host.
+        // ok: csharp-ssrf
+        return Ok(await http.GetStringAsync($"https://api.example.com/users/{id}"));
+    }
+
+    [HttpDelete("/ciphers/{id}")]
+    public async System.Threading.Tasks.Task<IActionResult> DeleteCipher(string id)
+    {
+        // A service method that happens to be called DeleteAsync is not an HTTP request (Bitwarden).
+        // ok: csharp-ssrf
+        await _cipherService.DeleteAsync(id);
+        return Ok();
+    }
+
+    [HttpGet("/prevalidate")]
+    public async System.Threading.Tasks.Task<IActionResult> PreValidate(string domainHint)
+    {
+        // A relative URL stays on the client's fixed base address.
+        // ok: csharp-ssrf
+        return Ok(await http.GetStringAsync($"/Account/PreValidate?domainHint={domainHint}"));
+    }
+
+    [HttpGet("/items/{itemId}/file")]
+    public IActionResult ItemFile(string itemId)
+    {
+        // The path belongs to a record looked up by id: server data (Jellyfin).
+        var item = _libraryManager.GetItemById<BaseItem>(itemId);
+        // ok: csharp-path-traversal
+        return PhysicalFile(item.Path, "application/octet-stream");
+    }
+
+    [HttpGet("/subtitles/{itemId}")]
+    public async System.Threading.Tasks.Task<IActionResult> Subtitles(string itemId)
+    {
+        // The controller's own lookup helper returns a stored path.
+        var subtitlePath = await GetSubtitlePath(itemId);
+        // ok: csharp-path-traversal
+        return PhysicalFile(subtitlePath, "text/vtt");
+    }
+
+    [HttpGet("/download")]
+    public IActionResult Download([FromQuery] string file)
+    {
+        // ruleid: csharp-path-traversal
+        return Ok(System.IO.File.ReadAllText(Path.Combine("/srv/uploads", file)));
+    }
+
+    [HttpGet("/download-safe")]
+    public IActionResult DownloadSafe([FromQuery] string file)
+    {
+        // ok: csharp-path-traversal
+        return Ok(System.IO.File.ReadAllText(Path.Combine("/srv/uploads", Path.GetFileName(file))));
+    }
+
+    [HttpGet("/type")]
+    public IActionResult Make([FromQuery] string typeName)
+    {
+        // ruleid: csharp-code-injection
+        return Ok(Activator.CreateInstance(Type.GetType(typeName)));
+    }
+
+    public object Report(string table)
+    {
+        // No request data: the construction is flagged, the flow is not.
+        // ok: csharp-sql-injection
+        // ruleid: csharp-sql-string-built, csharp-sql-text-built
+        var cmd = new SqlCommand("SELECT count(*) FROM " + table, conn);
+        return cmd.ExecuteScalar();
+    }
+
+    public void Housekeeping()
+    {
+        // ok: csharp-command-injection, csharp-shell-nonliteral
+        Process.Start("sh", "-c 'rm -rf /tmp/cache'");
+    }
+
+    public XmlDocument ParseUntrusted(string xml)
+    {
+        var settings = new XmlReaderSettings();
+        // ruleid: csharp-xxe
+        settings.DtdProcessing = DtdProcessing.Parse;
+        var doc = new XmlDocument();
+        doc.Load(XmlReader.Create(new StringReader(xml), settings));
+        return doc;
+    }
+
+    public XmlDocument ParseSafely(string xml)
+    {
+        // ok: csharp-xxe
+        var settings = new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit };
+        var doc = new XmlDocument();
+        doc.Load(XmlReader.Create(new StringReader(xml), settings));
+        return doc;
+    }
+
+    // A credential split or encoded is still a credential in the source.
+    // ruleid: csharp-assembled-credential
+    private const string ApiKey = "sk-live-" + "4f9a8b7c6d5e" + "3f2a1b0c";
+    // ok: csharp-assembled-credential
+    private const string TokenUrl = "https://" + "auth.example.com/token";
+}
+
+public static class Api
+{
+    public static void Map(WebApplication app, SqlConnection conn)
+    {
+        app.MapGet("/minimal", (string host) =>
+            // ruleid: csharp-command-injection, csharp-shell-nonliteral
+            Process.Start("cmd.exe", "/c ping " + host));
+    }
+}

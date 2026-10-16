@@ -1057,20 +1057,62 @@ The three Juice Shop findings that remain are code guarded by an allow-list the 
 a ternary over permitted extensions, and a lookup that returns 404 for an unknown key before the file
 is read. Taint does not model checks; this is the documented cost of a rule that blocks.
 
-### 13. Injection rules for C#, Rust and C/C++ — next
+### 13. Injection rules for C#, Rust and C/C++ — fixed
 
-Java and Ruby joined Python, JavaScript/TypeScript and Go in #9. The next set, in order: **C#**
-(ASP.NET Core: `[FromQuery]`/`[FromBody]` parameters, `Request.Query`; sinks `Process.Start` with a
-shell, `SqlCommand`/`ExecuteSqlRaw`/`FromSqlRaw`, Razor `Html.Raw`), **Rust** (axum and actix
-extractors; `Command::new("sh").arg("-c")`, `sqlx::query` with `format!`), and **C/C++** (`system`,
-`popen`, `exec*` with a built string; `sprintf` into a query) — for C and C++ there is often no HTTP
-framework to name a source, so the shell and query constructions will carry more of the weight than
-taint. PHP, Kotlin and Swift follow.
+C# (ASP.NET Core: attribute-routed action parameters, minimal-API handler parameters, `Request.*`),
+Rust (axum and actix-web extractors) and C/C++ (the CGI environment, bytes from `recv`, and
+cpp-httplib, Crow and Drogon request objects) get the same rule shape as the five before them:
+blocking taint rules for command, SQL and code injection, SSRF and path traversal; assembled
+credentials (C# and Rust); and advisories for string-built SQL, SQL text, non-literal shell commands
+and XXE (C#). C/C++ add a blocking **format-string** rule (request data as a `printf` format) and
+**`gets()`**, which has no safe use, plus an advisory for any non-literal format.
 
-Each needs what Java and Ruby needed: sources per framework, annotated samples with `ruleid`/`ok`
-lines, a false-positive measurement on real applications in that language — cloned, with agreement,
-because this machine has none — and a deliberately vulnerable application for true positives where one
-exists. Until then the NOT READ line names these languages above the verdict.
+**C needed a different shape.** Free Semgrep's taint does not follow data into a buffer — its
+propagators are a paid feature, silently ignored — so `snprintf(cmd, …, host); system(cmd);` was
+invisible. Each C sink therefore also has a form that reports the write into a buffer that the same
+function later passes to it.
+
+Measured on eleven cloned projects, scanned and never run:
+
+| project | language | files | blocking |
+| --- | --- | --- | --- |
+| eShop | C# | 567 | 0 |
+| Bitwarden server | C# | 5,858 | 0 |
+| Jellyfin | C# | 2,251 | 2, both a request naming a path — see below |
+| dvcsharp-api | C#, vulnerable | 24 | 2: its SSRF and its documented SQL injection |
+| Lemmy, Meilisearch | Rust | 1,261 | 0 |
+| curl, git, Redis, nginx | C | 3,454 | 0 |
+| Damn Vulnerable C Program | C, vulnerable | 22 | 0 — its defects are memory safety, not injection |
+
+The first pass was far from clean, and each class found is fixed and kept as an `ok` sample:
+
+- **Method names are not HTTP clients.** The C# SSRF sink matched `GetAsync`, `PostAsync` and
+  `DeleteAsync`, which are also the names of every async service method: Bitwarden's
+  `_cipherService.DeleteAsync(id)` made 30 blocking "SSRF"s. The receiver must now be a client.
+- **A relative URL stays on its host.** `httpClient.GetAsync($"/Account/PreValidate?…")` on a
+  named client with a fixed base address cannot be redirected.
+- **A record looked up by ID is server data.** Jellyfin serves `item.Path` for
+  `_libraryManager.GetItemById<BaseItem>(itemId)`; lookups on service-like receivers, generic or
+  not, and a controller's own `Get…` helpers are sanitizers for SSRF and path traversal.
+- **`FromSql` was missing.** dvcsharp-api's documented "Search Product" injection builds the SQL in a
+  variable and passes it to EF Core's `FromSql` — dangerous with a string, parameterised with an
+  inline interpolation. The sink now distinguishes the two.
+- **A translated literal is not a non-literal format.** git wraps nearly every message in `_()`:
+  85 of its 86 format-string advisories. Macro constants and two-literal ternaries are excluded too.
+
+**Jellyfin's two remaining findings are correct.** `EnvironmentController.ValidatePath` writes and
+deletes a test file in a directory named by the request — admin-only and intended, and also exactly
+what the rule describes. The gate has no way yet for a person to accept a specific `sast` finding;
+fixture markers exempt directories, not findings. That is the open question this leaves.
+
+Not covered: Rocket, Warp and other Rust frameworks; ASP.NET WebForms; insecure deserialization
+(dvcsharp-api's "Generic import entities"); and memory safety in C/C++ beyond `gets()`.
+
+### 17. Opt-in CI integrations: Trivy and CodeQL — next
+
+Trivy for the packages inside a built image, and CodeQL for taint that crosses functions and files, both
+as optional Action steps. Neither belongs in the core gate: one needs a build, the other a database and,
+for private code, a licence.
 
 ### 12. Considered and deferred
 

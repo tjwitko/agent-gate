@@ -22,16 +22,17 @@ function cov(files) {
 // The probe: a Rust project exited 0, and the only sign none of its code was read was one advisory
 // among several.
 test("a project written in a language nothing reads says so, loudly", () => {
-  const c = cov({ "Cargo.toml": "[package]\nname='r'\n", "src/main.rs": "fn main() {}\n", "src/lib.rs": "\n" });
-  assert.deepEqual(c.unread, [{ language: "Rust", files: 2 }]);
+  // Rust is read now (agent/sast-rules/rust.yaml); PHP is the example of a language nothing reads.
+  const c = cov({ "composer.json": "{}\n", "src/index.php": "<?php\n", "src/lib.php": "<?php\n" });
+  assert.deepEqual(c.unread, [{ language: "PHP", files: 2 }]);
   assert.equal(c.mostlyUnread, true);
-  assert.match(coverageLine(c), /^MOST OF THIS PROJECT'S SOURCE WAS NOT READ: 2 Rust file\(s\), against 0/);
+  assert.match(coverageLine(c), /^MOST OF THIS PROJECT'S SOURCE WAS NOT READ: 2 PHP file\(s\), against 0/);
 });
 
 test("a minority of unread files is still named, without the capitals", () => {
-  const c = cov({ "app.py": "\n", "server.py": "\n", "native/fast.c": "\n" });
+  const c = cov({ "app.py": "\n", "server.py": "\n", "mobile/Main.kt": "\n" });
   assert.equal(c.mostlyUnread, false);
-  assert.match(coverageLine(c), /^1 C file\(s\) were not read/);
+  assert.match(coverageLine(c), /^1 Kotlin file\(s\) were not read/);
 });
 
 test("a project entirely in languages the checks read gets no line", () => {
@@ -39,6 +40,12 @@ test("a project entirely in languages the checks read gets no line", () => {
 });
 
 test("installed dependencies are not the project's source; vendored code is", () => {
-  const c = cov({ "index.js": "\n", "node_modules/native/binding.cpp": "\n", "vendor/x.rs": "\n" });
-  assert.deepEqual(c.unread, [{ language: "Rust", files: 1 }]);
+  const c = cov({ "index.js": "\n", "node_modules/native/binding.php": "\n", "vendor/x.php": "\n" });
+  assert.deepEqual(c.unread, [{ language: "PHP", files: 1 }]);
+});
+
+test("languages the injection rules read are not called unread", () => {
+  const c = cov({ "main.rs": "\n", "Program.cs": "\n", "server.c": "\n", "lib.cpp": "\n", "App.jsx": "\n" });
+  assert.deepEqual(c.unread, []);
+  assert.equal(coverageLine(c), null);
 });

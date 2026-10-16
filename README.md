@@ -43,7 +43,7 @@ is fine" are different facts, and collapsing them is how a gate quietly stops pr
   | `gitleaks` | credential scanning | yes |
   | `osv-scanner` | dependency vulnerabilities | yes |
   | `terraform` | Terraform plan and policy checks | if the project has `.tf` files |
-  | `semgrep` | injection checks (`sast`) | if the project has Python, JavaScript/TypeScript, Go, Java or Ruby |
+  | `semgrep` | injection checks (`sast`) | if the project has Python, JavaScript/TypeScript, Go, Java, Ruby, C#, Rust, C or C++ |
   | `checkov` | extra Terraform and Dockerfile coverage | optional, advisory only |
   | `ruff` | Python static checks | if the project has Python |
   | `pytest` | running a Python test suite | if the project has Python tests |
@@ -520,9 +520,9 @@ nothing it writes overwrites.
 
 | concern | blocks on | reports, without blocking | covers |
 |---|---|---|---|
-| secrets | credentials hardcoded in any file; a credential-named value assembled from literals (split, joined, base64- or hex-encoded) | — | every file; assembly in Python, JavaScript/TypeScript, Go, Java, Ruby |
+| secrets | credentials hardcoded in any file; a credential-named value assembled from literals (split, joined, base64- or hex-encoded) | — | every file; assembly in Python, JavaScript/TypeScript, Go, Java, Ruby, C#, Rust |
 | dependencies | high or critical CVEs; a manifest that declares dependencies with no lockfile the scanner can read | CVEs in an unlocked `requirements.txt`, `go.mod` or `pom.xml` | npm, PyPI, Go, Maven, Cargo, RubyGems, Packagist and the rest of [OSV](https://osv.dev) |
-| injection | request data reaching a shell, a SQL statement, an evaluator, an outbound request's host (SSRF) or a file path (path traversal) | a query or command built from a value of unknown origin; an XML parser that resolves external entities (XXE) | Python, JavaScript/TypeScript, Go, Java, Ruby — Flask, Django, FastAPI, Express, `net/http`, gin, Spring, servlets, Rails, Sinatra |
+| injection | request data reaching a shell, a SQL statement, an evaluator, an outbound request's host (SSRF), a file path (path traversal) or a C format string; any use of `gets()` | a query or command built from a value of unknown origin; a non-literal C format string; an XML parser that resolves external entities (XXE) | Python, JavaScript/TypeScript, Go, Java, Ruby, C#, Rust, C, C++ — Flask, Django, FastAPI, Express, `net/http`, gin, Spring, servlets, Rails, Sinatra, ASP.NET Core, axum, actix-web; in C, CGI and sockets, and cpp-httplib, Crow, Drogon |
 | authentication | routes anyone can call; a credential compared with `==` or accepted when unset | routes exempt by name, each listed | Python, JavaScript/TypeScript, Go, Java, Ruby |
 | infrastructure | Terraform plan and policy violations; IAM, IRSA and Kubernetes manifests that contradict the code; workloads authenticating with held credentials | checkov's findings on Terraform for any cloud, CloudFormation, ARM and Bicep | blocking: Terraform (AWS), Kubernetes YAML; advisory: also CloudFormation, ARM, Bicep |
 | containers | a base image past end of life, in any build stage | checkov's Dockerfile rules — `USER`, `HEALTHCHECK` | official `node`, `python`, `golang`, `ruby`, `php`, `debian`, `ubuntu`, `alpine`, `eclipse-temurin` images |
@@ -565,7 +565,7 @@ A few are worth calling out because they exist in response to measured failures:
   rules — no `USER`, no `HEALTHCHECK` — are reported as advisories.
 - **`sast` blocks on injection** — request data reaching a shell, a SQL statement, `eval`, the host
   of an outbound request (SSRF) or a file path (path traversal), in Python, JavaScript/TypeScript, Go,
-  Java and Ruby. A URL whose scheme and host are fixed in the code, with request data only in the
+  Java, Ruby, C#, Rust, C and C++. A URL whose scheme and host are fixed in the code, with request data only in the
   path, is not SSRF and is not reported. It runs Semgrep with this project's own rules, and only the
   ones that trace data from an HTTP request to the dangerous call block. Before they were allowed to,
   they produced no blocking findings across about 30,000 files of real code — seven open-source web
@@ -583,7 +583,7 @@ A few are worth calling out because they exist in response to measured failures:
 
 Listed so that a clean verdict is read for what it is.
 
-- **Languages outside the table.** C#, Rust, C and C++, PHP, Kotlin and Swift get the project-wide scans —
+- **Languages outside the table.** PHP, Kotlin, Swift, Scala and the rest get the project-wide scans —
   secrets, dependencies, infrastructure — and nothing that reads the code itself. The run says so above
   the verdict.
 - **Injection across a function call.** Request data is followed within one function; Semgrep's
@@ -594,7 +594,14 @@ Listed so that a clean verdict is read for what it is.
   an XML parser configured to resolve external entities is an advisory. Cross-site scripting is not:
   templates escape by default, so what is worth checking is the escape hatches (`|safe`, `Markup()`,
   `dangerouslySetInnerHTML`, `html_safe`), and that is not written yet. Neither is server-side
-  template injection, LDAP injection or open redirect.
+  template injection, LDAP injection, open redirect or insecure deserialization.
+- **Memory safety in C and C++.** Beyond `gets()`, buffer overflows, use-after-free and integer
+  overflow are not checked: the patterns that find them flag most C code, and a check that blocks most
+  projects gets switched off. A sanitiser build (`-fsanitize=address`) and a fuzzer find them better.
+- **Request data in a C buffer, used in another function.** Free Semgrep does not follow taint into a
+  buffer, so a write into one is reported only when the same function passes it to the dangerous call.
+- **Rocket, Warp and other Rust frameworks**, and ASP.NET WebForms. Their request types are not yet
+  named as sources.
 - **Authorisation.** `authentication` checks that a route requires a caller identity, not what that
   caller may then do.
 - **The built image.** A Dockerfile's base image is judged; the packages inside a built image are not

@@ -32,8 +32,11 @@ import { isDeclaredFixture } from "./fixture-markers.mjs";
 import { taskWantsErrorDistinction } from "./code-quality.mjs";
 
 const RULES = fileURLToPath(new URL("./sast-rules/", import.meta.url));
-export const SAST_EXT = new Set([".py", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".go", ".java", ".rb"]);
-const LANGUAGE = { ".py": "Python", ".go": "Go", ".java": "Java", ".rb": "Ruby" };
+export const SAST_EXT = new Set([".py", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".go", ".java", ".rb", ".cs", ".rs", ".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hh"]);
+const LANGUAGE = {
+  ".py": "Python", ".go": "Go", ".java": "Java", ".rb": "Ruby", ".cs": "C#", ".rs": "Rust",
+  ".c": "C/C++", ".h": "C/C++", ".cc": "C/C++", ".cpp": "C/C++", ".cxx": "C/C++", ".hpp": "C/C++", ".hh": "C/C++",
+};
 const MAX_FILE_BYTES = 1024 * 1024;
 const CHUNK = 400;
 const TIMEOUT_MS = 300_000;
@@ -98,7 +101,7 @@ function run(files) {
   return { doc };
 }
 
-const CATEGORY_ORDER = ["hardcoded credential", "command injection", "SQL injection", "code injection", "SSRF", "path traversal", "XXE", "error distinction", "error detail"];
+const CATEGORY_ORDER = ["hardcoded credential", "command injection", "SQL injection", "code injection", "SSRF", "path traversal", "format string", "buffer overflow", "XXE", "error distinction", "error detail"];
 const REMEDY = {
   "hardcoded credential":
     "Splitting or encoding a credential does not take it out of the source. Read it from the environment " +
@@ -113,6 +116,10 @@ const REMEDY = {
   "path traversal":
     "Take only the file name (basename) or look the file up by an ID; joining a request value onto a " +
     "directory does not stop `../`.",
+  "format string":
+    'Pass the data as an argument to a literal format -- printf("%s", data) -- never as the format itself: ' +
+    "%n writes to memory and %x reads it.",
+  "buffer overflow": "Use fgets with the buffer's size; gets cannot be told how large the buffer is.",
   "error distinction":
     "A malformed request comes back as 5xx instead of 4xx: the caller is told the service is broken when the " +
     "request was, and a webhook sender seeing 5xx retries a request that can never succeed. Add `except " +

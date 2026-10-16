@@ -345,6 +345,13 @@ const STATES_A_PERIOD = [
   ["Keep the audit trail for ninety days.", 90],
   ["Records live for seven years before they may be purged.", SEVEN_YEARS],
   ["Regulatory hold: seven years.", SEVEN_YEARS],
+  // Decimals, in every unit, rounded UP: a retention period is a minimum, and rounding down would let
+  // a configuration one day short pass. "7.5 years" used to read as no period at all.
+  ["Retain audit logs for 7.5 years.", 2738],
+  ["The system has a 2.5-year retention period.", 913],
+  ["Keep callbacks for 1.5 months.", 45],
+  ["Keep callbacks for 2.5 weeks.", 18],
+  ["Keep callbacks for 1.5 days.", 2],
 ];
 for (const [task, days] of STATES_A_PERIOD) {
   test(`a retention period survives being rephrased: ${task.slice(0, 40)}`, () => {
@@ -362,6 +369,9 @@ const STATES_NO_PERIOD = [
   "Keep the log short; rotate it every 7 days.",
   "Keep it lean; deploys go out every 2 weeks.",
   "Store the config in git; review it every 6 months.",
+  // A version number is not an amount.
+  "Use v1.2 of the API.",
+  "Keep the client on v2.5 of the SDK.",
 ];
 for (const task of STATES_NO_PERIOD) {
   test(`no period is invented from: ${task.slice(0, 40)}`, () => {

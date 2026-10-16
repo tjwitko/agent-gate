@@ -38,8 +38,10 @@ const WORD_NUMBERS = {
 // Months and years are approximated at 30 and 365 days. The comparison this feeds is "is the
 // configured expiry shorter than the requirement", and no realistic configuration sits inside the
 // few days of slack that leap years and month lengths introduce.
+// Rounded up: a retention requirement is a minimum, so 7.5 years is 2738 days, and rounding down
+// would let a configured 2737 pass a requirement it falls short of.
 function toDays(count, unit) {
-  return count * (UNIT_DAYS[unit.toLowerCase().replace(/s$/, "")] ?? 0);
+  return Math.ceil(count * (UNIT_DAYS[unit.toLowerCase().replace(/s$/, "")] ?? 0));
 }
 
 /**
@@ -111,7 +113,9 @@ export function readDuration(text, attrs, vars = new Map()) {
 }
 
 // Longest first, so "seventeen" is not read as "seven" with a stray "teen".
-const AMOUNT = `(\\d+|${Object.keys(WORD_NUMBERS).sort((a, b) => b.length - a.length).join("|")})`;
+// A decimal is part of the amount: "7.5 years" read the 7, found ".5" where the unit belongs, and
+// stated no period at all. The point stays out of the proximity spans below, which a full stop ends.
+const AMOUNT = `(\\d+(?:\\.\\d+)?|${Object.keys(WORD_NUMBERS).sort((a, b) => b.length - a.length).join("|")})`;
 const UNIT = "(day|week|month|year)s?";
 // [^.;\n], not [^.]. With [^.] the span ran through a semicolon and read a deployment cadence as a
 // retention requirement -- "Keep the log short; rotate it every 7 days" produced a 7-day

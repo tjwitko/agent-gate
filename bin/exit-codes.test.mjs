@@ -117,3 +117,41 @@ test("a failure after the result was written does not write a second document", 
   assert.equal(r.stdout, "");
   assert.equal(r.code, 3);
 });
+
+// --- what --version and the report say the gate ran with -------------------------------------
+
+test("--help is not a usage error, and lists --version", () => {
+  const r = cli(["--help"]);
+  assert.equal(r.code, 0);
+  assert.match(r.stdout, /agent-gate --version/);
+  assert.match(r.stdout, /exit 0 nothing blocking, 1 blocking findings, 2 usage, 3/);
+});
+
+test("--version lists every scanner, and says which are not found", () => {
+  // Only node's directory on PATH: the scanners are absent, and must be listed as absent.
+  const r = cli(["--version"], { PATH: path.dirname(process.execPath) });
+  assert.equal(r.code, 0);
+  const tools = r.stdout.slice(r.stdout.indexOf("tools on PATH"));
+  for (const name of ["gitleaks", "osv-scanner", "terraform", "checkov", "semgrep", "ruff", "go", "pytest"]) {
+    assert.match(tools, new RegExp(`^  ${name} +(not found|\\d[\\w.]*)$`, "m"), name);
+  }
+  assert.match(tools, /^  semgrep +not found$/m);
+  assert.match(r.stdout, /^  secret-guard /m, "the controls are still there");
+});
+
+test("the JSON report records when it ran and with which tools", () => {
+  const d = scratch();
+  try {
+    const before = Date.now();
+    const r = cli([path.join(d, "proj"), "--json"], { AGENT_GATE_TODAY: "2026-10-01" });
+    const doc = JSON.parse(r.stdout);
+    const at = Date.parse(doc.scannedAt);
+    assert.ok(at >= before - 1000 && at <= Date.now(), `scannedAt ${doc.scannedAt}`);
+    assert.equal(doc.judgedAsOf, "2026-10-01", "a pinned date is said to be pinned");
+    for (const name of ["gitleaks", "osv-scanner", "terraform", "checkov", "semgrep", "ruff", "go", "pytest"]) {
+      assert.ok(Object.hasOwn(doc.toolchain, name), `${name} is in the report, found or not`);
+    }
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+});

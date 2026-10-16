@@ -417,12 +417,30 @@ agent-gate 1.1.16
   dep-audit        v1.0.2  node_modules @tjwitko/dep-audit-mcp
   secret-guard     v1.0.2  node_modules @tjwitko/secret-guard-mcp
   identity-guard   v1.0.2  node_modules @tjwitko/identity-guard-mcp
+tools on PATH
+  node             26.5.1
+  go               1.27.1
+  terraform        1.15.8
+  gitleaks         8.30.1
+  osv-scanner      2.4.0
+  checkov          3.3.10
+  python3          3.14.8
+  ruff             0.16.2
+  semgrep          1.180.0
+  pytest           9.1.1
+  docker           29.6.2
 ```
 
 Run it again afterwards. **"The package moved" and "the controls that will run moved" are different
 answers**, and only the second one protects anything: v1.1.1 shipped with terraform-guard a release
 behind its own fixes, and nothing in the output said so. Every gate run now prints the version of
 each control beside where it was found, in the CLI and in the Action's log alike.
+
+The controls are not all that decides a verdict. The scanners they shell out to are the rest: a
+semgrep upgrade moves `sast` findings with no agent-gate change, and osv-scanner answers from a live
+database, so the same tree and pins can give different dependency findings on different days.
+`--version` lists each one on `PATH`, and `not found` for one that is not — a missing scanner switches its checks off.
+The `--json` report carries the same list as `toolchain`, and `scannedAt`, the time the run started.
 
 ### 2. Move the pin
 

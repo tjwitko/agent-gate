@@ -11,11 +11,12 @@
 // starts over-firing, and this project has shipped both: false positives that made a model rewrite
 // working code, and a check that sat unspawned through ten graded runs while a similarly-named one
 // ran beside it.
-import { execFileSync, spawnSync } from "child_process";
+import { execFileSync } from "child_process";
 import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
 import { fileURLToPath } from "url";
+import { toolchain, toolchainDrift } from "../lib/toolchain.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(__dirname, "..");
@@ -97,55 +98,9 @@ process.on("exit", () => { if (extracted) rmSync(extracted, { recursive: true, f
 // skipped the scratch copy and the git init, and every fixture read as drifted.
 const UPDATE = process.argv.includes("--update");
 
-// What measured these numbers, not just when. The manifest recorded a `measured` date and nothing
-// else, and that gap hid a real defect for three fixtures: this machine had no Go toolchain, so
-// `go test` never ran, the tests check reported NOT EXECUTED as an advisory, and the corpus froze
-// that non-answer as the expected verdict. Their suites had never compiled. A run on a machine
-// that HAD Go found it immediately -- and read as a regression in the control rather than as the
-// deliverable defect it was.
-//
-// A null here is the interesting value, not a missing one: it means the corpus was derived on a
-// machine that could not run that language's checks at all.
-function toolchain() {
-  const probe = (cmd, args, re) => {
-    const r = spawnSync(cmd, args, { encoding: "utf8" });
-    if (r.error || r.status === null) return null;
-    const m = re.exec(`${r.stdout || ""}${r.stderr || ""}`);
-    return m ? m[1] : null;
-  };
-  return {
-    node: process.version.replace(/^v/, ""),
-    go: probe("go", ["version"], /go(\d+\.\d+(?:\.\d+)?)/),
-    terraform: probe("terraform", ["version"], /Terraform v(\d+\.\d+\.\d+)/),
-    gitleaks: probe("gitleaks", ["version"], /(\d+\.\d+\.\d+)/),
-    "osv-scanner": probe("osv-scanner", ["--version"], /(\d+\.\d+\.\d+)/),
-    checkov: probe("checkov", ["--version"], /(\d+\.\d+\.\d+)/),
-    python3: probe("python3", ["--version"], /(\d+\.\d+\.\d+)/),
-    ruff: probe("ruff", ["--version"], /(\d+\.\d+\.\d+)/),
-    semgrep: probe("semgrep", ["--version"], /(\d+\.\d+\.\d+)/),
-    // `python3 -m pytest`, not the console script: that is what the tests validator probes, and a
-    // binary on PATH is a different fact from the module being importable by this interpreter.
-    // Recorded because it decides whether a Python fixture's suite runs at all -- the same thing
-    // the Go toolchain decided, unrecorded, while three fixtures carried a verdict nothing measured.
-    pytest: probe("python3", ["-m", "pytest", "--version"], /(\d+\.\d+\.\d+)/),
-    docker: probe("docker", ["--version"], /(\d+\.\d+\.\d+)/),
-  };
-}
-
-/** Differences between the toolchain that measured the manifest and the one running now. */
-function toolchainDrift(recorded, current) {
-  if (!recorded) return [];
-  const out = [];
-  for (const [name, was] of Object.entries(recorded)) {
-    const now = current[name] ?? null;
-    if (was === now) continue;
-    if (was && !now) out.push(`${name}: recorded ${was}, ABSENT here — checks needing it cannot run`);
-    else if (!was && now) out.push(`${name}: absent when recorded, ${now} here — checks that never ran then will run now`);
-    else out.push(`${name}: recorded ${was}, ${now} here`);
-  }
-  return out;
-}
-
+// What measured these numbers, not just when: lib/toolchain.mjs records the scanners, and why. A
+// null there is the interesting value, not a missing one: the corpus was derived on a machine that
+// could not run that language's checks at all.
 
 const manifestPath = path.join(__dirname, "manifest.json");
 const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
@@ -157,7 +112,7 @@ const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
 if (!UPDATE && !process.env.AGENT_GATE_TODAY) process.env.AGENT_GATE_TODAY = manifest.measured;
 console.log(`corpus: ${manifest.entries.length} deliverables${UPDATE ? " — RE-DERIVING expected values" : `, verdicts measured ${manifest.measured}`}\n`);
 
-const CURRENT_TOOLCHAIN = toolchain();
+const CURRENT_TOOLCHAIN = await toolchain();
 if (!UPDATE) {
   const drift = toolchainDrift(manifest.toolchain, CURRENT_TOOLCHAIN);
   if (drift.length) {

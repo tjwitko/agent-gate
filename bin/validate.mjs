@@ -22,6 +22,7 @@ import { sourceCoverage, coverageLine } from "../agent/coverage.mjs";
 
 import { validateProject, localTools, McpClient } from "../lib/gate-core.mjs";
 import { resolveControls, readConfig, CONFIG_FILE } from "../lib/resolve-controls.mjs";
+import { toolchain } from "../lib/toolchain.mjs";
 
 const EXIT = { CLEAN: 0, BLOCKED: 1, USAGE: 2, INCOMPLETE: 3 };
 
@@ -75,6 +76,11 @@ export async function runGate(projectDirArg, taskFile, { env = process.env, preC
   // they report "not checked", which is correct and much less useful. The baseline, when there is
   // one, is requirement text from outside the project; see lib/requirements.mjs for why both exist.
   const requirements = loadRequirements(projectDir, taskFile, { preCommit, baselineFile });
+  // When, and with what. osv-scanner answers from a live database, so the same tree and the same
+  // pins can give different dependency findings on different days; a report that does not say when it
+  // was made cannot be compared with another. The probe runs beside the checks rather than before.
+  const scannedAt = new Date().toISOString();
+  const tools = toolchain({ env });
   const taskText = requirements.text;
 
   const { config, error: configError } = readConfig(projectDir);
@@ -144,6 +150,11 @@ export async function runGate(projectDirArg, taskFile, { env = process.env, preC
     projectDir,
     taskFile: taskFile || null,
     baseline: requirements.baseline,
+    scannedAt,
+    // End-of-life dates are judged as of this day instead of the clock when it is set, as the corpus
+    // does to keep a frozen verdict from ageing. Recorded so a pinned run does not pass for a live one.
+    judgedAsOf: env.AGENT_GATE_TODAY || null,
+    toolchain: await tools,
     coverage: sourceCoverage(projectDir),
     configError,
     controls,
@@ -220,6 +231,8 @@ function machine(result) {
       project: result.projectDir,
       taskFile: result.taskFile,
       baseline: result.baseline,
+      scannedAt: result.scannedAt,
+      judgedAsOf: result.judgedAsOf,
       notRead: result.coverage.unread,
       coverage: coverageLine(result.coverage),
       exitCode: result.exitCode,
@@ -238,6 +251,8 @@ function machine(result) {
             : "ran",
         error: c.error || null,
       })),
+      // Every tool the checks shell out to, null where it is not on PATH.
+      toolchain: result.toolchain,
       validatorsRun: result.ran,
       couldNotRun: result.couldNotRun,
       notApplicable: result.inapplicable,
@@ -250,18 +265,38 @@ function machine(result) {
   );
 }
 
+const USAGE = `usage: agent-gate <project-dir> [task-file] [--baseline=<file>] [--json] [--pre-commit]
+       agent-gate --version     this release, its four controls, and the scanners on PATH
+       agent-gate --help
+
+exit 0 nothing blocking, 1 blocking findings, 2 usage, 3 part of the gate could not run.
+
+controls resolve from, in order: an env var, ${CONFIG_FILE} in the project,
+node_modules, then a sibling checkout. A control that resolves from nowhere exits 3.`;
+
 async function main() {
   const args = process.argv.slice(2);
   // What you are on, and which controls that brings with it. Answered before anything else, because
   // the first question during an upgrade is whether the upgrade took -- and "the package moved" is
   // not the same answer as "the controls that will run moved". v1.1.1 is the release where they
   // did not.
+  if (args.includes("--help") || args.includes("-h")) {
+    console.log(USAGE);
+    process.exit(EXIT.CLEAN);
+  }
   if (args.includes("--version")) {
     const self = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
     console.log(`agent-gate ${self.version}`);
     for (const c of resolveControls(process.cwd())) {
       const v = c.entry ? (c.version ? `v${c.version}` : "v?").padEnd(8) : "".padEnd(8);
       console.log(`  ${c.name.padEnd(16)} ${v}${c.entry ? c.source : `NOT RESOLVED — ${c.error}`}`);
+    }
+    // The controls are a fraction of what decides a verdict; the scanners they and the checks shell
+    // out to are the rest. A missing one is listed as missing -- leaving it out is how a machine
+    // without Go came to look like one where Go's checks had passed.
+    console.log("tools on PATH");
+    for (const [name, v] of Object.entries(await toolchain())) {
+      console.log(`  ${name.padEnd(16)} ${v === null ? "not found" : v}`);
     }
     process.exit(EXIT.CLEAN);
   }
@@ -279,9 +314,7 @@ async function main() {
   }
   const baselineFile = baselineArg ? baselineArg.slice("--baseline=".length) : null;
   if (positional.length < 1) {
-    console.error("usage: agent-gate <project-dir> [task-file] [--baseline=<file>] [--json] [--pre-commit]");
-    console.error(`\ncontrols resolve from, in order: an env var, ${CONFIG_FILE} in the project,`);
-    console.error("node_modules, then a sibling checkout. A control that resolves from nowhere exits 3.");
+    console.error(USAGE);
     process.exit(EXIT.USAGE);
   }
   // In --json mode stdout carries exactly one thing: the result document. The validators share

@@ -177,6 +177,13 @@ the sentence and commit. Two things stop that from being quiet:
   baseline inside the project is reported as such. A baseline sentence that no check reads is printed
   with `!!` above the verdict, in the CLI and the Action's log alike: it is a requirement the project
   is not being held to, and whoever wrote the baseline is not the person reading the task file.
+  A sentence asking for what a check that runs on every project blocks on — parameterised queries
+  (`sast`), no hardcoded credentials (`scan_path`), authentication on every route
+  (`authentication`), no high or critical CVEs (`check_dependencies`) — is listed separately as
+  covered by that check, and only when the check ran and reads every language in the project: with
+  PHP in it, "use parameterized queries" is unread, and says that `sast` reads no PHP. Covered means
+  the check blocks on what the sentence asks, not that it is on the same topic, so "passwords are
+  hashed with argon2id" and "authorization enforces least privilege" stay unread.
 
 ### What you get
 

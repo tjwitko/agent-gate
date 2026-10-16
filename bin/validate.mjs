@@ -19,7 +19,7 @@ import { readFileSync, realpathSync, existsSync, statSync } from "fs";
 import { fileURLToPath } from "url";
 import { loadRequirements, checkBaselineInput } from "../lib/requirements.mjs";
 import { sourceCoverage, coverageLine } from "../agent/coverage.mjs";
-import { splitSentences, unjudgedSentences } from "../agent/requirement-sentences.mjs";
+import { splitSentences, unjudgedSentences, alwaysOnCoverage } from "../agent/requirement-sentences.mjs";
 
 import { validateProject, localTools, McpClient } from "../lib/gate-core.mjs";
 import { resolveControls, readConfig, CONFIG_FILE } from "../lib/resolve-controls.mjs";
@@ -70,14 +70,22 @@ export function failClosed(err, { json, wroteResult }) {
 let wroteResult = false;
 
 /**
- * How many sentences of a requirement text a check read, and the ones none did. Null when there is
- * no text. Headings are not counted: they are labels, not requirements.
+ * How many sentences of a requirement text a task-gated check read; of the rest, which an always-on
+ * check already blocks on here (`covered`, each with `coveredBy`), and which nothing holds the project
+ * to (`unread`, with `notCoveredBecause` where an always-on check would have but cannot here). Null
+ * when there is no text. Headings are not counted: they are labels, not requirements.
  */
-export function requirementsRead(text) {
+export function requirementsRead(text, project = {}) {
   if (!text || !text.trim()) return null;
   const sentences = splitSentences(text).filter((s) => !s.heading).length;
-  const unread = unjudgedSentences(text);
-  return { sentences, read: sentences - unread.length, unread };
+  const covered = [];
+  const unread = [];
+  for (const s of unjudgedSentences(text)) {
+    const c = alwaysOnCoverage(s.text, project);
+    if (c?.coveredBy) covered.push({ ...s, coveredBy: c.coveredBy });
+    else unread.push(c ? { ...s, notCoveredBecause: c.notCoveredBecause } : s);
+  }
+  return { sentences, read: sentences - covered.length - unread.length, covered, unread };
 }
 
 export async function runGate(projectDirArg, taskFile, { env = process.env, preCommit = false, baselineFile = null } = {}) {
@@ -156,6 +164,8 @@ export async function runGate(projectDirArg, taskFile, { env = process.env, preC
   // blocking "STATIC ERRORS" on any machine without ruff, and read a missing Go toolchain as a
   // pass, and neither showed up here at all.
   const couldNotRun = r.couldNotRun || [];
+  const coverage = sourceCoverage(projectDir);
+  const alwaysOnContext = { languages: coverage.languages, ran: r.ran, couldNotRun };
   const incomplete =
     unreachable.length > 0 || silent.length > 0 || couldNotRun.length > 0 || Boolean(configError);
   return {
@@ -169,8 +179,11 @@ export async function runGate(projectDirArg, taskFile, { env = process.env, preC
     toolchain: await tools,
     // Which sentences of the requirements switched no check on. A gated-off check says only "not
     // checked", so a requirement nothing recognised was otherwise visible nowhere.
-    requirementsRead: { task: requirementsRead(requirements.taskText), baseline: requirementsRead(requirements.baselineText) },
-    coverage: sourceCoverage(projectDir),
+    requirementsRead: {
+      task: requirementsRead(requirements.taskText, alwaysOnContext),
+      baseline: requirementsRead(requirements.baselineText, alwaysOnContext),
+    },
+    coverage,
     configError,
     controls,
     ran: r.ran,
@@ -194,8 +207,9 @@ function human(result) {
   const taskRead = result.requirementsRead?.task;
   if (taskRead) {
     out.push(
-      `task sentences : ${taskRead.sentences}, ${taskRead.read} read by a check, ${taskRead.unread.length} by none` +
-        `${taskRead.unread.length ? " (--json lists them)" : ""}`
+      `task sentences : ${taskRead.sentences}, ${taskRead.read} read by a check, ` +
+        `${taskRead.covered.length ? `${taskRead.covered.length} covered by an always-on check, ` : ""}` +
+        `${taskRead.unread.length} by none${taskRead.unread.length ? " (--json lists them)" : ""}`
     );
   }
   for (const c of result.controls) {
@@ -223,10 +237,17 @@ function human(result) {
   // sentence of it that no check reads is one the project is not being held to, and the person who
   // wrote it is not the one reading the task file -- so each is printed, above the verdict.
   const baselineUnread = result.requirementsRead?.baseline?.unread || [];
+  const baselineCovered = result.requirementsRead?.baseline?.covered || [];
   if (baselineUnread.length) {
     out.push(`!! ${baselineUnread.length} BASELINE SENTENCE(S) NO CHECK READ — the project is not held to these:`);
-    for (const s of baselineUnread) out.push(`   - line ${s.line}: ${s.text}`);
-    out.push("   Checks that run on every project still ran. None of them was switched on by these.");
+    for (const s of baselineUnread) out.push(`   - line ${s.line}: ${s.text}${s.notCoveredBecause ? ` (${s.notCoveredBecause})` : ""}`);
+    out.push("");
+  }
+  // Not a warning: each of these is something a check that runs on every project blocks on, and it
+  // read this project's code. Listed so the reader can see the baseline was accounted for.
+  if (baselineCovered.length) {
+    out.push("baseline covered by an always-on check:");
+    for (const s of baselineCovered) out.push(`   - line ${s.line}: ${s.text} — ${s.coveredBy}`);
     out.push("");
   }
   // Above the verdict for the same reason as the lines before it: a Rust project exited 0, and the

@@ -38,11 +38,22 @@ export const UNREAD_LANGUAGES = {
 // once called .jsx unread while sast was reading it, which is the drift a second list invites.
 const READ_CODE = [...new Set([...READ_EXT, ...SAST_EXT])].filter((e) => ![".sql", ".tf", ".tfvars", ".yaml", ".yml"].includes(e));
 
+// The language of each code file some check reads. A check that reads some of these and not others
+// cannot vouch for a project holding the others: authentication reads Python and not C#.
+export const READ_LANGUAGES = {
+  ".py": "Python", ".go": "Go", ".java": "Java", ".rb": "Ruby", ".cs": "C#", ".rs": "Rust",
+  ".js": "JavaScript/TypeScript", ".mjs": "JavaScript/TypeScript", ".cjs": "JavaScript/TypeScript",
+  ".jsx": "JavaScript/TypeScript", ".ts": "JavaScript/TypeScript", ".tsx": "JavaScript/TypeScript",
+  ".c": "C/C++", ".h": "C/C++", ".cc": "C/C++", ".cpp": "C/C++", ".cxx": "C/C++", ".hpp": "C/C++", ".hh": "C/C++",
+};
+
 /**
- * @returns {{ unread: { language: string, files: number }[], unreadFiles: number, readFiles: number, mostlyUnread: boolean }}
+ * `languages` counts every code file by language, read or not.
+ * @returns {{ unread: { language: string, files: number }[], unreadFiles: number, readFiles: number, mostlyUnread: boolean, languages: Record<string, number> }}
  */
 export function sourceCoverage(projectDir) {
   const unread = new Map();
+  const languages = {};
   let readFiles = 0;
   const walk = (dir) => {
     let entries;
@@ -61,12 +72,14 @@ export function sourceCoverage(projectDir) {
       if (READ_CODE.includes(ext)) readFiles++;
       const language = UNREAD_LANGUAGES[ext];
       if (language) unread.set(language, (unread.get(language) || 0) + 1);
+      const any = language || READ_LANGUAGES[ext];
+      if (any) languages[any] = (languages[any] || 0) + 1;
     }
   };
   walk(projectDir);
   const list = [...unread].map(([language, files]) => ({ language, files })).sort((a, b) => b.files - a.files);
   const unreadFiles = list.reduce((n, l) => n + l.files, 0);
-  return { unread: list, unreadFiles, readFiles, mostlyUnread: unreadFiles > readFiles };
+  return { unread: list, unreadFiles, readFiles, mostlyUnread: unreadFiles > readFiles, languages };
 }
 
 /** One sentence for both renderers, or null when everything is in a language something reads. */

@@ -6,7 +6,7 @@ import { tmpdir } from "os";
 import path from "path";
 import { fileURLToPath } from "url";
 
-import { splitSentences, judgeSentences, unjudgedSentences, RECOGNISERS } from "./requirement-sentences.mjs";
+import { splitSentences, judgeSentences, unjudgedSentences, RECOGNISERS, alwaysOnCoverage } from "./requirement-sentences.mjs";
 import { taskRetentionRequirement } from "./retention.mjs";
 import { taskRequiresRotation } from "./secret-rotation.mjs";
 import { taskRequiresImmutability } from "./immutability.mjs";
@@ -193,8 +193,82 @@ test("baseline sentences no check read are printed above the verdict; task sente
     assert.doesNotMatch(human, /line 1: The webhook signing secret/, "the rotation sentence was read");
 
     const doc = JSON.parse(spawnSync(process.execPath, [...args, "--json"], { encoding: "utf8", timeout: 300_000 }).stdout);
-    assert.deepEqual(doc.requirementsRead.task, { sentences: 2, read: 1, unread: [{ line: 1, text: "Build a small service." }] });
+    assert.deepEqual(doc.requirementsRead.task, { sentences: 2, read: 1, covered: [], unread: [{ line: 1, text: "Build a small service." }] });
     assert.deepEqual(doc.requirementsRead.baseline.unread, [{ line: 2, text: "All endpoints must log the caller." }]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- sentences an always-on check already holds the project to ------------------------------------
+
+const EVERYTHING_RAN = { languages: { "JavaScript/TypeScript": 3 }, ran: ["scan_path", "sast", "authentication", "check_dependencies"], couldNotRun: [] };
+
+test("a baseline sentence asking for what an always-on check blocks on is covered by that check", () => {
+  for (const [sentence, check] of [
+    ["Verify that the application uses parameterized queries for all database access.", "sast"],
+    ["Verify that credentials are not hardcoded in source code.", "scan_path"],
+    ["Verify that all routes require authentication except health checks.", "authentication"],
+    ["Secrets must never be committed to the repository.", "scan_path"],
+    ["The application must not be vulnerable to SSRF.", "sast"],
+    ["Verify that no dependencies have high or critical vulnerabilities.", "check_dependencies"],
+  ]) {
+    assert.deepEqual(alwaysOnCoverage(sentence, EVERYTHING_RAN), { coveredBy: check }, sentence);
+  }
+});
+
+test("on the same topic is not covered: the check has to block on what the sentence asks", () => {
+  for (const sentence of [
+    "Verify that passwords are hashed with a memory-hard function such as argon2id.", // not secret scanning
+    "Verify that authorization checks enforce least privilege.",                      // not authentication
+    "Verify that the application sets a Content-Security-Policy header.",              // nothing checks it
+    "Verify that the application is protected against SQL and LDAP injection.",        // LDAP is not read
+    "Verify that no dependencies have known vulnerabilities.",                         // more than high and critical
+    "Verify that all routes require MFA.",                                             // not what authentication checks
+  ]) {
+    assert.equal(alwaysOnCoverage(sentence, EVERYTHING_RAN), null, sentence);
+  }
+});
+
+test("covered only where the check reads the project's code, and only when it ran", () => {
+  const sql = "Verify that the application uses parameterized queries for all database access.";
+  const auth = "Verify that all routes require authentication except health checks.";
+  const secrets = "Verify that credentials are not hardcoded in source code.";
+  const withPhp = { ...EVERYTHING_RAN, languages: { "JavaScript/TypeScript": 3, PHP: 2 } };
+  assert.match(alwaysOnCoverage(sql, withPhp).notCoveredBecause, /sast would cover it, but reads no PHP code/);
+  assert.match(alwaysOnCoverage(auth, withPhp).notCoveredBecause, /authentication would cover it, but reads no PHP code/);
+  assert.deepEqual(alwaysOnCoverage(secrets, withPhp), { coveredBy: "scan_path" }, "secret scanning reads every file");
+  // sast reads C#; authentication does not.
+  const withCs = { ...EVERYTHING_RAN, languages: { "C#": 4 } };
+  assert.deepEqual(alwaysOnCoverage(sql, withCs), { coveredBy: "sast" });
+  assert.match(alwaysOnCoverage(auth, withCs).notCoveredBecause, /reads no C# code/);
+  // A check that could not run holds the project to nothing.
+  const noSemgrep = { ...EVERYTHING_RAN, couldNotRun: ["sast: semgrep is not installed, so 3 file(s) were not checked"] };
+  assert.equal(alwaysOnCoverage(sql, noSemgrep).notCoveredBecause, "sast did not run here");
+});
+
+test("a baseline made only of covered sentences changes no verdict and no exit code", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "reqcover-"));
+  try {
+    mkdirSync(path.join(dir, "proj"));
+    writeFileSync(path.join(dir, "proj", "app.py"), "def handler(event):\n    return event\n");
+    writeFileSync(path.join(dir, "task.txt"), "Build a small service.\n");
+    writeFileSync(path.join(dir, "baseline.txt"),
+      "Verify that the application uses parameterized queries for all database access.\n" +
+      "Verify that credentials are not hardcoded in source code.\n" +
+      "Verify that all routes require authentication except health checks.\n");
+    const cli = path.resolve(__dirname, "..", "bin", "validate.mjs");
+    const run = (...extra) => {
+      const r = spawnSync(process.execPath, [cli, path.join(dir, "proj"), path.join(dir, "task.txt"), "--json", ...extra], { encoding: "utf8", timeout: 300_000 });
+      return { code: r.status, doc: JSON.parse(r.stdout) };
+    };
+    const without = run();
+    const withBaseline = run(`--baseline=${path.join(dir, "baseline.txt")}`);
+    assert.equal(withBaseline.code, without.code);
+    const verdict = (d) => JSON.stringify([d.exitCode, d.blocking, d.findings, d.advisories, d.validatorsRun]);
+    assert.equal(verdict(withBaseline.doc), verdict(without.doc));
+    assert.deepEqual(withBaseline.doc.requirementsRead.baseline.unread, []);
+    assert.deepEqual(withBaseline.doc.requirementsRead.baseline.covered.map((c) => c.coveredBy), ["sast", "scan_path", "authentication"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

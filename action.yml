@@ -125,11 +125,12 @@ runs:
           // The same two lines the CLI prints. A baseline is set in a workflow, so this log is
           // where its author reads whether each sentence of it switched a check on.
           const req = r.requirementsRead || {};
-          if (req.task) console.log(`task sentences: ${req.task.sentences}, ${req.task.read} read by a check, ${req.task.unread.length} by none`);
+          if (req.task) console.log(`task sentences: ${req.task.sentences}, ${req.task.read} read by a check, ${(req.task.covered || []).length ? `${req.task.covered.length} covered by an always-on check, ` : ""}${req.task.unread.length} by none`);
           if (req.baseline && req.baseline.unread.length) {
             console.log(`BASELINE NOT READ: ${req.baseline.unread.length} sentence(s) no check read — the project is not held to these:`);
-            for (const s of req.baseline.unread) console.log(`  - line ${s.line}: ${s.text}`);
+            for (const s of req.baseline.unread) console.log(`  - line ${s.line}: ${s.text}${s.notCoveredBecause ? ` (${s.notCoveredBecause})` : ""}`);
           }
+          for (const s of (req.baseline && req.baseline.covered) || []) console.log(`baseline covered: line ${s.line}: ${s.text} — ${s.coveredBy}`);
           for (const c of r.controls) console.log(`control  : ${c.name.padEnd(16)} ${c.status.padEnd(14)} ${(c.version ? `v${c.version}` : c.status === "ran" ? "v?" : "").padEnd(8)} ${c.resolvedFrom || c.error}`);
           console.log(`validators: ${r.validatorsRun.join(", ")}`);
           // Printed BEFORE the verdict, and printed at all. The result document carried these

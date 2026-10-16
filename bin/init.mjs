@@ -70,17 +70,41 @@ function parseArgs(argv) {
 
 const forced = (opts, what) => opts.force.includes("all") || opts.force.includes(what);
 
-/** The command the stanza and the hook both tell people to run. */
-function validateCommand(projectDir, taskFile, { preCommit = false } = {}) {
-  // Walk up for node_modules the way node resolution does. `npx agent-gate` is what belongs in a
-  // committed AGENTS.md: an absolute path out of this machine's checkout is wrong on a teammate's,
-  // and the stanza is the file most likely to be read by someone who did not run this tool.
-  let found = false;
+/**
+ * The program that runs the gate, written as it should be typed from `fromDir`.
+ *
+ * Walk up for node_modules the way node resolution does, and name the installed bin by its path. A
+ * relative path is what belongs in a committed AGENTS.md: an absolute path out of this machine's
+ * checkout is wrong on a teammate's, and the stanza is the file most likely to be read by someone
+ * who did not run this tool.
+ *
+ * Not `npx agent-gate`, which v1.1.16 and earlier wrote. The package installs from GitHub as
+ * @tjwitko/agent-gate, and the unscoped name is not on npm. Where agent-gate is not installed, npx
+ * looks that name up on the public registry, and npm assumes --yes when stdin is not a TTY -- which
+ * an agent's shell is not. Measured from a directory without it, stdin from /dev/null: `npx
+ * agent-gate .` and `npm exec --no -- agent-gate .` both queried the registry and exited 1, the
+ * gate's "blocking findings", and `npx --no agent-gate --version` printed npm's own version and
+ * exited 0. Once anyone publishes that name, the same command downloads and runs their code with no
+ * prompt. A path makes no request and exits 127 when nothing is there.
+ */
+function gateProgram(projectDir, fromDir = projectDir) {
   for (let d = path.resolve(projectDir); ; d = path.dirname(d)) {
-    if (existsSync(path.join(d, "node_modules", ".bin", "agent-gate"))) { found = true; break; }
+    const bin = path.join(d, "node_modules", ".bin", "agent-gate");
+    if (existsSync(bin)) {
+      // Both through realpath: git reports the top of a repository with symlinks resolved, and on
+      // macOS the temp directory alone is /var -> /private/var, which made this "../../../../../..".
+      const rel = path.relative(realpathSync(fromDir), path.join(realpathSync(d), "node_modules", ".bin", "agent-gate"))
+        .split(path.sep).join("/");
+      return rel.startsWith("../") ? rel : `./${rel}`;
+    }
     if (d === path.dirname(d)) break;
   }
-  const cmd = found ? "npx agent-gate" : `node ${path.join(PKG_ROOT, "bin", "validate.mjs")}`;
+  return `node ${path.join(PKG_ROOT, "bin", "validate.mjs")}`;
+}
+
+/** The command the stanza and the hook both tell people to run, from `fromDir`. */
+function validateCommand(projectDir, taskFile, { preCommit = false, fromDir = projectDir } = {}) {
+  const cmd = gateProgram(projectDir, fromDir);
   // --pre-commit only in the hook. It disables the uncommitted-work check, whose premise a commit
   // satisfies by existing -- without it the hook blocks every commit forever and teaches people to
   // pass --no-verify, which costs the whole hook. The stanza's command keeps the check, because an
@@ -181,6 +205,12 @@ function writeStanza(projectDir, opts, log) {
  * quietly deleting the hook it is visible to whoever reads the reflog.
  */
 function HOOK(command) {
+  // The guard tests that the gate's file is there. It used to run `<first word> --help`, and with
+  // `npx agent-gate` the first word is npx, which is always there -- so the guard never fired, and
+  // a clone without node_modules sent the hook to the registry, which exited 1 and was reported as
+  // blocking findings. Exit 3 here, the gate's own "could not run".
+  const words = command.split(" ");
+  const program = words[0] === "node" ? words[1] : words[0];
   return `#!/usr/bin/env bash
 # Installed by agent-gate-init v${VERSION}. Blocks a commit whose tree does not pass the gate.
 #
@@ -194,10 +224,10 @@ set -uo pipefail
 
 cd "$(git rev-parse --show-toplevel)" || exit 1
 
-if ! ${command.split(" ")[0]} --help >/dev/null 2>&1 && ! command -v ${command.split(" ")[0]} >/dev/null 2>&1; then
-  echo "pre-commit: agent-gate is not available here, so nothing checked this commit." >&2
-  echo "            Install it, or bypass deliberately with: git commit --no-verify" >&2
-  exit 1
+if [ ! -f "${program}" ]; then
+  echo "pre-commit: agent-gate is not installed at ${program}, so nothing checked this commit." >&2
+  echo "            Run npm install, or bypass deliberately with: git commit --no-verify" >&2
+  exit 3
 fi
 
 ${command}
@@ -240,7 +270,8 @@ function writeHook(projectDir, opts, log) {
     return;
   }
   mkdirSync(hooksDir, { recursive: true });
-  writeFileSync(file, HOOK(validateCommand(projectDir, opts.task, { preCommit: true })));
+  // Relative to the top of the repository, because that is where the hook runs from.
+  writeFileSync(file, HOOK(validateCommand(projectDir, opts.task, { preCommit: true, fromDir: top.stdout.trim() })));
   chmodSync(file, 0o755);
   log.wrote(`.git/hooks/pre-commit — runs the gate, and blocks on exit 1, 2 and 3 alike`);
 }
@@ -257,7 +288,9 @@ function writeHook(projectDir, opts, log) {
 // The task file the project was set up with, read back from what setup wrote, so an upgrade does
 // not need it repeated -- and does not quietly drop it, which would switch six checks off.
 function recoverTask(text) {
-  const m = /(?:npx agent-gate|validate\.mjs) \.(?: (?!--)(\S+))?/.exec(text || "");
+  // `npx agent-gate` is what v1.1.16 and earlier wrote; recognising it is how --upgrade moves a
+  // project off it.
+  const m = /(?:npx agent-gate|\.bin\/agent-gate|validate\.mjs) \.(?: (?!--)(\S+))?/.exec(text || "");
   return m ? m[1] || null : null;
 }
 
@@ -309,7 +342,7 @@ function upgradeHook(projectDir, opts, log) {
     return;
   }
   const task = opts.task ?? recoverTask(text);
-  const next = HOOK(validateCommand(projectDir, task, { preCommit: true }));
+  const next = HOOK(validateCommand(projectDir, task, { preCommit: true, fromDir: top.stdout.trim() }));
   if (next === text) {
     log.ok(`pre-commit hook: current (v${VERSION})`);
     return;
@@ -416,7 +449,7 @@ async function main() {
     upgradeStanza(projectDir, opts, log);
     upgradeHook(projectDir, opts, log);
     console.log("");
-    console.log("  confirm: npx agent-gate --version     (the controls that will actually run)");
+    console.log(`  confirm: ${gateProgram(projectDir, process.cwd())} --version     (the controls that will actually run)`);
     process.exit(leftAlone ? EXIT.LEFT_ALONE : EXIT.OK);
   }
 
@@ -434,8 +467,8 @@ async function main() {
   process.exit(leftAlone ? EXIT.LEFT_ALONE : EXIT.OK);
 }
 
-// realpathSync, not path.resolve. npm installs a bin as a symlink, so `npx agent-gate-init` has
-// argv[1] pointing at node_modules/.bin/agent-gate-init while import.meta.url points at the real
+// realpathSync, not path.resolve. npm installs a bin as a symlink, so `./node_modules/.bin/agent-gate-init`
+// has argv[1] pointing at the symlink while import.meta.url points at the real
 // file; path.resolve does not follow symlinks, the comparison is false, main() never runs, and the
 // command exits 0 having done nothing. bin/validate.mjs shipped exactly this bug once and carries
 // the same comment. Writing a second entry point reproduced it within the hour, which is the
@@ -474,6 +507,6 @@ if (invokedDirectly()) {
 }
 
 export {
-  parseArgs, writeMcpJson, writeStanza, writeHook, validateCommand, HOOK, EXIT, STANZA_START,
+  parseArgs, writeMcpJson, writeStanza, writeHook, gateProgram, validateCommand, HOOK, EXIT, STANZA_START,
   upgradeMcp, upgradeStanza, upgradeHook, recoverTask, VERSION,
 };

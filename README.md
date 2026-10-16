@@ -65,20 +65,30 @@ npm install --save-dev github:tjwitko/agent-gate#v1.1.16
 
 The four control servers come with it as dependencies — there is nothing else to clone or wire up.
 They are pinned to specific release tags, so this installs the same five components every time;
-`npx agent-gate --version` shows which.
+`./node_modules/.bin/agent-gate --version` shows which.
 Drop the `#v1.1.16` to track `main` instead, which moves.
 
 ### Run it
 
 ```bash
-npx agent-gate .
+./node_modules/.bin/agent-gate .
 ```
 
 Point it at any directory. To get the most out of it, pass the task the code was written to satisfy:
 
 ```bash
-npx agent-gate . task.txt
+./node_modules/.bin/agent-gate . task.txt
 ```
+
+**Not `npx agent-gate`**, which this README recommended up to v1.1.16. The package installs from
+GitHub as `@tjwitko/agent-gate`; the unscoped name `agent-gate` is not on npm. Where agent-gate is
+not installed, npx looks that name up on the public registry, and when stdin is not a terminal — as
+in an agent's shell — npm answers its own install prompt with yes. Measured from a directory without
+it: `npx agent-gate .` and `npm exec --no -- agent-gate .` queried the registry and exited 1, the
+gate's code for blocking findings, and `npx --no agent-gate --version` printed npm's version and
+exited 0. If anyone publishes that name, the same command runs their code. The path makes no request
+and exits 127 when nothing is installed. `agent-gate-init --upgrade` moves a project set up by an
+earlier version onto it.
 
 Six checks are gated on what the task asked for — immutability, retention, secret rotation, tests,
 error distinction, and required artifacts. Without a task file they report "not checked", which is
@@ -181,8 +191,8 @@ Every control line says **how it resolved**, so you can see at a glance that all
 ## Set it up
 
 ```bash
-npx agent-gate-init --new my-project --hook --task task.txt   # a new project
-npx agent-gate-init --hook --task task.txt                    # an existing one
+./node_modules/.bin/agent-gate-init --new my-project --hook --task task.txt   # a new project
+./node_modules/.bin/agent-gate-init --hook --task task.txt                    # an existing one
 ```
 
 Both do the same three things, and the second is the first without `--new`:
@@ -211,9 +221,11 @@ git commit  ->  agent-gate . task.txt --pre-commit  ->  0 commit proceeds
 ```
 
 **Exit 3 blocks.** A commit that nothing checked must not be easier to land than one that failed a
-check. For the same reason the hook fails closed: if `agent-gate` cannot be found it blocks rather
-than waving the commit through, because a hook that passes when it could not run leaves a repository
-that looks protected and is not.
+check. For the same reason the hook fails closed: if `agent-gate` is not installed it blocks with
+exit 3 rather than waving the commit through, because a hook that passes when it could not run
+leaves a repository that looks protected and is not. (Up to v1.1.16 the hook's check for this tested
+for `npx`, which is always there, so in a clone without `node_modules` it went on to the public
+registry and exited 1 — blocked, but reported as findings. `--upgrade` replaces it.)
 
 `git commit --no-verify` is the deliberate way past, and unlike quietly deleting the hook it is
 visible afterwards.
@@ -265,7 +277,7 @@ thing it just wrote. Point your client at them:
 **The gate is a command, not a tool.** The agent runs it and reads the exit code:
 
 ```bash
-npx agent-gate . task.txt
+./node_modules/.bin/agent-gate . task.txt
 ```
 
 **That asymmetry is the whole design.** Across four runs of one task with identical tooling, the
@@ -297,7 +309,7 @@ by the command above.
 ### The loop that results
 
 1. The agent builds, calling the MCP tools for feedback as it goes.
-2. It runs `npx agent-gate . task.txt`.
+2. It runs `./node_modules/.bin/agent-gate . task.txt`.
 3. **Exit 1** — blocking findings, each with a remediation. It fixes and repeats.
 4. **Exit 3** — part of the gate could not run. Not a pass, and the output names which part.
 5. **Exit 0** — nothing is blocking. The agent reports what was *not* established alongside that.
@@ -399,7 +411,7 @@ upgrades them. You only upgrade a control separately if you wired it into an edi
 ### 1. See what you are on
 
 ```text
-$ npx agent-gate --version
+$ ./node_modules/.bin/agent-gate --version
 agent-gate 1.1.16
   terraform-guard  v1.1.2  node_modules @tjwitko/terraform-guard-mcp
   dep-audit        v1.0.2  node_modules @tjwitko/dep-audit-mcp
@@ -433,7 +445,7 @@ npm install --save-dev github:tjwitko/agent-gate#v1.1.16
 ### 3. Refresh what setup wrote
 
 ```bash
-npx agent-gate-init --upgrade
+./node_modules/.bin/agent-gate-init --upgrade
 ```
 
 Upgrading the package does not touch what `agent-gate-init` wrote into your project, so without this

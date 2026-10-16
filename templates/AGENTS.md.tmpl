@@ -7,6 +7,10 @@ This repository has a security gate. Run it before you say the work is done:
 Exit 0 means nothing is blocking. Exit 1 means something is. Exit 3 means part of the gate could
 not run, which is not the same as passing.
 
+**A run that prints no `BLOCKING` line did not run the gate, whatever its exit code.** That line is
+the verdict. Without it, the exit code came from something else — a shell that could not find the
+command, or a package manager reporting its own error — and says nothing about this project.
+
 **A refusal is not a pass.** If a tool refuses, errors, or reports that it did not run, that check
 produced no evidence about this project. Say so plainly in your summary. Do not describe it as
 passing and do not count it toward "all checks green".

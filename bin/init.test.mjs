@@ -6,7 +6,7 @@ import { tmpdir } from "os";
 import path from "path";
 
 import {
-  parseArgs, writeMcpJson, writeStanza, writeHook, validateCommand, HOOK, STANZA_START,
+  parseArgs, writeMcpJson, writeStanza, writeHook, gateProgram, validateCommand, HOOK, STANZA_START,
   upgradeMcp, upgradeStanza, upgradeHook, recoverTask, VERSION, EXIT,
 } from "./init.mjs";
 
@@ -156,10 +156,51 @@ test("the hook blocks on exit 3, not only on findings", () => {
 });
 
 test("the hook fails closed when the gate is missing", () => {
-  const script = HOOK("agent-gate . --pre-commit");
-  const guard = script.slice(script.indexOf("if !"), script.indexOf("fi") + 2);
-  assert.match(guard, /exit 1/, "no gate means no commit");
-  assert.ok(!/exit 0/.test(guard), "never waved through");
+  const script = HOOK("./node_modules/.bin/agent-gate . --pre-commit");
+  const guard = script.slice(script.indexOf("if [ ! -f"), script.indexOf("\nfi\n") + 3);
+  assert.match(guard, /-f "\.\/node_modules\/\.bin\/agent-gate"/, "tests the gate's own file");
+  assert.match(guard, /exit 3/, "no gate means no commit, and says it could not run");
+  assert.ok(!/exit [01]\b/.test(guard), "neither waved through nor reported as findings");
+});
+
+// Run, not read: the hook in a clone where `npm install` has not happened. v1.1.16's guard ran
+// `npx --help`, which always succeeds, so it fell through to `npx agent-gate`, queried the public
+// registry and exited 1 -- reported as blocking findings.
+test("a hook in a clone without node_modules exits 3 and never reaches npx", () => {
+  const dir = project();
+  try {
+    mkdirSync(path.join(dir, "node_modules", ".bin"), { recursive: true });
+    writeFileSync(path.join(dir, "node_modules", ".bin", "agent-gate"), "#!/bin/sh\nexit 0\n");
+    const [, log] = collect();
+    writeHook(dir, { ...OPTS, task: "task.txt" }, log);
+    rmSync(path.join(dir, "node_modules"), { recursive: true, force: true });
+    const hook = path.join(dir, ".git", "hooks", "pre-commit");
+    // npx on PATH is a tripwire: if anything in the hook reaches for it, the run says so.
+    const bin = mkdtempSync(path.join(tmpdir(), "init-bin-"));
+    writeFileSync(path.join(bin, "npx"), "#!/bin/sh\necho NPX-WAS-CALLED >&2\nexit 0\n");
+    chmodSync(path.join(bin, "npx"), 0o755);
+    const r = spawnSync("bash", [hook], { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}` } });
+    rmSync(bin, { recursive: true, force: true });
+    assert.equal(r.status, 3, `exit ${r.status}; stderr: ${r.stderr}`);
+    assert.match(r.stderr, /not installed at \.\/node_modules\/\.bin\/agent-gate/);
+    assert.doesNotMatch(r.stderr, /NPX-WAS-CALLED/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a hook with the gate installed runs it and passes its exit code through", () => {
+  const dir = project();
+  try {
+    mkdirSync(path.join(dir, "node_modules", ".bin"), { recursive: true });
+    const gate = path.join(dir, "node_modules", ".bin", "agent-gate");
+    writeFileSync(gate, "#!/bin/sh\necho \"ran with: $*\"\nexit 1\n");
+    chmodSync(gate, 0o755);
+    const [, log] = collect();
+    writeHook(dir, { ...OPTS, task: "task.txt" }, log);
+    const r = spawnSync("bash", [path.join(dir, ".git", "hooks", "pre-commit")], { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    assert.equal(r.status, 1);
+    assert.match(r.stdout, /ran with: \. task\.txt --pre-commit/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("the hook runs with --pre-commit and the stanza does not", () => {
@@ -180,8 +221,57 @@ test("the installed command is what lands in a committed file", () => {
     mkdirSync(path.join(dir, "nested"), { recursive: true });
     mkdirSync(path.join(dir, "node_modules", ".bin"), { recursive: true });
     writeFileSync(path.join(dir, "node_modules", ".bin", "agent-gate"), "#!/bin/sh\n");
-    assert.match(validateCommand(path.join(dir, "nested"), "t.txt"), /^npx agent-gate/,
+    assert.equal(validateCommand(dir, "t.txt"), "./node_modules/.bin/agent-gate . t.txt");
+    assert.equal(validateCommand(path.join(dir, "nested"), "t.txt"), "../node_modules/.bin/agent-gate . t.txt",
       "found by walking up, as node would");
+    assert.equal(gateProgram(path.join(dir, "nested"), dir), "./node_modules/.bin/agent-gate",
+      "and written relative to where it will be run from");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// npx, given a name that is not installed, looks it up on the public registry, and assumes --yes
+// when stdin is not a TTY. The unscoped name is not ours. Nothing setup writes may route through it.
+test("nothing setup writes runs npx or npm exec", () => {
+  const dir = project();
+  try {
+    mkdirSync(path.join(dir, "node_modules", ".bin"), { recursive: true });
+    writeFileSync(path.join(dir, "node_modules", ".bin", "agent-gate"), "#!/bin/sh\n");
+    const [, log] = collect();
+    writeStanza(dir, { ...OPTS, task: "task.txt" }, log);
+    writeHook(dir, { ...OPTS, task: "task.txt" }, log);
+    for (const f of ["AGENTS.md", ".git/hooks/pre-commit"]) {
+      const body = readFileSync(path.join(dir, f), "utf8");
+      assert.doesNotMatch(body, /\bnpx\b|npm exec/, f);
+      assert.match(body, /\.\/node_modules\/\.bin\/agent-gate \. task\.txt/, f);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// Run, not read: the stanza's command where nobody has run `npm install`, stdin not a TTY, as in an
+// agent's shell. It must not exit 0 or 1, which are verdicts.
+test("the stanza's command, where the gate is not installed, exits 127 rather than with a verdict", () => {
+  const dir = project();
+  try {
+    mkdirSync(path.join(dir, "node_modules", ".bin"), { recursive: true });
+    writeFileSync(path.join(dir, "node_modules", ".bin", "agent-gate"), "#!/bin/sh\n");
+    const cmd = validateCommand(dir, "task.txt");
+    rmSync(path.join(dir, "node_modules"), { recursive: true, force: true });
+    const r = spawnSync("sh", ["-c", cmd], { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    assert.equal(r.status, 127, `exit ${r.status}; stderr: ${r.stderr}`);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("in a subdirectory of a repository, the hook names the gate relative to the top", () => {
+  // The hook cd's to the top of the repository before it runs anything.
+  const dir = project();
+  try {
+    const sub = path.join(dir, "services", "api");
+    mkdirSync(path.join(sub, "node_modules", ".bin"), { recursive: true });
+    writeFileSync(path.join(sub, "node_modules", ".bin", "agent-gate"), "#!/bin/sh\n");
+    const [, log] = collect();
+    writeHook(sub, OPTS, log);
+    const hook = readFileSync(path.join(dir, ".git", "hooks", "pre-commit"), "utf8");
+    assert.match(hook, /^\.\/services\/api\/node_modules\/\.bin\/agent-gate \. --pre-commit$/m);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -302,7 +392,43 @@ test("upgrade repoints a control whose install moved", () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// What v1.1.16 wrote: npx in the stanza, and a hook whose guard checked for npx itself.
+const V116_STANZA = "<!-- agent-gate:start v1.1.16 -->\n## Security gate\n\n    npx agent-gate . task.txt\n\nold words\n<!-- agent-gate:end -->\n";
+const V116_HOOK = [
+  "#!/usr/bin/env bash",
+  "# Installed by agent-gate-init v1.1.16. Blocks a commit whose tree does not pass the gate.",
+  'cd "$(git rev-parse --show-toplevel)" || exit 1',
+  "if ! npx --help >/dev/null 2>&1 && ! command -v npx >/dev/null 2>&1; then",
+  "  exit 1",
+  "fi",
+  "npx agent-gate . task.txt --pre-commit",
+  "",
+].join("\n");
+
+test("upgrade moves a v1.1.16 stanza and hook off npx, keeping the task file", () => {
+  const dir = project({ "AGENTS.md": V116_STANZA });
+  try {
+    mkdirSync(path.join(dir, "node_modules", ".bin"), { recursive: true });
+    writeFileSync(path.join(dir, "node_modules", ".bin", "agent-gate"), "#!/bin/sh\n");
+    mkdirSync(path.join(dir, ".git", "hooks"), { recursive: true });
+    writeFileSync(path.join(dir, ".git", "hooks", "pre-commit"), V116_HOOK);
+    const [seen, log] = collect();
+    upgradeStanza(dir, OPTS, log);
+    upgradeHook(dir, OPTS, log);
+    const stanza = readFileSync(path.join(dir, "AGENTS.md"), "utf8");
+    const hook = readFileSync(path.join(dir, ".git", "hooks", "pre-commit"), "utf8");
+    assert.match(stanza, /^    \.\/node_modules\/\.bin\/agent-gate \. task\.txt$/m);
+    assert.match(stanza, /prints no `BLOCKING` line did not run the gate/);
+    assert.match(hook, /^\.\/node_modules\/\.bin\/agent-gate \. task\.txt --pre-commit$/m);
+    for (const body of [stanza, hook]) assert.doesNotMatch(body, /\bnpx\b/);
+    assert.deepEqual(seen.updated.map((m) => m.replace(/ → .*/, "")), ["AGENTS.md: stanza v1.1.16", "pre-commit hook: v1.1.16"]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("recoverTask reads back the task file setup was given", () => {
+  assert.equal(recoverTask("    ./node_modules/.bin/agent-gate . task.txt"), "task.txt");
+  assert.equal(recoverTask("../../node_modules/.bin/agent-gate . specs/t.md --pre-commit"), "specs/t.md");
+  assert.equal(recoverTask("./node_modules/.bin/agent-gate . --pre-commit"), null);
   assert.equal(recoverTask("    npx agent-gate . task.txt"), "task.txt");
   assert.equal(recoverTask("npx agent-gate . specs/task.md --pre-commit"), "specs/task.md");
   assert.equal(recoverTask("node /x/bin/validate.mjs . t.txt --pre-commit"), "t.txt");
